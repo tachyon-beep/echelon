@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Echelon Replay Viewer</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; color: #eee; font-family: sans-serif; }
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 5px; }
+        #controls { margin-top: 10px; }
+        input[type="range"] { width: 300px; }
+        button { cursor: pointer; padding: 5px 10px; background: #333; color: #fff; border: 1px solid #555; }
+        button:hover { background: #444; }
+        #stats { margin-top: 5px; font-size: 0.9em; color: #aaa; }
+    </style>
+    <!-- Import Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="ui">
+        <h3>Echelon Replay Viewer</h3>
+        <div style="margin-bottom: 10px;">
+            <strong>Local:</strong> <input type="file" id="fileInput" accept=".json">
+        </div>
+        <div style="margin-bottom: 10px;">
+            <strong>Server:</strong>
+            <select id="serverFileList">
+                <option value="">-- Select a Replay --</option>
+            </select>
+            <button id="refreshBtn">↻</button>
+            <button id="loadServerBtn">Load</button>
+        </div>
+        <div id="controls" style="display:none;">
+            <button id="playPause">Play</button>
+            <input type="range" id="timeSlider" min="0" max="100" step="0.1" value="0">
+            <span id="timeDisplay">0.0s</span>
+            <div id="stats"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let replayData = null;
+        let isPlaying = false;
+        let currentTime = 0;
+        let maxTime = 0;
+        let playbackSpeed = 1.0;
+        let lastFrameTime = 0;
+
+        // Objects
+        let mechMeshes = {}; // {id: mesh}
+        let wallMesh = null;
+        let laserLines = [];
+        let missileMeshes = [];
+        let paintHelpers = {}; // {id: wireframeBox}
+
+        // Config
+        const VOXEL_SIZE = 1.0; // Visual scale
+        const TEAM_COLORS = { "blue": 0x3388ff, "red": 0xff3333 };
+        const MECH_SIZES = {
+            "light": [0.6, 0.6, 1.0],
+            "medium": [1.0, 1.0, 1.0],
+            "heavy": [1.5, 1.5, 2.0]
+        };
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a1a);
+            scene.fog = new THREE.Fog(0x1a1a1a, 20, 100);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(-10, -10, 20);
+            camera.up.set(0, 0, 1); // Z-up
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            // Lights
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            hemiLight.position.set(0, 0, 50);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+            dirLight.position.set(50, 50, 100);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            // Grid - Initial placeholder, will resize on load
+            const gridHelper = new THREE.GridHelper(40, 40, 0x444444, 0x222222);
+            gridHelper.rotation.x = Math.PI / 2;
+            gridHelper.position.set(20, 20, 0); // Center placeholder
+            scene.add(gridHelper);
+            window.gridHelper = gridHelper;
+
+            // WebSocket connection
+            connectWebSocket();
+            
+            // Initial fetch of server files
+            fetchFileList();
+
+            // UI Listeners
+            document.getElementById('fileInput').addEventListener('change', handleFileSelect, false);
+            document.getElementById('refreshBtn').addEventListener('click', fetchFileList);
+            document.getElementById('loadServerBtn').addEventListener('click', loadServerReplay);
+
+            document.getElementById('playPause').addEventListener('click', togglePlay);
+            document.getElementById('timeSlider').addEventListener('input', (e) => {
+                currentTime = parseFloat(e.target.value);
+                updateScene(currentTime);
+                isPlaying = false;
+                document.getElementById('playPause').innerText = "Play";
+            });
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function fetchFileList() {
+            fetch('/replays')
+                .then(response => response.json())
+                .then(files => {
+                    const sel = document.getElementById('serverFileList');
+                    sel.innerHTML = '<option value="">-- Select a Replay --</option>';
+                    files.forEach(f => {
+                        const opt = document.createElement('option');
+                        opt.value = f.path;
+                        opt.innerText = f.name;
+                        sel.appendChild(opt);
+                    });
+                })
+                .catch(err => console.error("Failed to fetch replays:", err));
+        }
+
+        function loadServerReplay() {
+            const path = document.getElementById('serverFileList').value;
+            if (!path) return;
+            
+            fetch('/replays/' + path)
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Loaded server replay:", path);
+                    replayData = data;
+                    setupReplay();
+                })
+                .catch(err => alert("Error loading replay: " + err));
+        }
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+            
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'replay') {
+                    console.log("Received new replay via WebSocket");
+                    replayData = msg.data;
+                    setupReplay();
+                    // Auto play new arrivals?
+                    isPlaying = true;
+                    document.getElementById('playPause').innerText = "Pause";
+                }
+            };
+
+            ws.onclose = () => {
+                console.log("WebSocket closed. Retrying in 5s...");
+                setTimeout(connectWebSocket, 5000);
+            };
+        }
+
+        function handleFileSelect(evt) {
+            const file = evt.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    replayData = JSON.parse(e.target.result);
+                    setupReplay();
+                } catch (err) {
+                    alert("Error parsing JSON: " + err);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function setupReplay() {
+            if (!replayData || !replayData.frames || replayData.frames.length === 0) return;
+
+            // Clean up old scene
+            if (wallMesh) scene.remove(wallMesh);
+            Object.values(mechMeshes).forEach(m => scene.remove(m));
+            mechMeshes = {};
+            laserLines.forEach(l => scene.remove(l));
+            laserLines = [];
+            missileMeshes.forEach(m => scene.remove(m));
+            missileMeshes = [];
+            Object.values(paintHelpers).forEach(h => scene.remove(h));
+            paintHelpers = {};
+
+            // Parse World
+            if (replayData.world) {
+                // Resize Grid
+                if (window.gridHelper) scene.remove(window.gridHelper);
+                const wx = replayData.world.size[0];
+                const wy = replayData.world.size[1];
+                const maxDim = Math.max(wx, wy);
+                
+                window.gridHelper = new THREE.GridHelper(maxDim, maxDim, 0x444444, 0x222222);
+                window.gridHelper.rotation.x = Math.PI / 2;
+                // Three.js grid is centered at 0,0. Our world is 0..wx, 0..wy.
+                // So we center the grid at wx/2, wy/2.
+                window.gridHelper.position.set(wx/2, wy/2, 0);
+                scene.add(window.gridHelper);
+
+                // Re-center camera if first load
+                controls.target.set(wx/2, wy/2, 0);
+
+                if (replayData.world.walls) {
+                    const geometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+                    const material = new THREE.MeshLambertMaterial({ color: 0x555555 });
+                wallMesh = new THREE.InstancedMesh(geometry, material, replayData.world.walls.length);
+                
+                const matrix = new THREE.Matrix4();
+                replayData.world.walls.forEach((w, i) => {
+                    // w is [x, y, z]
+                    matrix.setPosition(w[0] + 0.5, w[1] + 0.5, w[2] + 0.5);
+                    wallMesh.setMatrixAt(i, matrix);
+                });
+                scene.add(wallMesh);
+            }
+            }
+
+            // Init timeline
+            const frames = replayData.frames;
+            maxTime = frames[frames.length - 1].t;
+            currentTime = 0;
+            
+            document.getElementById('timeSlider').max = maxTime;
+            document.getElementById('controls').style.display = 'block';
+
+            // Init Mechs (from first frame that has them)
+            const firstFrame = frames[0];
+            for (const [id, state] of Object.entries(firstFrame.mechs)) {
+                const sz = MECH_SIZES[state.class] || [1, 1, 1];
+                const geo = new THREE.BoxGeometry(sz[0], sz[1], sz[2]);
+                const mat = new THREE.MeshStandardMaterial({ 
+                    color: TEAM_COLORS[state.team] || 0xffffff,
+                    roughness: 0.7, metalness: 0.3 
+                });
+                const mesh = new THREE.Mesh(geo, mat);
+                
+                // Direction indicator
+                const nose = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.2, 0.5, 0.2), 
+                    new THREE.MeshBasicMaterial({color: 0xffff00})
+                );
+                nose.position.y = sz[1]/2;
+                nose.position.z = sz[2]/2;
+                mesh.add(nose);
+
+                scene.add(mesh);
+                mechMeshes[id] = mesh;
+
+                // Paint Helper
+                const edges = new THREE.EdgesGeometry(geo);
+                const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xff00ff }));
+                line.visible = false;
+                scene.add(line);
+                paintHelpers[id] = line;
+            }
+
+            updateScene(0);
+        }
+
+        function togglePlay() {
+            isPlaying = !isPlaying;
+            document.getElementById('playPause').innerText = isPlaying ? "Pause" : "Play";
+        }
+
+        function updateScene(time) {
+            if (!replayData) return;
+            
+            // Find frame
+            // Simple linear search is fine for short replays
+            const frames = replayData.frames;
+            let frame = frames[0];
+            for (let i = 0; i < frames.length - 1; i++) {
+                if (time >= frames[i].t && time < frames[i+1].t) {
+                    frame = frames[i];
+                    break;
+                }
+            }
+            if (time >= frames[frames.length - 1].t) frame = frames[frames.length - 1];
+
+            document.getElementById('timeDisplay').innerText = time.toFixed(2) + "s / " + maxTime.toFixed(2) + "s";
+            
+            // Update Mechs
+            for (const [id, state] of Object.entries(frame.mechs)) {
+                const mesh = mechMeshes[id];
+                if (mesh) {
+                    mesh.visible = state.alive;
+                    mesh.position.set(state.pos[0], state.pos[1], state.pos[2]);
+                    mesh.rotation.z = state.yaw - Math.PI/2; // Adjust for model orientation if needed
+                    
+                    // Show painted status
+                    // We don't have "is_painted" in basic mech state in replay yet? 
+                    // Actually we added it to OBS, but maybe not to replay state dump.
+                    // The ENV replay_frame function saves: team, class, pos, vel, yaw, hp, heat, alive.
+                    // It does NOT save painted status. 
+                    // We can infer it from 'paint' events if we want, but for now we'll skip visualizing paint status unless we add it to replay frame.
+                }
+            }
+
+            // Events (Lasers/Missiles)
+            // Show events that happened in the last 0.1s
+            const recentEvents = frame.events || [];
+            
+            // Clear old ephemeral FX
+            laserLines.forEach(l => scene.remove(l));
+            laserLines = [];
+            
+            // Rebuild
+            recentEvents.forEach(ev => {
+                if (ev.type === 'laser_hit' || ev.type === 'laser_miss') { // We only log hits currently
+                    const shooter = frame.mechs[ev.shooter];
+                    const target = frame.mechs[ev.target];
+                    if (shooter && target) {
+                        const mat = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 });
+                        const pts = [];
+                        pts.push(new THREE.Vector3(...shooter.pos));
+                        pts.push(new THREE.Vector3(...target.pos));
+                        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+                        const line = new THREE.Line(geo, mat);
+                        scene.add(line);
+                        laserLines.push(line);
+                    }
+                }
+                // Missiles are harder without state tracking in replay, 
+                // but we can show launches.
+                // Ideally we'd visualize the projectiles list from Sim, but that's not in replay.
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isPlaying && replayData) {
+                const now = performance.now();
+                const delta = (now - lastFrameTime) / 1000;
+                lastFrameTime = now;
+                
+                // Clamping delta to avoid jumps
+                if (delta < 0.2) {
+                    currentTime += delta * playbackSpeed;
+                    if (currentTime > maxTime) {
+                        currentTime = 0; // Loop or stop
+                        // isPlaying = false; 
+                    }
+                    document.getElementById('timeSlider').value = currentTime;
+                    updateScene(currentTime);
+                }
+            } else {
+                lastFrameTime = performance.now();
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
