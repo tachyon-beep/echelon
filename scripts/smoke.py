@@ -36,17 +36,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--num-per-team", type=int, default=2)
+    parser.add_argument("--packs-per-team", type=int, default=1)
     parser.add_argument("--size", type=int, default=20, help="World size (x=y=z)")
     parser.add_argument("--mode", type=str, default="full", choices=["full", "partial"])
+    parser.add_argument("--comm-dim", type=int, default=8, help="Pack-local comm message size (0 disables)")
     parser.add_argument("--record", action="store_true", help="Record replay frames to JSON")
     parser.add_argument("--out", type=str, default="runs/smoke", help="Output directory for replays")
     args = parser.parse_args()
 
     cfg = EnvConfig(
         world=WorldConfig(size_x=args.size, size_y=args.size, size_z=args.size),
-        num_per_team=args.num_per_team,
+        num_packs=args.packs_per_team,
         observation_mode=args.mode,
+        comm_dim=args.comm_dim,
         record_replay=args.record,
         seed=args.seed,
         max_episode_seconds=30.0,

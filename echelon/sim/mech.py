@@ -17,11 +17,18 @@ class MechState:
     yaw: float  # radians
 
     hp: float
+    leg_hp: float
     heat: float
+    stability: float
+    max_stability: float = 100.0
+    fallen_time: float = 0.0 # >0 means fallen/stunned
+    
     laser_cooldown: float = 0.0
     missile_cooldown: float = 0.0
+    kinetic_cooldown: float = 0.0
     painter_cooldown: float = 0.0
     painted_remaining: float = 0.0
+    last_painter_id: str | None = None
     alive: bool = True
 
     # Per-decision-step scratch.
@@ -30,6 +37,10 @@ class MechState:
     kills: int = 0
     died: bool = False
     was_hit: bool = False
+
+    @property
+    def is_legged(self) -> bool:
+        return self.leg_hp <= 0.0
 
     def reset_step_stats(self) -> None:
         self.took_damage = 0.0

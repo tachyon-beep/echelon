@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -11,6 +12,7 @@ from ..config import WorldConfig
 class VoxelWorld:
     solid: np.ndarray  # bool[sz, sy, sx] (z-major)
     voxel_size_m: float = 5.0
+    meta: dict[str, Any] = field(default_factory=dict)
 
     @property
     def size_z(self) -> int:
@@ -89,26 +91,75 @@ class VoxelWorld:
                 py = y0 + (y1 - y0) * t
                 min_x, max_x = int(px - half_w), int(px + half_w + 1)
                 min_y, max_y = int(py - half_w), int(py + half_w + 1)
-                world.set_box_solid(min_x, min_y, 0, max_x, max_y, 4, False)
+                world.set_box_solid(min_x, min_y, 0, max_x, max_y, world.size_z, False)
 
         # Select Archetype
         archetype = rng.integers(0, 3)
         # archetype = 0 # Force Citadel (Debug)
+        archetype_i = int(archetype)
+        world.meta["archetype"] = archetype_i
+        world.meta["archetype_name"] = {0: "citadel", 1: "urban_grid", 2: "highway"}.get(archetype_i, "unknown")
         
         # Common Scatter Config
         cx, cy = config.size_x // 2, config.size_y // 2
+        area = config.size_x * config.size_y
         
         if archetype == 0: # CITADEL (Central Keep + X Roads)
-            # Dense Central Keep
-            keep_radius = max(5, int(min(config.size_x, config.size_y) * 0.15))
-            for _ in range(12): 
-                sx, sy, sz = rng.integers(3, 10), rng.integers(3, 10), rng.integers(3, max(4, config.size_z // 2))
+            # Roads first? No, carve last to clear scatter.
+            # But Keep blocks must NOT be on the road lines or they float.
+            
+            road_width = 8.0
+            
+            # Helper to check if a box overlaps the X-Roads
+            def overlaps_road(bx, by, bw, bh):
+                # Check 4 corners of box against lines
+                # Line 1: y = (cy/cx)*x  (approx)
+                # Line 2: y = size_y - (cy/cx)*x
+                # Simplification: Just avoid the exact center axes +- road width?
+                # The X roads go corner-to-center. 
+                # Let's just avoid the diagonal bands.
+                
+                # Check center of box
+                bcx, bcy = bx + bw/2, by + bh/2
+                
+                # Dist to Diag 1 (y=x for square map)
+                # |Ax + By + C| / sqrt(A^2+B^2). 
+                # Line: -height*x + width*y = 0.
+                # Just simplified: abs(bcy/size_y - bcx/size_x) < threshold
+                
+                norm_x = bcx / config.size_x
+                norm_y = bcy / config.size_y
+                
+                # Main Diag (BL to TR)
+                if abs(norm_y - norm_x) < 0.15: return True
+                # Anti Diag (TL to BR)
+                if abs(norm_y - (1.0 - norm_x)) < 0.15: return True
+                
+                return False
+
+            keep_radius = max(5, int(min(config.size_x, config.size_y) * 0.25)) # Increased radius
+            
+            # Scale count by area. 100x100=10000 -> 12 blocks. 50x50=2500 -> 3 blocks (Too few).
+            # Let's aim for density.
+            num_keep_blocks = int(area * 0.002) # 20 blocks for 100x100
+            
+            placed_k = 0
+            attempts_k = 0
+            while placed_k < num_keep_blocks and attempts_k < 1000:
+                attempts_k += 1
+                sx, sy, sz = rng.integers(4, 12), rng.integers(4, 12), rng.integers(4, max(5, config.size_z - 2))
+                
                 ix = int(rng.integers(cx - keep_radius, cx + keep_radius - sx + 1))
                 iy = int(rng.integers(cy - keep_radius, cy + keep_radius - sy + 1))
-                world.set_box_solid(ix, iy, 0, ix + sx, iy + sy, sz, True)
+                
+                # Clamp to bounds
+                if ix < 0 or iy < 0 or ix+sx > config.size_x or iy+sy > config.size_y: continue
+
+                if not overlaps_road(ix, iy, sx, sy):
+                    world.set_box_solid(ix, iy, 0, ix + sx, iy + sy, sz, True)
+                    placed_k += 1
             
             # Roads: X-Shape
-            road_width = 8.0
             carve_line(0, 0, cx, cy, road_width)
             carve_line(config.size_x, 0, cx, cy, road_width)
             carve_line(0, config.size_y, cx, cy, road_width)
@@ -116,60 +167,98 @@ class VoxelWorld:
             
         elif archetype == 1: # URBAN GRID (Regular Blocks)
             # Create a grid of city blocks
-            block_size = 12
-            street_width = 6
+            # Scale block size to map size? 
+            # 12 is nice for gameplay.
+            # If map is small (<60), use smaller blocks.
+            if config.size_x < 60:
+                block_size = 8
+                street_width = 4
+            else:
+                block_size = 12
+                street_width = 6
+                
             step = block_size + street_width
             
             for y in range(0, config.size_y, step):
                 for x in range(0, config.size_x, step):
-                    # For each "city block", fill it with buildings
-                    # Chance to leave empty for open plaza
-                    if rng.random() > 0.8: continue
+                    if rng.random() > 0.9: continue 
                     
-                    # Fill block with 1-3 buildings
-                    for _ in range(rng.integers(1, 4)):
-                        bx = x + rng.integers(0, 4)
-                        by = y + rng.integers(0, 4)
-                        bw = rng.integers(4, block_size - 2)
-                        bh = rng.integers(4, block_size - 2)
-                        bz = rng.integers(3, max(5, config.size_z // 2))
+                    # Fill block with 2-5 buildings
+                    for _ in range(rng.integers(2, 6)):
+                        bx = x + rng.integers(0, max(1, block_size//3))
+                        by = y + rng.integers(0, max(1, block_size//3))
+                        bw = rng.integers(3, block_size - 1)
+                        bh = rng.integers(3, block_size - 1)
+                        # Ensure it fits in "block"
+                        if bx + bw > x + block_size: bw = x + block_size - bx
+                        if by + bh > y + block_size: bh = y + block_size - by
+                        
+                        bz = rng.integers(5, max(8, config.size_z - 2)) 
                         world.set_box_solid(bx, by, 0, bx + bw, by + bh, bz, True)
 
         elif archetype == 2: # HIGHWAY (Diagonal Split)
             # Main heavy diagonal road
             road_width = 12.0
-            carve_line(0, 0, config.size_x, config.size_y, road_width)
+            if config.size_x < 60: road_width = 8.0
+            
+            # Randomize diagonal direction to avoid consistent quadrant bias.
+            # 0: BL->TR, 1: TL->BR
+            diag = int(rng.integers(0, 2))
+            world.meta["highway_diagonal"] = diag
+            world.meta["highway_road_width"] = float(road_width)
+
+            if diag == 0:
+                carve_line(0, 0, config.size_x, config.size_y, road_width)
+                # Line through (0,0) and (size_x, size_y): size_y*x - size_x*y = 0
+                A = float(config.size_y)
+                B = -float(config.size_x)
+                C = 0.0
+            else:
+                carve_line(0, config.size_y, config.size_x, 0, road_width)
+                # Line through (0,size_y) and (size_x,0): size_y*x + size_x*y - size_x*size_y = 0
+                A = float(config.size_y)
+                B = float(config.size_x)
+                C = -float(config.size_x * config.size_y)
+            denom = float(np.hypot(A, B))
             
             # Heavy industrial noise everywhere else
-            num_blocks = int(config.size_x * config.size_y * 0.02) # Dense
+            num_blocks = int(area * 0.04)
             for _ in range(num_blocks):
-                sx, sy = rng.integers(2, 6), rng.integers(2, 6)
-                sz = rng.integers(2, 8)
-                ix = rng.integers(0, config.size_x - sx)
-                iy = rng.integers(0, config.size_y - sy)
-                # Don't block the highway (approx check)
-                # Distance from point to line x=y
-                dist = abs(ix - iy) / 1.414
+                sx, sy = rng.integers(3, 8), rng.integers(3, 8)
+                sz = rng.integers(3, 12)
+                max_ix0 = config.size_x - int(sx)
+                max_iy0 = config.size_y - int(sy)
+                if max_ix0 < 0 or max_iy0 < 0:
+                    continue
+                ix = int(rng.integers(0, max_ix0 + 1))
+                iy = int(rng.integers(0, max_iy0 + 1))
+
+                cx0 = float(ix) + float(sx) * 0.5
+                cy0 = float(iy) + float(sy) * 0.5
+                dist = abs(A * cx0 + B * cy0 + C) / denom if denom > 0.0 else 0.0
                 if dist > road_width / 2 + 2:
                     world.set_box_solid(ix, iy, 0, ix + sx, iy + sy, sz, True)
 
         # General Scatter (Applied to all maps to add cover to open areas)
-        sparse_fill = config.obstacle_fill * 0.3
-        target_solids = int(sparse_fill * config.size_x * config.size_y * max(1, config.size_z // 3))
+        # Reduced density for Urban Grid to preserve streets
+        scatter_factor = 0.8
+        if archetype == 1: scatter_factor = 0.2 # Keep streets clear
+        
+        sparse_fill = config.obstacle_fill * scatter_factor
+        target_solids = int(sparse_fill * area * max(1, config.size_z // 3))
+
         placed = 0
         attempts = 0
         while placed < target_solids and attempts < target_solids * 50:
             attempts += 1
             sx, sy, sz = rng.integers(2, 5), rng.integers(2, 5), rng.integers(2, 5)
-            ix = int(rng.integers(0, max(1, config.size_x - sx)))
-            iy = int(rng.integers(0, max(1, config.size_y - sy)))
-            
-            # Re-carve roads after scatter to ensure they stay clear? 
-            # Better to just check collision with existing solid?
-            # For simplicity, we just add scatter. 
-            # If it blocks a road, that's "debris". 
-            # But for Citadel/Highway, we really want clear roads.
-            
+            max_ix0 = config.size_x - int(sx)
+            max_iy0 = config.size_y - int(sy)
+            if max_ix0 < 0 or max_iy0 < 0:
+                continue
+            ix = int(rng.integers(0, max_ix0 + 1))
+            iy = int(rng.integers(0, max_iy0 + 1))
+
             before = np.count_nonzero(world.solid[0:sz, iy:iy+sy, ix:ix+sx])
             world.set_box_solid(ix, iy, 0, ix + sx, iy + sy, sz, True)
             after = np.count_nonzero(world.solid[0:sz, iy:iy+sy, ix:ix+sx])
@@ -182,8 +271,26 @@ class VoxelWorld:
             carve_line(config.size_x, 0, cx, cy, road_width)
             carve_line(0, config.size_y, cx, cy, road_width)
             carve_line(config.size_x, config.size_y, cx, cy, road_width)
+        elif archetype == 1:
+            # Re-carve grid streets
+            if config.size_x < 60:
+                block_size, street_width = 8, 4
+            else:
+                block_size, street_width = 12, 6
+            step = block_size + street_width
+            # Vertical streets
+            for x in range(block_size, config.size_x, step):
+                carve_line(x, 0, x, config.size_y, float(street_width))
+            # Horizontal streets
+            for y in range(block_size, config.size_y, step):
+                carve_line(0, y, config.size_x, y, float(street_width))
+                
         elif archetype == 2:
-            carve_line(0, 0, config.size_x, config.size_y, 12.0)
+            road_width = float(world.meta.get("highway_road_width", 12.0))
+            diag = int(world.meta.get("highway_diagonal", 0))
+            if diag == 0:
+                carve_line(0, 0, config.size_x, config.size_y, road_width)
+            else:
+                carve_line(0, config.size_y, config.size_x, 0, road_width)
 
         return world
-

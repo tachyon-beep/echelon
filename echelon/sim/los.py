@@ -14,12 +14,19 @@ class RaycastHit:
     blocked_voxel: tuple[int, int, int] | None
 
 
-def raycast_voxels(world: VoxelWorld, start_xyz: np.ndarray, end_xyz: np.ndarray) -> RaycastHit:
+def raycast_voxels(
+    world: VoxelWorld,
+    start_xyz: np.ndarray,
+    end_xyz: np.ndarray,
+    *,
+    include_end: bool = False,
+) -> RaycastHit:
     """
     Fast voxel traversal (3D DDA) from start to end.
 
     Notes:
-    - The start and end voxels are not treated as blockers; only intervening voxels.
+    - The start voxel is not treated as a blocker; only intervening voxels.
+    - The end voxel is ignored by default, but can be included via include_end=True.
     - Out-of-bounds is treated as blocked.
     """
     start = np.asarray(start_xyz, dtype=np.float64)
@@ -97,7 +104,9 @@ def raycast_voxels(world: VoxelWorld, start_xyz: np.ndarray, end_xyz: np.ndarray
             t_max_z += t_delta_z
 
         current = (x, y, z)
-        if current == start_voxel or current == end_voxel:
+        if current == start_voxel:
+            continue
+        if (not include_end) and current == end_voxel:
             continue
         if world.is_solid_index(x, y, z):
             return RaycastHit(blocked=True, blocked_voxel=current)
@@ -108,4 +117,3 @@ def raycast_voxels(world: VoxelWorld, start_xyz: np.ndarray, end_xyz: np.ndarray
 
 def has_los(world: VoxelWorld, start_xyz: np.ndarray, end_xyz: np.ndarray) -> bool:
     return not raycast_voxels(world, start_xyz, end_xyz).blocked
-

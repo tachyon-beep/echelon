@@ -5,7 +5,7 @@ Goal: a lightweight, long-running DRL “tactics” demo with thin visualization
 ## Game concept
 
 - Simple voxel arena for cover/terrain + objectives, but with **continuous real-time** movement (not 2D tile-step / turn-based).
-- 5v5 mech squads (initially smaller in curriculum; scale up later).
+- Pack vs pack (10 mechs per pack; start smaller in curriculum; scale up later).
 - Fixed-timestep real-time simulation; no human in the loop.
 - Intended to produce legible tactical behavior (take/hold cover, focus fire, flank, area denial).
 
@@ -75,6 +75,21 @@ Feasible and potentially useful; implement as **variable-duration steps (SMDP)**
 - PPO with an LSTM (or similar recurrent core) to handle partial observability and non-determinism.
 - Keep an LSTM hidden state **per mech**; reset on episode end; mask properly on `done`.
 - Train with sequence minibatches (truncated BPTT); optionally feed `prev_action` (and sometimes `prev_reward`) into the recurrent core.
+
+## Observation model (current)
+
+The env emits a fixed-size vector per mech consisting of:
+
+- **Top-K contact table**: up to 5 visible contacts, each with rel position/velocity, yaw, hp/heat/stability, class, relation (friendly/hostile/neutral), paint flag, and a `visible` bit.
+  - Slot quotas (with repurposing): 3× friendly, 1× hostile, 1× neutral; unused slots are filled from other categories (hostiles first).
+- **Pack comm board**: last messages from packmates only (`PACK_SIZE * comm_dim` floats, 1 decision-tick delayed).
+- **Self/objective scalars**: threat + status + objective UI (weapon cooldowns, self velocity, zone vector/radius, zone control, zone score progress, time fraction).
+  - Includes the current contact selector settings: sort mode one-hot (closest/biggest/most_damaged) + hostile-only filter flag.
+
+Visibility rules in `observation_mode="partial"`:
+
+- There is no pack/team “telemetry omniscience”: other mechs are visible only if **(LOS)** or within a short **radar range**; opponents can also become visible if **painted by your pack**.
+- Otherwise their dynamic fields are zeroed and `visible=0` (and team/class are treated as unknown until visible).
 
 ### Self-play league / “nicknamed” policies
 

@@ -42,6 +42,14 @@
             <span id="timeDisplay">0.0s</span>
             <div id="stats"></div>
         </div>
+        <div id="infoPanel" style="margin-top: 10px; border-top: 1px solid #555; padding-top: 5px; font-size: 0.9em; display: none;">
+            <strong>SELECTED:</strong> <span id="selId">None</span><br>
+            Class: <span id="selClass">-</span><br>
+            HP: <span id="selHp">-</span> / <span id="selMaxHp">-</span><br>
+            Heat: <span id="selHeat">-</span><br>
+            Stab: <span id="selStab">-</span><br>
+            State: <span id="selState">-</span>
+        </div>
     </div>
 
     <script type="module">
@@ -59,18 +67,27 @@
         // Objects
         let mechMeshes = {}; // {id: mesh}
         let wallMesh = null;
+        let captureZoneMesh = null;
         let laserLines = [];
         let missileMeshes = [];
         let paintHelpers = {}; // {id: wireframeBox}
+        let statusBars = {}; // {id: {hp: mesh, stab: mesh, heat: mesh, group: Object3D}}
+        let floaters = []; // [{mesh, vel, life}]
 
         // Config
         const VOXEL_SIZE = 1.0; // Visual scale
-        const TEAM_COLORS = { "blue": 0x3388ff, "red": 0xff3333 };
-        const MECH_SIZES = {
-            "light": [0.6, 0.6, 1.0],
-            "medium": [1.0, 1.0, 1.0],
-            "heavy": [1.5, 1.5, 2.0]
-        };
+	        const TEAM_COLORS = { "blue": 0x3388ff, "red": 0xff3333 };
+	        const MECH_SIZES = {
+	            "light": [0.6, 0.6, 1.0],
+	            "medium": [1.0, 1.0, 1.0],
+	            "heavy": [1.5, 1.5, 2.0]
+	        };
+	        // Sim mech positions are AABB centers; these are the sim half-heights so models sit on z=0.
+	        const MECH_HALF_HEIGHTS = { "light": 1.0, "medium": 1.5, "heavy": 2.0 };
+
+        let selectedMechId = null;
+        let raycaster = new THREE.Raycaster();
+        let mouse = new THREE.Vector2();
 
         init();
         animate();
@@ -114,7 +131,7 @@
 
             // WebSocket connection
             connectWebSocket();
-            
+
             // Initial fetch of server files
             fetchFileList();
 
@@ -131,6 +148,47 @@
                 document.getElementById('playPause').innerText = "Play";
             });
             window.addEventListener('resize', onWindowResize);
+
+            // Add click listener
+            renderer.domElement.addEventListener('pointerdown', onPointerDown, false);
+        }
+        
+        function onPointerDown(event) {
+            // Calculate mouse position
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            
+            // Check intersection with mech meshes
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            
+            // Find first parent that is a mech group
+            let found = null;
+            for (let hit of intersects) {
+                // Traverse up to find the group in mechMeshes
+                let obj = hit.object;
+                while (obj) {
+                    // Check if obj is one of our mech groups
+                    for (const [mid, mesh] of Object.entries(mechMeshes)) {
+                        if (mesh === obj) {
+                            found = mid;
+                            break;
+                        }
+                    }
+                    if (found) break;
+                    obj = obj.parent;
+                }
+                if (found) break;
+            }
+            
+            selectedMechId = found;
+            const panel = document.getElementById('infoPanel');
+            panel.style.display = found ? 'block' : 'none';
+            if (!found) {
+                // Clear selection visual?
+            }
         }
 
         function fetchFileList() {
@@ -199,22 +257,27 @@
             reader.readAsText(file);
         }
 
-        function setupReplay() {
-            if (!replayData || !replayData.frames || replayData.frames.length === 0) return;
+	        function setupReplay() {
+	            if (!replayData || !replayData.frames || replayData.frames.length === 0) return;
 
-            // Clean up old scene
-            if (wallMesh) scene.remove(wallMesh);
-            Object.values(mechMeshes).forEach(m => scene.remove(m));
-            mechMeshes = {};
-            laserLines.forEach(l => scene.remove(l));
-            laserLines = [];
-            missileMeshes.forEach(m => scene.remove(m));
-            missileMeshes = [];
-            Object.values(paintHelpers).forEach(h => scene.remove(h));
-            paintHelpers = {};
+	            // Clean up old scene
+	            if (wallMesh) scene.remove(wallMesh);
+	            if (captureZoneMesh) scene.remove(captureZoneMesh);
+	            Object.values(mechMeshes).forEach(m => scene.remove(m));
+	            mechMeshes = {};
+	            Object.values(statusBars).forEach(sb => scene.remove(sb.group));
+	            statusBars = {};
+	            laserLines.forEach(l => scene.remove(l));
+	            laserLines = [];
+	            missileMeshes.forEach(m => scene.remove(m));
+	            missileMeshes = [];
+	            Object.values(paintHelpers).forEach(h => scene.remove(h));
+	            paintHelpers = {};
+	            floaters.forEach(f => scene.remove(f.mesh));
+	            floaters = [];
 
-            // Parse World
-            if (replayData.world) {
+	            // Parse World
+	            if (replayData.world) {
                 // Resize Grid
                 if (window.gridHelper) scene.remove(window.gridHelper);
                 const wx = replayData.world.size[0];
@@ -223,13 +286,34 @@
                 
                 window.gridHelper = new THREE.GridHelper(maxDim, maxDim, 0x444444, 0x222222);
                 window.gridHelper.rotation.x = Math.PI / 2;
-                // Three.js grid is centered at 0,0. Our world is 0..wx, 0..wy.
-                // So we center the grid at wx/2, wy/2.
                 window.gridHelper.position.set(wx/2, wy/2, 0);
                 scene.add(window.gridHelper);
 
                 // Re-center camera if first load
-                controls.target.set(wx/2, wy/2, 0);
+                const meta = replayData.world.meta || {};
+                const cz = meta.capture_zone || null;
+                let czX = wx / 2;
+                let czY = wy / 2;
+                let czR = 15.0;
+                if (cz) {
+                    if (Array.isArray(cz.center) && cz.center.length >= 2) {
+                        czX = cz.center[0];
+                        czY = cz.center[1];
+                    }
+                    if (typeof cz.radius === 'number') {
+                        czR = cz.radius;
+                    }
+                }
+                controls.target.set(czX, czY, 0);
+
+                // Draw Capture Zone
+                const inner = Math.max(0.1, czR - 0.5);
+                const outer = Math.max(inner + 0.1, czR + 0.5);
+                const ringGeo = new THREE.RingGeometry(inner, outer, 48);
+                const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, side: THREE.DoubleSide, transparent: true, opacity: 0.5 });
+                captureZoneMesh = new THREE.Mesh(ringGeo, ringMat);
+                captureZoneMesh.position.set(czX, czY, 0.1);
+                scene.add(captureZoneMesh);
 
                 if (replayData.world.walls) {
                     const geometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
@@ -242,9 +326,26 @@
                     matrix.setPosition(w[0] + 0.5, w[1] + 0.5, w[2] + 0.5);
                     wallMesh.setMatrixAt(i, matrix);
                 });
+                wallMesh.instanceMatrix.needsUpdate = true;
+                wallMesh.frustumCulled = false;
                 scene.add(wallMesh);
             }
             }
+
+            // Metadata / stats
+            const meta = (replayData.world && replayData.world.meta) ? replayData.world.meta : {};
+            const seed = (replayData.world && replayData.world.seed !== undefined) ? replayData.world.seed : "n/a";
+            const archetype = meta.archetype_name || meta.archetype || "n/a";
+            const diag = (meta.highway_diagonal !== undefined) ? meta.highway_diagonal : null;
+            const transform = meta.transform || (meta.recipe && meta.recipe.variant && meta.recipe.variant.transform) || "n/a";
+            const spawns = meta.spawn_corners ? `${meta.spawn_corners.blue}/${meta.spawn_corners.red}` : "n/a";
+            const size = (replayData.world && replayData.world.size) ? replayData.world.size : null;
+            const sizeStr = size ? `${size[0]}x${size[1]}x${size[2]}` : "n/a";
+            const wallCount = (replayData.world && replayData.world.walls) ? replayData.world.walls.length : 0;
+            const czInfo = (meta.capture_zone && Array.isArray(meta.capture_zone.center) && typeof meta.capture_zone.radius === 'number')
+                ? ` zone=(${meta.capture_zone.center[0].toFixed(1)},${meta.capture_zone.center[1].toFixed(1)}) r=${meta.capture_zone.radius.toFixed(1)}`
+                : '';
+            document.getElementById('stats').innerText = `seed=${seed} archetype=${archetype}${diag !== null ? ` diag=${diag}` : ""} transform=${transform} spawns=${spawns} size=${sizeStr} walls=${wallCount}${czInfo}`;
 
             // Init timeline
             const frames = replayData.frames;
@@ -257,35 +358,149 @@
             // Init Mechs (from first frame that has them)
             const firstFrame = frames[0];
             for (const [id, state] of Object.entries(firstFrame.mechs)) {
-                const sz = MECH_SIZES[state.class] || [1, 1, 1];
-                const geo = new THREE.BoxGeometry(sz[0], sz[1], sz[2]);
-                const mat = new THREE.MeshStandardMaterial({ 
-                    color: TEAM_COLORS[state.team] || 0xffffff,
-                    roughness: 0.7, metalness: 0.3 
-                });
-                const mesh = new THREE.Mesh(geo, mat);
-                
-                // Direction indicator
-                const nose = new THREE.Mesh(
-                    new THREE.BoxGeometry(0.2, 0.5, 0.2), 
-                    new THREE.MeshBasicMaterial({color: 0xffff00})
-                );
-                nose.position.y = sz[1]/2;
-                nose.position.z = sz[2]/2;
-                mesh.add(nose);
-
+                const mesh = createMechMesh(state.class, state.team);
                 scene.add(mesh);
                 mechMeshes[id] = mesh;
 
                 // Paint Helper
+                // Simple box helper for now, scaled to approx size
+                const sz = MECH_SIZES[state.class];
+                const geo = new THREE.BoxGeometry(sz[0], sz[1], sz[2]);
                 const edges = new THREE.EdgesGeometry(geo);
                 const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xff00ff }));
                 line.visible = false;
                 scene.add(line);
                 paintHelpers[id] = line;
+
+                // Status Bar Group
+                const statGroup = new THREE.Group();
+                // HP (Green)
+                const hpBar = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.15), new THREE.MeshBasicMaterial({color: 0x00ff00}));
+                hpBar.position.set(0, 0.2, 0);
+                statGroup.add(hpBar);
+                // Stability (Blue)
+                const stabBar = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.15), new THREE.MeshBasicMaterial({color: 0x0088ff}));
+                stabBar.position.set(0, 0, 0);
+                statGroup.add(stabBar);
+                // Heat (Red)
+                const heatBar = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.15), new THREE.MeshBasicMaterial({color: 0xff0000}));
+                heatBar.position.set(0, -0.2, 0);
+                statGroup.add(heatBar);
+
+                statGroup.position.set(0, 0, MECH_SIZES[state.class][2] * 1.5);
+                scene.add(statGroup);
+                statusBars[id] = { group: statGroup, hp: hpBar, stab: stabBar, heat: heatBar };
             }
 
             updateScene(0);
+        }
+
+        function createMechMesh(cls, team) {
+            const group = new THREE.Group();
+            const color = TEAM_COLORS[team];
+            const matBody = new THREE.MeshStandardMaterial({ color: color, roughness: 0.7 });
+            const matDark = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.9 }); // Joints/Guns
+            const matCockpit = new THREE.MeshStandardMaterial({ color: 0x00ffff, emissive: 0x004444, roughness: 0.2 });
+
+            const sizes = MECH_SIZES[cls]; // [w, d, h]
+            const w = sizes[0], d = sizes[1], h = sizes[2];
+
+            if (cls === 'light') {
+                // LIGHT: Chicken Walker, Narrow
+                // Legs
+                const legGeo = new THREE.BoxGeometry(w*0.2, d*0.4, h*0.5);
+                const legL = new THREE.Mesh(legGeo, matDark);
+                legL.position.set(-w*0.25, 0, h*0.25);
+                const legR = new THREE.Mesh(legGeo, matDark);
+                legR.position.set(w*0.25, 0, h*0.25);
+                group.add(legL); group.add(legR);
+
+                // Torso
+                const torsoGeo = new THREE.BoxGeometry(w*0.6, d*0.8, h*0.4);
+                const torso = new THREE.Mesh(torsoGeo, matBody);
+                torso.position.set(0, 0, h*0.7);
+                group.add(torso);
+
+                // Cockpit (Nose)
+                const cockGeo = new THREE.BoxGeometry(w*0.3, d*0.3, h*0.2);
+                const cockpit = new THREE.Mesh(cockGeo, matCockpit);
+                cockpit.position.set(0, d*0.4, h*0.7);
+                group.add(cockpit);
+
+            } else if (cls === 'heavy') {
+                // HEAVY: Wide, Shoulder Pods
+                // Legs (Thick)
+                const legGeo = new THREE.BoxGeometry(w*0.3, d*0.5, h*0.4);
+                const legL = new THREE.Mesh(legGeo, matDark);
+                legL.position.set(-w*0.3, 0, h*0.2);
+                const legR = new THREE.Mesh(legGeo, matDark);
+                legR.position.set(w*0.3, 0, h*0.2);
+                group.add(legL); group.add(legR);
+
+                // Pelvis
+                const pelvisGeo = new THREE.BoxGeometry(w*0.5, d*0.4, h*0.1);
+                const pelvis = new THREE.Mesh(pelvisGeo, matDark);
+                pelvis.position.set(0, 0, h*0.45);
+                group.add(pelvis);
+
+                // Torso (Massive)
+                const torsoGeo = new THREE.BoxGeometry(w*0.8, d*0.6, h*0.5);
+                const torso = new THREE.Mesh(torsoGeo, matBody);
+                torso.position.set(0, 0, h*0.75);
+                group.add(torso);
+
+                // Missile Pods (Shoulders)
+                const podGeo = new THREE.BoxGeometry(w*0.25, d*0.5, h*0.25);
+                const podL = new THREE.Mesh(podGeo, matBody);
+                podL.position.set(-w*0.55, 0, h*0.85);
+                const podR = new THREE.Mesh(podGeo, matBody);
+                podR.position.set(w*0.55, 0, h*0.85);
+                group.add(podL); group.add(podR);
+
+                // Cockpit (Slit)
+                const cockGeo = new THREE.BoxGeometry(w*0.4, d*0.1, h*0.1);
+                const cockpit = new THREE.Mesh(cockGeo, matCockpit);
+                cockpit.position.set(0, d*0.31, h*0.8);
+                group.add(cockpit);
+
+            } else {
+                // MEDIUM: Standard Humanoid
+                // Legs
+                const legGeo = new THREE.BoxGeometry(w*0.25, d*0.3, h*0.45);
+                const legL = new THREE.Mesh(legGeo, matDark);
+                legL.position.set(-w*0.25, 0, h*0.225);
+                const legR = new THREE.Mesh(legGeo, matDark);
+                legR.position.set(w*0.25, 0, h*0.225);
+                group.add(legL); group.add(legR);
+
+                // Torso
+                const torsoGeo = new THREE.BoxGeometry(w*0.7, d*0.5, h*0.5);
+                const torso = new THREE.Mesh(torsoGeo, matBody);
+                torso.position.set(0, 0, h*0.7);
+                group.add(torso);
+
+                // Arms (Guns)
+                const armGeo = new THREE.BoxGeometry(w*0.15, d*0.6, h*0.2);
+                const armL = new THREE.Mesh(armGeo, matBody);
+                armL.position.set(-w*0.45, d*0.1, h*0.65);
+                const armR = new THREE.Mesh(armGeo, matBody);
+                armR.position.set(w*0.45, d*0.1, h*0.65);
+                group.add(armL); group.add(armR);
+
+                // Head
+                const headGeo = new THREE.BoxGeometry(w*0.3, d*0.3, h*0.2);
+                const head = new THREE.Mesh(headGeo, matBody);
+                head.position.set(0, 0, h*1.05);
+                group.add(head);
+                
+                // Visor
+                const visorGeo = new THREE.BoxGeometry(w*0.25, d*0.1, h*0.1);
+                const visor = new THREE.Mesh(visorGeo, matCockpit);
+                visor.position.set(0, d*0.16, h*1.05);
+                group.add(visor);
+            }
+
+            return group;
         }
 
         function togglePlay() {
@@ -293,8 +508,8 @@
             document.getElementById('playPause').innerText = isPlaying ? "Pause" : "Play";
         }
 
-        function updateScene(time) {
-            if (!replayData) return;
+	        function updateScene(time) {
+	            if (!replayData) return;
             
             // Find frame
             // Simple linear search is fine for short replays
@@ -310,55 +525,205 @@
 
             document.getElementById('timeDisplay').innerText = time.toFixed(2) + "s / " + maxTime.toFixed(2) + "s";
             
-            // Update Mechs
-            for (const [id, state] of Object.entries(frame.mechs)) {
-                const mesh = mechMeshes[id];
-                if (mesh) {
-                    mesh.visible = state.alive;
-                    mesh.position.set(state.pos[0], state.pos[1], state.pos[2]);
-                    mesh.rotation.z = state.yaw - Math.PI/2; // Adjust for model orientation if needed
+	            const frameMechs = frame.mechs || {};
+	            for (const id of Object.keys(mechMeshes)) {
+	                if (!(id in frameMechs)) {
+	                    mechMeshes[id].visible = false;
+	                }
+	            }
+	            for (const id of Object.keys(statusBars)) {
+	                if (!(id in frameMechs)) {
+	                    statusBars[id].group.visible = false;
+	                }
+	            }
+
+	            // Update Mechs
+	            for (const [id, state] of Object.entries(frameMechs)) {
+	                const mesh = mechMeshes[id];
+	                if (mesh) {
+	                    mesh.visible = state.alive;
+	                    const hsZ = MECH_HALF_HEIGHTS[state.class] ?? 0.0;
+	                    mesh.position.set(state.pos[0], state.pos[1], state.pos[2] - hsZ);
+	                    
+	                    if (state.fallen) {
+	                        mesh.rotation.x = Math.PI / 2; // Lay flat
+	                        mesh.rotation.z = state.yaw; // Keep yaw but sideways
+                    } else {
+                        mesh.rotation.x = 0;
+                        mesh.rotation.z = state.yaw - Math.PI/2;
+                    }
                     
                     // Show painted status
-                    // We don't have "is_painted" in basic mech state in replay yet? 
-                    // Actually we added it to OBS, but maybe not to replay state dump.
-                    // The ENV replay_frame function saves: team, class, pos, vel, yaw, hp, heat, alive.
-                    // It does NOT save painted status. 
-                    // We can infer it from 'paint' events if we want, but for now we'll skip visualizing paint status unless we add it to replay frame.
+                    // (Handled by events/laser color)
+                }
+
+                // Update Status Bars
+                if (statusBars[id]) {
+                    const sb = statusBars[id];
+                    sb.group.visible = state.alive;
+                    if (mesh) {
+                        sb.group.position.copy(mesh.position);
+                        sb.group.position.z += MECH_SIZES[state.class][2] * 0.8 + 1.0;
+                    }
+                    sb.group.lookAt(camera.position);
+
+                    const maxHp = {light: 80, medium: 120, heavy: 200}[state.class] || 100;
+                    sb.hp.scale.x = Math.max(0.01, state.hp / maxHp);
+                    sb.stab.scale.x = Math.max(0.01, (state.stability || 0) / 100.0);
+                    sb.heat.scale.x = Math.max(0.01, state.heat / 100.0);
+                }
+                
+                // Update Info Panel
+                if (selectedMechId === id) {
+                    document.getElementById('selId').innerText = id;
+                    document.getElementById('selClass').innerText = state.class;
+                    document.getElementById('selHp').innerText = Math.round(state.hp);
+                    // document.getElementById('selMaxHp').innerText = maxHp; // maxHp local scope
+                    document.getElementById('selHeat').innerText = Math.round(state.heat);
+                    document.getElementById('selStab').innerText = Math.round(state.stability || 0);
+                    let status = "Active";
+                    if (!state.alive) status = "Destroyed";
+                    else if (state.fallen) status = "FALLEN (Stun)";
+                    else if (state.heat > 100) status = "Shutdown";
+                    document.getElementById('selState').innerText = status;
+                    
+                    // Highlight?
+                    if (mechMeshes[id]) {
+                        // Maybe add a bracket helper? For now UI is enough.
+                    }
                 }
             }
 
             // Events (Lasers/Missiles)
-            // Show events that happened in the last 0.1s
             const recentEvents = frame.events || [];
             
             // Clear old ephemeral FX
             laserLines.forEach(l => scene.remove(l));
             laserLines = [];
             
-            // Rebuild
-            recentEvents.forEach(ev => {
-                if (ev.type === 'laser_hit' || ev.type === 'laser_miss') { // We only log hits currently
-                    const shooter = frame.mechs[ev.shooter];
-                    const target = frame.mechs[ev.target];
-                    if (shooter && target) {
-                        const mat = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 });
-                        const pts = [];
-                        pts.push(new THREE.Vector3(...shooter.pos));
-                        pts.push(new THREE.Vector3(...target.pos));
-                        const geo = new THREE.BufferGeometry().setFromPoints(pts);
-                        const line = new THREE.Line(geo, mat);
-                        scene.add(line);
-                        laserLines.push(line);
+	            // Rebuild
+	            recentEvents.forEach(ev => {
+	                const shooter = frameMechs[ev.shooter];
+	                const target = frameMechs[ev.target];
+	                const pos = ev.pos ? new THREE.Vector3(...ev.pos) : (target ? new THREE.Vector3(...target.pos) : null);
+	                const origin = shooter ? new THREE.Vector3(...shooter.pos) : null;
+
+                if (ev.damage > 0 && target) {
+                    spawnFloater(new THREE.Vector3(...target.pos), "-" + Math.round(ev.damage), 0xff0000);
+                }
+                
+                if (ev.type === 'paint') {
+                    if (origin && target) drawBeam(origin, new THREE.Vector3(...target.pos), 0xff00ff, 1);
+                }
+                else if (ev.type === 'laser_hit') {
+                    if (origin && target) {
+                        let color = 0x00ff00; // Green
+                        if (ev.is_painted) color = 0x00ffff; // Cyan
+                        if (ev.is_crit) color = 0xff0000; // Red (Override)
+                        drawBeam(origin, new THREE.Vector3(...target.pos), color, 2);
                     }
                 }
-                // Missiles are harder without state tracking in replay, 
-                // but we can show launches.
-                // Ideally we'd visualize the projectiles list from Sim, but that's not in replay.
+                else if (ev.type === 'projectile_hit') {
+                    // Tracers for impacts
+                    if (origin && target) {
+                        // Gauss vs AC? We don't have weapon type in hit event easily unless we add it.
+                        // But kinetic is usually Yellow/Orange.
+                        // Stability damage indicates heavy (Gauss) vs light (AC).
+                        const isHeavy = ev.stability > 10; 
+                        const color = isHeavy ? 0xffff00 : 0xffaa00;
+                        const width = isHeavy ? 3 : 1;
+                        drawTracer(origin, new THREE.Vector3(...target.pos), color, width);
+                        drawFlash(new THREE.Vector3(...target.pos), color, isHeavy ? 2 : 1);
+                    }
+                }
+                else if (ev.type === 'missile_hit') {
+                    // Usually handled by explosion logic now, but legacy check
+                    if (pos) drawExplosion(pos, 2.5, 0xff4500);
+                }
+                else if (ev.type === 'explosion') {
+                    if (pos) drawExplosion(pos, ev.radius, 0xff4500);
+                }
+                else if (ev.type === 'missile_launch') {
+                    // Draw launch puff
+                    if (origin) drawFlash(origin, 0xffffff, 1);
+                }
             });
+        }
+
+        // --- FX Helpers ---
+        function drawBeam(p1, p2, color, width) {
+            const mat = new THREE.LineBasicMaterial({ color: color, linewidth: width });
+            const geo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+            const line = new THREE.Line(geo, mat);
+            scene.add(line);
+            laserLines.push(line);
+        }
+
+        function drawTracer(p1, p2, color, width) {
+            // Dashed line look for kinetics? Or just a thick short line?
+            // ThreeJS lines are solid.
+            // Let's draw a shorter line segment at the end (impact) to simulate a tracer arriving.
+            const dir = new THREE.Vector3().subVectors(p2, p1).normalize();
+            const start = new THREE.Vector3().subVectors(p2, dir.multiplyScalar(10)); // 10m tail
+            // Clamp start to p1 if too close
+            if (start.distanceTo(p2) > p1.distanceTo(p2)) start.copy(p1);
+            
+            drawBeam(start, p2, color, width);
+        }
+
+        function drawFlash(pos, color, size) {
+            const geo = new THREE.SphereGeometry(size * 0.5, 8, 8);
+            const mat = new THREE.MeshBasicMaterial({ color: color });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(pos);
+            scene.add(mesh);
+            laserLines.push(mesh);
+        }
+
+        function drawExplosion(pos, radius, color) {
+            const geo = new THREE.SphereGeometry(radius, 16, 16);
+            const mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.6 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(pos);
+            scene.add(mesh);
+            laserLines.push(mesh);
+        }
+
+        function spawnFloater(pos, text, colorHex) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 128; 
+            canvas.height = 64;
+            ctx.font = "bold 48px sans-serif";
+            ctx.fillStyle = "#" + colorHex.toString(16).padStart(6, '0');
+            ctx.textAlign = "center";
+            ctx.fillText(text, 64, 48);
+            
+            const tex = new THREE.CanvasTexture(canvas);
+            const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+            const sprite = new THREE.Sprite(mat);
+            sprite.position.copy(pos);
+            sprite.position.z += 2; // Above head
+            sprite.scale.set(4, 2, 1); // Size in world units
+            
+            scene.add(sprite);
+            floaters.push({ mesh: sprite, life: 1.0 });
         }
 
         function animate() {
             requestAnimationFrame(animate);
+
+            // Update Floaters
+            for (let i = floaters.length - 1; i >= 0; i--) {
+                const f = floaters[i];
+                f.life -= 0.02; // Fade speed
+                f.mesh.position.z += 0.05; // Float up
+                f.mesh.material.opacity = f.life;
+                if (f.life <= 0) {
+                    scene.remove(f.mesh);
+                    floaters.splice(i, 1);
+                }
+            }
 
             if (isPlaying && replayData) {
                 const now = performance.now();

@@ -12,12 +12,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from echelon import EchelonEnv, EnvConfig, WorldConfig
+from echelon.actions import ActionIndex
 
 
 def check_speed_cap(env: EchelonEnv, seed: int) -> None:
     env.reset(seed=seed)
-    # [fwd, strafe, vert, yaw, laser, vent, missile, paint]
-    actions = {aid: np.asarray([1.0, 1.0, 0.0, 0.0, -1.0, -1.0, -1.0, -1.0], dtype=np.float32) for aid in env.agents}
+    # [fwd, strafe, vert, yaw, laser, vent, missile, paint, kinetic]
+    actions = {}
+    for aid in env.agents:
+        a = np.zeros(env.ACTION_DIM, dtype=np.float32)
+        a[ActionIndex.FORWARD] = 1.0
+        a[ActionIndex.STRAFE] = 1.0
+        actions[aid] = a
     env.step(actions)
 
     assert env.sim is not None
@@ -40,7 +46,7 @@ def main() -> None:
     env = EchelonEnv(
         EnvConfig(
             world=WorldConfig(size_x=args.size, size_y=args.size, size_z=args.size),
-            num_per_team=args.num_per_team,
+            num_packs=max(1, args.num_per_team // 10), # Pack size is now 10
             seed=args.seed,
         )
     )
@@ -50,4 +56,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

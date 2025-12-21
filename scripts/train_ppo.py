@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 import time
 import warnings
@@ -20,6 +21,9 @@ if str(ROOT) not in sys.path:
 
 from echelon import EchelonEnv, EnvConfig, WorldConfig
 from echelon.agents.heuristic import HeuristicPolicy
+from echelon.arena.glicko2 import GameResult
+from echelon.arena.league import League, LeagueEntry
+from echelon.arena.match import play_match
 from echelon.rl.model import ActorCriticLSTM
 
 
@@ -157,12 +161,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto", help="auto | cpu | cuda | cuda:0 ...")
-    parser.add_argument("--packs-per-team", type=int, default=2, help="Number of 5-mech packs (1 Heavy, 2 Med, 2 Light) per team")
+    parser.add_argument("--packs-per-team", type=int, default=2, help="Number of 10-mech packs (2 Heavy, 5 Med, 3 Light) per team")
     parser.add_argument("--size", type=int, default=100)
     parser.add_argument("--mode", type=str, default="full", choices=["full", "partial"])
     parser.add_argument("--dt-sim", type=float, default=0.05)
     parser.add_argument("--decision-repeat", type=int, default=5)
     parser.add_argument("--episode-seconds", type=float, default=60.0)
+    parser.add_argument("--comm-dim", type=int, default=8, help="Pack-local comm message size (0 disables)")
     parser.add_argument("--rollout-steps", type=int, default=512)
     parser.add_argument("--updates", type=int, default=200)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -178,7 +183,30 @@ def main() -> None:
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--run-dir", type=str, default="runs/train")
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint path, or 'latest' (from run-dir)")
-    parser.add_argument("--push-url", type=str, default="http://localhost:8090/push", help="URL to POST replays to")
+    parser.add_argument("--push-url", type=str, default="http://127.0.0.1:8090/push", help="URL to POST replays to")
+    parser.add_argument(
+        "--train-mode",
+        type=str,
+        default="heuristic",
+        choices=["heuristic", "arena"],
+        help="Opponent for red team during training: heuristic | arena",
+    )
+    parser.add_argument("--arena-league", type=str, default="runs/arena/league.json", help="League file (arena mode)")
+    parser.add_argument("--arena-top-k", type=int, default=20, help="Sample opponents from top-K commanders (arena mode)")
+    parser.add_argument("--arena-candidate-k", type=int, default=5, help="Plus K recent candidates (arena mode)")
+    parser.add_argument(
+        "--arena-refresh-episodes",
+        type=int,
+        default=20,
+        help="Reload league/pool every N episodes (0 disables refresh)",
+    )
+    parser.add_argument(
+        "--arena-submit",
+        action="store_true",
+        help="After training, run Glicko-2 evaluation matches and update the arena league (arena mode)",
+    )
+    parser.add_argument("--arena-submit-matches", type=int, default=10, help="Matches to play when --arena-submit")
+    parser.add_argument("--arena-submit-log", type=str, default=None, help="Optional JSON log path for --arena-submit")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -216,14 +244,16 @@ def main() -> None:
             decision_repeat=args.decision_repeat,
             max_episode_seconds=args.episode_seconds,
             observation_mode=args.mode,
+            comm_dim=args.comm_dim,
             record_replay=False,
             seed=args.seed,
         )
 
     env = EchelonEnv(env_cfg)
-    heuristic = HeuristicPolicy()
+    heuristic = HeuristicPolicy() if args.train_mode == "heuristic" else None
 
     obs, _ = env.reset(seed=args.seed)
+    next_obs_dict = obs
     blue_ids = env.blue_ids
     red_ids = env.red_ids
 
@@ -232,6 +262,57 @@ def main() -> None:
 
     model = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-5)
+
+    def _env_signature(env_cfg0: EnvConfig) -> dict:
+        d = asdict(env_cfg0)
+        d.pop("seed", None)
+        d.pop("record_replay", None)
+        return d
+
+    arena_league_path = Path(args.arena_league)
+    arena_rng = random.Random(int(args.seed) + 13_371)
+    arena_pool: list[LeagueEntry] = []
+    arena_cache: dict[str, ActorCriticLSTM] = {}
+    arena_opponent_id: str | None = None
+    arena_opponent: ActorCriticLSTM | None = None
+    arena_lstm_state = None
+    arena_done = torch.zeros(len(red_ids), device=device)
+
+    def _arena_refresh_pool() -> None:
+        nonlocal arena_pool
+        if not arena_league_path.exists():
+            raise FileNotFoundError(f"missing arena league: {arena_league_path}")
+        league = League.load(arena_league_path)
+        sig = _env_signature(env_cfg)
+        if league.env_signature is not None and league.env_signature != sig:
+            raise RuntimeError("training env_cfg does not match league env_signature")
+        pool = league.top_commanders(int(args.arena_top_k)) + league.recent_candidates(int(args.arena_candidate_k))
+        by_id = {e.entry_id: e for e in pool}
+        arena_pool = list(by_id.values())
+        if not arena_pool:
+            raise RuntimeError("arena league has no eligible opponents (need commanders/candidates)")
+
+    def _arena_load_model(ckpt_path: str) -> ActorCriticLSTM:
+        ckpt = torch.load(ckpt_path, map_location=device)
+        opp = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
+        opp.load_state_dict(ckpt["model_state"])
+        opp.eval()
+        return opp
+
+    def _arena_sample_opponent(reset_hidden: bool) -> None:
+        nonlocal arena_opponent_id, arena_opponent, arena_lstm_state, arena_done
+        entry = arena_rng.choice(arena_pool)
+        arena_opponent_id = entry.entry_id
+        if arena_opponent_id not in arena_cache:
+            arena_cache[arena_opponent_id] = _arena_load_model(entry.ckpt_path)
+        arena_opponent = arena_cache[arena_opponent_id]
+        if reset_hidden:
+            arena_lstm_state = arena_opponent.initial_state(batch_size=len(red_ids), device=device)
+            arena_done = torch.ones(len(red_ids), device=device)
+
+    if args.train_mode == "arena":
+        _arena_refresh_pool()
+        _arena_sample_opponent(reset_hidden=True)
 
     if not (run_dir / "config.json").exists():
         (run_dir / "config.json").write_text(json.dumps({"env": asdict(env_cfg)}, indent=2), encoding="utf-8")
@@ -330,8 +411,21 @@ def main() -> None:
 
             action_np = action.cpu().numpy()
             action_dict = {bid: action_np[i] for i, bid in enumerate(blue_ids)}
-            for rid in red_ids:
-                action_dict[rid] = heuristic.act(env, rid)
+            if args.train_mode == "heuristic":
+                assert heuristic is not None
+                for rid in red_ids:
+                    action_dict[rid] = heuristic.act(env, rid)
+            else:
+                assert arena_opponent is not None
+                assert arena_lstm_state is not None
+                obs_r = torch.from_numpy(stack_obs(next_obs_dict, red_ids)).to(device)
+                with torch.no_grad():
+                    act_r, _, _, _, arena_lstm_state = arena_opponent.get_action_and_value(
+                        obs_r, arena_lstm_state, arena_done
+                    )
+                act_r_np = act_r.cpu().numpy()
+                for i, rid in enumerate(red_ids):
+                    action_dict[rid] = act_r_np[i]
 
             next_obs_dict, rewards, terminations, truncations, infos = env.step(action_dict)
 
@@ -347,6 +441,10 @@ def main() -> None:
             next_done = torch.tensor(
                 [terminations[bid] or truncations[bid] for bid in blue_ids], dtype=torch.float32, device=device
             )
+            if args.train_mode == "arena":
+                arena_done = torch.tensor(
+                    [terminations[rid] or truncations[rid] for rid in red_ids], dtype=torch.float32, device=device
+                )
 
             if ep_over:
                 episodic_returns.append(current_ep_return)
@@ -361,6 +459,10 @@ def main() -> None:
                 next_obs_dict, _ = env.reset(seed=args.seed + episodes)
                 # Ensure LSTM resets at the start of the next step (episode boundary).
                 next_done = torch.ones(batch_size, device=device)
+                if args.train_mode == "arena":
+                    if args.arena_refresh_episodes > 0 and episodes % int(args.arena_refresh_episodes) == 0:
+                        _arena_refresh_pool()
+                    _arena_sample_opponent(reset_hidden=True)
 
             next_obs = torch.from_numpy(stack_obs(next_obs_dict, blue_ids)).to(device)
 
@@ -525,6 +627,126 @@ def main() -> None:
             + "\n"
         )
         metrics_f.flush()
+
+    if args.train_mode == "arena" and args.arena_submit:
+        # Save a snapshot of the final trained model as the tournament candidate.
+        candidate_path = run_dir / "arena_candidate.pt"
+        torch.save(
+            {
+                "update": int(end_update),
+                "global_step": int(global_step),
+                "episodes": int(episodes),
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "env_cfg": asdict(env_cfg),
+                "args": vars(args),
+            },
+            candidate_path,
+        )
+
+        # Evaluate candidate vs the league and apply one Glicko-2 rating period.
+        league = League.load(arena_league_path)
+        sig = _env_signature(env_cfg)
+        if league.env_signature is None:
+            league.env_signature = sig
+        elif league.env_signature != sig:
+            raise RuntimeError("training env_cfg does not match league env_signature")
+
+        candidate_entry = league.upsert_checkpoint(candidate_path, kind="candidate")
+        pool = league.top_commanders(int(args.arena_top_k)) + league.recent_candidates(
+            int(args.arena_candidate_k), exclude_id=candidate_entry.entry_id
+        )
+        pool = [e for e in pool if e.entry_id != candidate_entry.entry_id]
+        if not pool:
+            raise RuntimeError("no opponents available (need commanders/candidates in league)")
+
+        candidate_model = _arena_load_model(str(candidate_path))
+        match_cfg = replace(env_cfg, record_replay=False)
+
+        matches = int(args.arena_submit_matches)
+        rng = random.Random(int(args.seed) * 1_000_000 + 54321)
+        results: dict[str, list[GameResult]] = {}
+        game_log: list[dict] = []
+
+        seed0 = int(args.seed) * 1_000_000 + 12345
+        for i in range(matches):
+            opp_entry = rng.choice(pool)
+            if opp_entry.entry_id not in arena_cache:
+                arena_cache[opp_entry.entry_id] = _arena_load_model(opp_entry.ckpt_path)
+            opp_model = arena_cache[opp_entry.entry_id]
+
+            candidate_as_blue = (i % 2) == 0
+            match_seed = seed0 + i * 9973
+            if candidate_as_blue:
+                out = play_match(
+                    env_cfg=match_cfg,
+                    blue_policy=candidate_model,
+                    red_policy=opp_model,
+                    seed=int(match_seed),
+                    device=device,
+                )
+                cand_team = "blue"
+            else:
+                out = play_match(
+                    env_cfg=match_cfg,
+                    blue_policy=opp_model,
+                    red_policy=candidate_model,
+                    seed=int(match_seed),
+                    device=device,
+                )
+                cand_team = "red"
+
+            if out.winner == "draw":
+                cand_score = 0.5
+            else:
+                cand_score = 1.0 if out.winner == cand_team else 0.0
+            opp_score = 1.0 - cand_score if cand_score != 0.5 else 0.5
+
+            results.setdefault(candidate_entry.entry_id, []).append(
+                GameResult(opponent=opp_entry.rating, score=cand_score)
+            )
+            results.setdefault(opp_entry.entry_id, []).append(
+                GameResult(opponent=candidate_entry.rating, score=opp_score)
+            )
+
+            game_log.append(
+                {
+                    "i": int(i),
+                    "seed": int(match_seed),
+                    "candidate_as": cand_team,
+                    "opponent": opp_entry.entry_id,
+                    "opponent_name": opp_entry.commander_name,
+                    "winner": out.winner,
+                    "candidate_score": float(cand_score),
+                    "hp": out.hp,
+                }
+            )
+            print(
+                f"arena_submit match {i+1}/{matches}: opp={opp_entry.entry_id} cand_as={cand_team} "
+                f"winner={out.winner} score={cand_score}"
+            )
+
+        league.apply_rating_period(results)
+        promoted = league.promote_if_topk(candidate_entry.entry_id, top_k=int(args.arena_top_k))
+        league.save(arena_league_path)
+
+        cand_post = league.entries[candidate_entry.entry_id]
+        print(
+            f"arena_submit candidate rating: {cand_post.rating.rating:.1f}±{cand_post.rating.rd:.1f} "
+            f"vol={cand_post.rating.vol:.4f} games={cand_post.games} promoted={promoted} "
+            f"name={cand_post.commander_name}"
+        )
+
+        if args.arena_submit_log:
+            log_path = Path(args.arena_submit_log)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                json.dumps({"candidate": cand_post.as_dict(), "games": game_log}, indent=2),
+                encoding="utf-8",
+            )
+            print(f"arena_submit wrote log: {log_path}")
+
+    metrics_f.close()
 
 
 if __name__ == "__main__":
