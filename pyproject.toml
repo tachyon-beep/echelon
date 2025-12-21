@@ -29,8 +29,8 @@ line-length = 110
 
 [tool.mutmut]
 paths_to_mutate = ["echelon/sim/sim.py"]
-tests_dir = ["tests"]
+tests_dir = ["tests/unit"]
 copy_dirs = ["tests", "echelon"]
-runner = "PYTHONPATH=. pytest -x tests"
+runner = "PYTHONPATH=. pytest -x tests/unit"
 debug = true
 
