@@ -10,10 +10,14 @@ dependencies = [
   "requests>=2.32.5",
   "torch>=2.6",
   "uvicorn>=0.38.0",
+  "wandb>=0.19.1",
+  "websockets>=13.0",
 ]
 
 [dependency-groups]
 dev = [
+  "hypothesis>=6.0",
+  "pytest>=8.0",
   "ruff>=0.8",
 ]
 
@@ -27,10 +31,13 @@ packages = ["echelon"]
 [tool.ruff]
 line-length = 110
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["mutants", "scripts", ".venv", ".hypothesis", "runs", "__pycache__"]
+
 [tool.mutmut]
 paths_to_mutate = ["echelon/sim/sim.py"]
 tests_dir = ["tests/unit"]
 copy_dirs = ["tests", "echelon"]
 runner = "PYTHONPATH=. pytest -x tests/unit"
 debug = true
-

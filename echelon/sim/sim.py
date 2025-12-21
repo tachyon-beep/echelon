@@ -897,6 +897,9 @@ class Sim:
             dist = np.linalg.norm(m.pos - pos)
             
             if dist <= proj.splash_rad:
+                # Terrain occlusion: splash damage should not pass through solid voxels.
+                if raycast_voxels(self.world, pos, m.pos).blocked:
+                    continue
                 # Apply Splash
                 mult = 1.0
                 is_crit = False
@@ -930,6 +933,41 @@ class Sim:
             "shooter": proj.shooter_id
         })
         return events
+
+    def _impact_pos_before_voxel(
+        self, start_pos: np.ndarray, end_pos: np.ndarray, blocked_voxel: tuple[int, int, int]
+    ) -> np.ndarray:
+        """
+        Return a point just before entering `blocked_voxel` when traveling from start_pos to end_pos.
+
+        This is used so splash/impact effects occur on the near side of cover, allowing cover to
+        occlude splash damage.
+        """
+        start = np.asarray(start_pos, dtype=np.float64)
+        end = np.asarray(end_pos, dtype=np.float64)
+        d = end - start
+        if float(np.dot(d, d)) <= 1e-18:
+            return start.astype(np.float32, copy=False)
+
+        bx, by, bz = blocked_voxel
+        bmin = np.asarray([bx, by, bz], dtype=np.float64)
+        bmax = bmin + 1.0
+
+        t_entry = 0.0
+        for axis in range(3):
+            da = float(d[axis])
+            if abs(da) <= 1e-18:
+                continue
+            if da > 0.0:
+                t = float((bmin[axis] - start[axis]) / da)
+            else:
+                t = float((bmax[axis] - start[axis]) / da)
+            if t > t_entry:
+                t_entry = t
+
+        # Step slightly back so we're outside the solid voxel.
+        t = float(np.clip(t_entry - 1e-4, 0.0, 1.0))
+        return (start + d * t).astype(np.float32, copy=False)
 
     def _update_projectiles(self) -> list[dict]:
         events = []
@@ -1032,8 +1070,7 @@ class Sim:
                     impact = True
                     p.alive = False
                     if hit.blocked_voxel is not None:
-                        bx, by, bz = hit.blocked_voxel
-                        impact_pos = np.asarray([bx + 0.5, by + 0.5, bz + 0.5], dtype=np.float32)
+                        impact_pos = self._impact_pos_before_voxel(p.pos, best_pos, hit.blocked_voxel)
                 else:
                     impact = True
                     p.alive = False
@@ -1045,8 +1082,7 @@ class Sim:
                     impact = True
                     p.alive = False
                     if hit.blocked and hit.blocked_voxel is not None:
-                        bx, by, bz = hit.blocked_voxel
-                        impact_pos = np.asarray([bx + 0.5, by + 0.5, bz + 0.5], dtype=np.float32)
+                        impact_pos = self._impact_pos_before_voxel(p.pos, next_pos, hit.blocked_voxel)
             
             if impact:
                 if direct_hit_mech:

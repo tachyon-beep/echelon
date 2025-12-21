@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import subprocess
 import sys
@@ -102,6 +103,26 @@ def git_info(repo_root: Path) -> dict[str, Any]:
         "dirty": bool(changed),
         "changed_paths": changed[:200],
     }
+
+
+def _parse_csv_list(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    parts = [p.strip() for p in value.split(",")]
+    parts = [p for p in parts if p]
+    return parts or None
+
+
+def _read_wandb_run_id(run_dir: Path) -> str | None:
+    try:
+        value = (run_dir / "wandb_run_id.txt").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    return value or None
+
+
+def _write_wandb_run_id(run_dir: Path, run_id: str) -> None:
+    (run_dir / "wandb_run_id.txt").write_text(f"{run_id}\n", encoding="utf-8")
 
 
 def compute_gae(
@@ -265,7 +286,63 @@ def main() -> None:
     )
     parser.add_argument("--arena-submit-matches", type=int, default=10, help="Matches to play when --arena-submit")
     parser.add_argument("--arena-submit-log", type=str, default=None, help="Optional JSON log path for --arena-submit")
+
+    # Weights & Biases (W&B)
+    parser.add_argument("--wandb", action="store_true", help="Enable W&B logging (implies --wandb-mode online)")
+    parser.add_argument(
+        "--wandb-mode",
+        type=str,
+        default="disabled",
+        choices=["disabled", "offline", "online"],
+        help="W&B mode: disabled | offline | online",
+    )
+    parser.add_argument("--wandb-project", type=str, default=None, help="W&B project (default: echelon)")
+    parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity (user/team)")
+    parser.add_argument("--wandb-run-name", type=str, default=None, help="W&B run name")
+    parser.add_argument("--wandb-group", type=str, default=None, help="W&B group")
+    parser.add_argument("--wandb-tags", type=str, default=None, help="Comma-separated W&B tags")
+    parser.add_argument(
+        "--wandb-id",
+        type=str,
+        default=None,
+        help="W&B run id to resume (defaults to <run-dir>/wandb_run_id.txt if present)",
+    )
+    parser.add_argument(
+        "--wandb-resume",
+        type=str,
+        default="allow",
+        choices=["allow", "must", "never"],
+        help="W&B resume behavior when a run id is provided",
+    )
+    parser.add_argument(
+        "--wandb-watch",
+        type=str,
+        default="off",
+        choices=["off", "gradients", "all"],
+        help="wandb.watch setting (off|gradients|all). Warning: expensive.",
+    )
+    parser.add_argument("--wandb-watch-freq", type=int, default=500, help="wandb.watch log frequency")
+    parser.add_argument(
+        "--wandb-artifacts",
+        type=str,
+        default="best",
+        choices=["none", "best", "all"],
+        help="W&B artifacts to log: none | best | all (includes eval replays)",
+    )
     args = parser.parse_args()
+    if args.wandb_project is not None and not args.wandb_project.strip():
+        args.wandb_project = None
+    if args.wandb_entity is not None and not args.wandb_entity.strip():
+        args.wandb_entity = None
+    if args.wandb_tags is not None and not args.wandb_tags.strip():
+        args.wandb_tags = None
+    if args.wandb_id is not None and not args.wandb_id.strip():
+        args.wandb_id = None
+
+    if args.wandb and args.wandb_mode == "disabled":
+        args.wandb_mode = "online"
+    if args.wandb_project and args.wandb_mode == "disabled":
+        args.wandb_mode = "online"
 
     set_seed(args.seed)
 
@@ -453,6 +530,58 @@ def main() -> None:
         + "\n"
     )
     metrics_f.flush()
+
+    wandb_run = None
+    wandb_log_best_model = False
+    wandb_log_eval_replays = False
+    if args.wandb_mode != "disabled":
+        try:
+            import wandb  # type: ignore[import-not-found]
+        except ImportError as e:
+            raise RuntimeError(
+                "W&B logging enabled but `wandb` is not installed. "
+                "Install `wandb` or disable W&B via --wandb-mode disabled."
+            ) from e
+
+        wandb_log_best_model = args.wandb_artifacts in {"best", "all"}
+        wandb_log_eval_replays = args.wandb_artifacts == "all"
+
+        wandb_resume = None
+        wandb_id = None
+        if args.wandb_resume != "never":
+            wandb_id = args.wandb_id or _read_wandb_run_id(run_dir)
+            if wandb_id:
+                wandb_resume = args.wandb_resume
+
+        wandb_run = wandb.init(
+            project=args.wandb_project or os.environ.get("WANDB_PROJECT") or "echelon",
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            tags=_parse_csv_list(args.wandb_tags),
+            mode=args.wandb_mode,
+            id=wandb_id,
+            resume=wandb_resume,
+            config={
+                "args": vars(args),
+                "env_cfg": asdict(env_cfg),
+                "git": repo_git,
+                "device": str(device),
+                "env_signature": _env_signature(env_cfg),
+            },
+            dir=str(run_dir),
+        )
+
+        if getattr(wandb_run, "id", None):
+            _write_wandb_run_id(run_dir, str(wandb_run.id))
+
+        wandb.define_metric("train/global_step")
+        wandb.define_metric("train/*", step_metric="train/global_step")
+        wandb.define_metric("eval/*", step_metric="train/global_step")
+        wandb.define_metric("arena/*", step_metric="train/global_step")
+
+        if args.wandb_watch != "off":
+            wandb.watch(model, log=args.wandb_watch, log_freq=int(args.wandb_watch_freq))
 
     best_win_rate = -1.0
     best_mean_hp_margin = float("-inf")
@@ -677,6 +806,19 @@ def main() -> None:
                     out_path = replay_dir / f"eval_update_{update:05d}_seed_{seed0}.json"
                     out_path.write_text(json.dumps(replay), encoding="utf-8")
                     print(f"saved eval replay: {out_path}")
+                    if wandb_run is not None and wandb_log_eval_replays:
+                        artifact = wandb.Artifact(
+                            name=f"replay-{wandb_run.id}-update-{update:05d}",
+                            type="replay",
+                            metadata={
+                                "update": int(update),
+                                "global_step": int(global_step),
+                                "seed": int(seed0),
+                                "win_rate": float(eval_stats.get("win_rate", 0.0)),
+                            },
+                        )
+                        artifact.add_file(str(out_path))
+                        wandb_run.log_artifact(artifact)
                 if args.push_url:
                     push_replay(args.push_url, replay)
 
@@ -720,6 +862,15 @@ def main() -> None:
                 )
                 print(f"new best: win_rate={win_rate:.3f} mean_hp_margin={mean_hp_margin:.2f} @ update {update}")
 
+                if wandb_run is not None and wandb_log_best_model:
+                    artifact = wandb.Artifact(
+                        name=f"model-{wandb_run.id}",
+                        type="model",
+                        metadata={"update": int(update), "global_step": int(global_step), **best_ckpt["eval"]},
+                    )
+                    artifact.add_file(str(best_pt))
+                    wandb_run.log_artifact(artifact, aliases=["best", f"update_{update:05d}"])
+
         saved_ckpt: str | None = None
         if args.save_every > 0 and update % args.save_every == 0:
             ckpt = {
@@ -758,6 +909,31 @@ def main() -> None:
             + "\n"
         )
         metrics_f.flush()
+
+        if wandb_run is not None:
+            wandb_metrics = {
+                "train/update": int(update),
+                "train/loss": float(loss.item()),
+                "train/pg_loss": float(pg_loss.item()),
+                "train/v_loss": float(v_loss.item()),
+                "train/entropy": float(entropy_loss.item()),
+                "train/sps": int(sps),
+                "train/global_step": int(global_step),
+                "train/episodes": int(episodes),
+                "train/avg_return": float(avg_return),
+                "train/avg_len": float(avg_len),
+                "train/win_rate_blue": win_rate_blue,
+                "train/win_rate_red": win_rate_red,
+            }
+            if eval_stats:
+                wandb_metrics.update(
+                    {
+                        "eval/win_rate": float(eval_stats.get("win_rate", 0.0)),
+                        "eval/mean_hp_margin": float(eval_stats.get("mean_hp_margin", 0.0)),
+                        "eval/episodes": int(eval_stats.get("episodes", 0)),
+                    }
+                )
+            wandb_run.log(wandb_metrics, step=int(global_step))
 
     if args.train_mode == "arena" and args.arena_submit:
         # Save a snapshot of the final trained model as the tournament candidate.
@@ -868,6 +1044,17 @@ def main() -> None:
             f"name={cand_post.commander_name}"
         )
 
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "arena/rating": float(cand_post.rating.rating),
+                    "arena/rd": float(cand_post.rating.rd),
+                    "arena/games": int(cand_post.games),
+                    "arena/promoted": int(promoted),
+                },
+                step=int(global_step),
+            )
+
         if args.arena_submit_log:
             log_path = Path(args.arena_submit_log)
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -878,6 +1065,8 @@ def main() -> None:
             print(f"arena_submit wrote log: {log_path}")
 
     metrics_f.close()
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

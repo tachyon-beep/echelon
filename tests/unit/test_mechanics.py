@@ -171,6 +171,34 @@ def test_gauss_projectile_does_not_tunnel_through_wall(make_mech):
     assert float(enemy.hp) == float(enemy.spec.hp)
     assert not any(ev.get("type") == "projectile_hit" and ev.get("target") == "enemy" for ev in events)
 
+def test_splash_damage_is_occluded_by_walls(make_mech):
+    world = VoxelWorld.generate(WorldConfig(size_x=30, size_y=30, size_z=20), np.random.default_rng(0))
+    world.voxels.fill(VoxelWorld.AIR)
+    world.set_box_solid(10, 0, 0, 11, 30, 20, True)
+
+    sim = Sim(world, 0.05, np.random.default_rng(0))
+    heavy = make_mech("blue_0", "blue", [5.5, 15.0, 2.0], "heavy")
+    painter = make_mech("blue_1", "blue", [5.5, 14.0, 2.0], "scout")
+    enemy = make_mech("red_0", "red", [11.5, 15.0, 2.0], "medium")
+    enemy.painted_remaining = 5.0
+    enemy.last_painter_id = painter.mech_id
+
+    sim.reset({"blue_0": heavy, "blue_1": painter, "red_0": enemy})
+
+    fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
+    fire_action[ActionIndex.FIRE_MISSILE] = 1.0
+    events = sim._try_fire_missile(heavy, fire_action)
+    assert len(events) == 1
+    assert len(sim.projectiles) == 1
+
+    initial_hp = float(enemy.hp)
+    zero = np.zeros(ACTION_DIM, dtype=np.float32)
+    events = sim.step({"blue_0": zero, "blue_1": zero, "red_0": zero}, num_substeps=50)
+
+    assert any(ev.get("type") == "explosion" for ev in events)
+    assert float(enemy.hp) == initial_hp
+    assert not any(ev.get("type") == "projectile_hit" and ev.get("target") == "red_0" for ev in events)
+
 def test_pack_comm_is_pack_scoped():
     cfg = EnvConfig(
         world=WorldConfig(size_x=30, size_y=30, size_z=20),
