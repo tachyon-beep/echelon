@@ -46,8 +46,12 @@
             <strong>SELECTED:</strong> <span id="selId">None</span><br>
             Class: <span id="selClass">-</span><br>
             HP: <span id="selHp">-</span> / <span id="selMaxHp">-</span><br>
-            Heat: <span id="selHeat">-</span><br>
-            Stab: <span id="selStab">-</span><br>
+            Heat: <span id="selHeat">-</span> / <span id="selHeatCap">-</span><br>
+            Stab: <span id="selStab">-</span> / <span id="selStabMax">-</span><br>
+            Legged: <span id="selLegged">-</span><br>
+            Suppressed: <span id="selSuppressed">-</span><br>
+            EWAR: <span id="selEwar">-</span><br>
+            AMS CD: <span id="selAms">-</span><br>
             State: <span id="selState">-</span>
         </div>
     </div>
@@ -567,10 +571,13 @@
                     }
                     sb.group.lookAt(camera.position);
 
-                    const maxHp = {light: 80, medium: 120, heavy: 200}[state.class] || 100;
-                    sb.hp.scale.x = Math.max(0.01, state.hp / maxHp);
-                    sb.stab.scale.x = Math.max(0.01, (state.stability || 0) / 100.0);
-                    sb.heat.scale.x = Math.max(0.01, state.heat / 100.0);
+                    const fallbackMaxHp = {light: 80, medium: 120, heavy: 200}[state.class] || 100;
+                    const maxHp = (typeof state.hp_max === 'number') ? state.hp_max : fallbackMaxHp;
+                    const maxStab = (typeof state.stability_max === 'number') ? state.stability_max : 100.0;
+                    const heatCap = (typeof state.heat_cap === 'number') ? state.heat_cap : 100.0;
+                    sb.hp.scale.x = Math.max(0.01, Math.max(0, state.hp) / Math.max(1e-6, maxHp));
+                    sb.stab.scale.x = Math.max(0.01, Math.max(0, (state.stability || 0)) / Math.max(1e-6, maxStab));
+                    sb.heat.scale.x = Math.max(0.01, Math.min(2.0, Math.max(0, state.heat)) / Math.max(1e-6, heatCap));
                 }
                 
                 // Update Info Panel
@@ -578,13 +585,22 @@
                     document.getElementById('selId').innerText = id;
                     document.getElementById('selClass').innerText = state.class;
                     document.getElementById('selHp').innerText = Math.round(state.hp);
-                    // document.getElementById('selMaxHp').innerText = maxHp; // maxHp local scope
+                    document.getElementById('selMaxHp').innerText = Math.round((typeof state.hp_max === 'number') ? state.hp_max : ({light: 80, medium: 120, heavy: 200}[state.class] || 100));
                     document.getElementById('selHeat').innerText = Math.round(state.heat);
+                    document.getElementById('selHeatCap').innerText = Math.round((typeof state.heat_cap === 'number') ? state.heat_cap : 100);
                     document.getElementById('selStab').innerText = Math.round(state.stability || 0);
+                    document.getElementById('selStabMax').innerText = Math.round((typeof state.stability_max === 'number') ? state.stability_max : 100);
+                    document.getElementById('selLegged').innerText = state.legged ? "yes" : "no";
+                    document.getElementById('selSuppressed').innerText = (typeof state.suppressed_time === 'number') ? (state.suppressed_time.toFixed(1) + "s") : "-";
+                    document.getElementById('selEwar').innerText = state.ecm_on ? "ECM" : (state.eccm_on ? "ECCM" : "off");
+                    document.getElementById('selAms').innerText = (typeof state.ams_cooldown === 'number') ? (state.ams_cooldown.toFixed(1) + "s") : "-";
                     let status = "Active";
                     if (!state.alive) status = "Destroyed";
                     else if (state.fallen) status = "FALLEN (Stun)";
-                    else if (state.heat > 100) status = "Shutdown";
+                    else {
+                        const cap = (typeof state.heat_cap === 'number') ? state.heat_cap : 100.0;
+                        if (state.heat > cap) status = "Shutdown";
+                    }
                     document.getElementById('selState').innerText = status;
                     
                     // Highlight?
@@ -603,6 +619,7 @@
             
 	            // Rebuild
 	            recentEvents.forEach(ev => {
+                    const weapon = ev.weapon || null;
 	                const shooter = frameMechs[ev.shooter];
 	                const target = frameMechs[ev.target];
 	                const pos = ev.pos ? new THREE.Vector3(...ev.pos) : (target ? new THREE.Vector3(...target.pos) : null);
@@ -626,14 +643,32 @@
                 else if (ev.type === 'projectile_hit') {
                     // Tracers for impacts
                     if (origin && target) {
-                        // Gauss vs AC? We don't have weapon type in hit event easily unless we add it.
-                        // But kinetic is usually Yellow/Orange.
-                        // Stability damage indicates heavy (Gauss) vs light (AC).
-                        const isHeavy = ev.stability > 10; 
-                        const color = isHeavy ? 0xffff00 : 0xffaa00;
-                        const width = isHeavy ? 3 : 1;
-                        drawTracer(origin, new THREE.Vector3(...target.pos), color, width);
-                        drawFlash(new THREE.Vector3(...target.pos), color, isHeavy ? 2 : 1);
+                        // Use weapon when available; fallback to stability heuristic.
+                        let color = 0xffaa00;
+                        let width = 1;
+                        let size = 1;
+                        if (weapon === 'gauss') {
+                            color = 0xffff00;
+                            width = 3;
+                            size = 2;
+                        } else if (weapon === 'autocannon') {
+                            color = 0xffaa00;
+                            width = 1;
+                            size = 1;
+                        } else if (weapon === 'missile') {
+                            color = 0xff4500;
+                            width = 2;
+                            size = 2;
+                        } else {
+                            const isHeavy = ev.stability > 10;
+                            color = isHeavy ? 0xffff00 : 0xffaa00;
+                            width = isHeavy ? 3 : 1;
+                            size = isHeavy ? 2 : 1;
+                        }
+                        if (weapon !== 'missile') {
+                            drawTracer(origin, new THREE.Vector3(...target.pos), color, width);
+                        }
+                        drawFlash(new THREE.Vector3(...target.pos), color, size);
                     }
                 }
                 else if (ev.type === 'missile_hit') {
@@ -643,9 +678,25 @@
                 else if (ev.type === 'explosion') {
                     if (pos) drawExplosion(pos, ev.radius, 0xff4500);
                 }
+                else if (ev.type === 'ams_intercept') {
+                    const defender = frameMechs[ev.defender];
+                    if (defender && pos) {
+                        const dpos = new THREE.Vector3(...defender.pos);
+                        drawBeam(dpos, pos, 0x66ccff, 2);
+                        drawFlash(pos, 0x66ccff, 1);
+                    } else if (pos) {
+                        drawFlash(pos, 0x66ccff, 1);
+                    }
+                }
                 else if (ev.type === 'missile_launch') {
                     // Draw launch puff
                     if (origin) drawFlash(origin, 0xffffff, 1);
+                }
+                else if (ev.type === 'kinetic_fire') {
+                    if (origin) {
+                        const c = (weapon === 'gauss') ? 0xffff00 : 0xffaa00;
+                        drawFlash(origin, c, 1);
+                    }
                 }
             });
         }

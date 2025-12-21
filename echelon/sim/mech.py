@@ -22,6 +22,17 @@ class MechState:
     stability: float
     max_stability: float = 100.0
     fallen_time: float = 0.0 # >0 means fallen/stunned
+
+    # Optional per-step intent (set by the env, read by the sim).
+    focus_target_id: str | None = None
+
+    # Electronic warfare toggles (set by the env, applied by the sim/obs).
+    ecm_on: bool = False
+    eccm_on: bool = False
+
+    # Status effects.
+    suppressed_time: float = 0.0  # Stability regen penalty while > 0.
+    ams_cooldown: float = 0.0  # Anti-missile system cooldown (seconds).
     
     laser_cooldown: float = 0.0
     missile_cooldown: float = 0.0

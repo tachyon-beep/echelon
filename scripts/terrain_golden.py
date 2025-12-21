@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from echelon.config import WorldConfig
 from echelon.env.env import default_mech_classes
+from echelon.gen.corridors import carve_macro_corridors
 from echelon.gen.objective import clear_capture_zone, sample_capture_zone
 from echelon.gen.recipe import build_recipe
 from echelon.gen.transforms import apply_transform_solids, list_transforms, opposite_corner, transform_corner
@@ -76,6 +77,14 @@ def generate_hashes(seed: int, world_cfg: WorldConfig, *, packs_per_team: int) -
         world, rng_variants, spawn_clear=spawn_clear, spawn_corners=spawn_corners
     )
     clear_capture_zone(world, meta=world.meta)
+
+    carve_macro_corridors(
+        world,
+        spawn_corners=spawn_corners,
+        spawn_clear=spawn_clear,
+        meta=world.meta,
+        rng=rng_variants,
+    )
 
     if world_cfg.ensure_connectivity:
         validator = ConnectivityValidator(

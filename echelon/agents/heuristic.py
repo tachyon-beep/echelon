@@ -234,4 +234,27 @@ class HeuristicPolicy:
         a[ActionIndex.FIRE_MISSILE] = fire_missile
         a[ActionIndex.PAINT] = paint
         a[ActionIndex.FIRE_KINETIC] = fire_kinetic
+
+        # Target selection: focus our chosen target if it exists in the last-observed contact slots.
+        slots = getattr(env, "_last_contact_slots", {}).get(mech_id)
+        if isinstance(slots, list):
+            for i, oid in enumerate(slots[: getattr(env, "CONTACT_SLOTS", 0)]):
+                if oid == target.mech_id:
+                    a[getattr(env, "TARGET_START", 0) + int(i)] = 1.0
+                    break
+
+        # Light-only EWAR (simple default behavior): jam unless we are heat-stressed.
+        if mech.spec.name == "light":
+            if mech.heat < 0.7 * mech.spec.heat_cap:
+                a[getattr(env, "EWAR_START", 0) + 0] = 1.0  # ECM
+                a[getattr(env, "EWAR_START", 0) + 1] = 0.0
+            else:
+                a[getattr(env, "EWAR_START", 0) + 0] = 0.0
+                a[getattr(env, "EWAR_START", 0) + 1] = 1.0  # ECCM (fallback)
+
+        # Observation controls: keep the contact table hostile-focused and sorted by closest.
+        a[getattr(env, "OBS_CTRL_START", 0) + 0] = 1.0  # closest
+        a[getattr(env, "OBS_CTRL_START", 0) + 1] = 0.0
+        a[getattr(env, "OBS_CTRL_START", 0) + 2] = 0.0
+        a[getattr(env, "OBS_CTRL_START", 0) + 3] = 1.0  # hostile-only
         return a

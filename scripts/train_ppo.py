@@ -447,11 +447,31 @@ def main() -> None:
                 )
 
             if ep_over:
+                ep_ret = float(current_ep_return)
+                ep_len = int(current_ep_len)
                 episodic_returns.append(current_ep_return)
                 episodic_lengths.append(current_ep_len)
                 
                 outcome = env.last_outcome or {"winner": "unknown"}
                 episodic_outcomes.append(outcome.get("winner", "unknown"))
+
+                metrics_f.write(
+                    json.dumps(
+                        {
+                            "type": "episode",
+                            "time": time.time(),
+                            "episode": int(episodes) + 1,
+                            "return": float(ep_ret),
+                            "len": int(ep_len),
+                            "winner": str(outcome.get("winner", "unknown")),
+                            "reason": outcome.get("reason"),
+                            "hp": outcome.get("hp"),
+                            "zone_score": outcome.get("zone_score"),
+                            "stats": outcome.get("stats"),
+                        }
+                    )
+                    + "\n"
+                )
 
                 current_ep_return = 0.0
                 current_ep_len = 0

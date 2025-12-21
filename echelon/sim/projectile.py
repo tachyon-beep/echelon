@@ -9,6 +9,7 @@ import numpy as np
 class Projectile:
     shooter_id: str
     target_id: str | None  # None for unguided
+    weapon: str  # "missile" | "gauss" | "autocannon" | ...
     pos: np.ndarray  # float32[3]
     vel: np.ndarray  # float32[3]
     speed: float

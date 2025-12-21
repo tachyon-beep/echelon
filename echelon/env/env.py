@@ -7,13 +7,26 @@ import numpy as np
 from ..actions import ACTION_DIM as ACTION_DIM_CONST
 from ..constants import PACK_SIZE
 from ..config import EnvConfig, MechClassConfig
+from ..gen.corridors import carve_macro_corridors
 from ..gen.objective import capture_zone_params, clear_capture_zone, sample_capture_zone
 from ..gen.recipe import build_recipe
 from ..gen.transforms import apply_transform_solids, list_transforms, opposite_corner, transform_corner
 from ..gen.validator import ConnectivityValidator
 from ..sim.los import has_los
 from ..sim.mech import MechState
-from ..sim.sim import Sim
+from ..sim.sim import (
+    AMS_COOLDOWN_S,
+    ECCM_RADIUS_VOX,
+    ECCM_WEIGHT,
+    ECM_RADIUS_VOX,
+    ECM_WEIGHT,
+    MISSILE,
+    PAINT_LOCK_MIN_QUALITY,
+    SENSOR_QUALITY_MAX,
+    SENSOR_QUALITY_MIN,
+    SUPPRESS_DURATION_S,
+    Sim,
+)
 from ..sim.world import VoxelWorld
 
 
@@ -80,28 +93,50 @@ class EchelonEnv:
       obs, infos = env.reset(seed)
       obs, rewards, terminations, truncations, infos = env.step(actions)
 
-    actions: continuous float32 vectors of shape (9,):
+    actions: continuous float32 vectors with at least the first 9 dims:
       [forward, strafe, vertical, yaw_rate, fire_laser, vent, fire_missile, paint, fire_kinetic]
 
-    If `config.comm_dim > 0`, actions have shape (9 + comm_dim,) and the tail
-    `comm_dim` floats are treated as a pack-scoped communication message (seen by
-    packmates on the next decision tick).
+    Extra control dims are appended (target selection, EWAR toggles, observation-controls, and optional comms).
+
+    Action layout (by default):
+    - base (9): movement + weapons
+    - target selection (5): argmax selects a contact slot from the last obs
+    - EWAR (2): [ECM, ECCM] (light-only; ECCM wins if both set)
+    - obs control (4): sort(3) + hostile-only(1) for the *next* obs
+    - comm (comm_dim): pack-local message tail (1 decision-tick delayed)
 
     Observation-control action fields (always present):
     - sort mode (3 floats): argmax selects {closest, biggest, most_damaged}
     - filter (1 float): >0 selects hostile-only contacts
     """
 
-    BASE_ACTION_DIM = ACTION_DIM_CONST
-    ACTION_DIM = ACTION_DIM_CONST
-    OBS_SORT_DIM = 3
-    OBS_CTRL_DIM = OBS_SORT_DIM + 1  # + hostile-only filter
-    OBS_CTRL_START = BASE_ACTION_DIM
-    COMM_START = BASE_ACTION_DIM + OBS_CTRL_DIM
     CONTACT_SLOTS = 5
     # rel(3) + rel_vel(3) + yaw(2) + hp/heat(2) + stab/fallen/legged(3)
     # + relation_onehot(3) + class_onehot(3) + painted(1) + visible(1)
     CONTACT_DIM = 21
+
+    BASE_ACTION_DIM = ACTION_DIM_CONST
+    OBS_SORT_DIM = 3
+    OBS_CTRL_DIM = OBS_SORT_DIM + 1  # + hostile-only filter
+
+    # Target selection preferences (argmax selects one of the CONTACT_SLOTS from the last obs).
+    TARGET_DIM = CONTACT_SLOTS
+    TARGET_START = BASE_ACTION_DIM
+
+    # EWAR toggles (light-only; if both are set, ECCM wins).
+    EWAR_DIM = 2  # [ecm, eccm]
+    EWAR_START = TARGET_START + TARGET_DIM
+
+    # Observation selection controls (applies to the next returned obs).
+    OBS_CTRL_START = EWAR_START + EWAR_DIM
+
+    # Optional pack comm message tail.
+    COMM_START = OBS_CTRL_START + OBS_CTRL_DIM
+
+    # Ego-centric local occupancy map (bool footprint) around the mech.
+    LOCAL_MAP_R = 5
+    LOCAL_MAP_SIZE = 2 * LOCAL_MAP_R + 1
+    LOCAL_MAP_DIM = LOCAL_MAP_SIZE * LOCAL_MAP_SIZE
 
     def __init__(self, config: EnvConfig):
         self.config = config
@@ -135,6 +170,8 @@ class EchelonEnv:
         # Per-mech observation selection controls (applied on the next returned obs).
         self._contact_sort_mode: dict[str, int] = {aid: 0 for aid in self.possible_agents}  # 0=closest
         self._contact_filter_hostile: dict[str, bool] = {aid: False for aid in self.possible_agents}
+        # Contact slot identity from the last emitted observation (for target selection).
+        self._last_contact_slots: dict[str, list[str | None]] = {aid: [None] * self.CONTACT_SLOTS for aid in self.possible_agents}
 
         self.max_steps = int(math.ceil(config.max_episode_seconds / (config.dt_sim * config.decision_repeat)))
         self.step_count = 0
@@ -142,6 +179,10 @@ class EchelonEnv:
         self.team_zone_score: dict[str, float] = {"blue": 0.0, "red": 0.0}
         self.zone_score_to_win: float = float(config.max_episode_seconds * 0.5)
         self._max_team_hp: dict[str, float] = {"blue": 0.0, "red": 0.0}
+        self._episode_stats: dict[str, float] = {}
+        self._prev_fallen: dict[str, bool] = {}
+        self._prev_legged: dict[str, bool] = {}
+        self._prev_shutdown: dict[str, bool] = {}
 
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         if seed is not None:
@@ -156,6 +197,33 @@ class EchelonEnv:
         self.team_zone_score = {"blue": 0.0, "red": 0.0}
         self.zone_score_to_win = float(self.config.max_episode_seconds * 0.5)
         self._max_team_hp = {"blue": 0.0, "red": 0.0}
+        self._episode_stats = {
+            "kills_blue": 0.0,
+            "kills_red": 0.0,
+            "assists_blue": 0.0,
+            "assists_red": 0.0,
+            "paints_blue": 0.0,
+            "paints_red": 0.0,
+            "laser_hits_blue": 0.0,
+            "laser_hits_red": 0.0,
+            "missile_launches_blue": 0.0,
+            "missile_launches_red": 0.0,
+            "kinetic_fires_blue": 0.0,
+            "kinetic_fires_red": 0.0,
+            "ams_intercepts_blue": 0.0,
+            "ams_intercepts_red": 0.0,
+            "damage_blue": 0.0,
+            "damage_red": 0.0,
+            "knockdowns_blue": 0.0,
+            "knockdowns_red": 0.0,
+            "legged_blue": 0.0,
+            "legged_red": 0.0,
+            "shutdowns_blue": 0.0,
+            "shutdowns_red": 0.0,
+        }
+        self._prev_fallen = {}
+        self._prev_legged = {}
+        self._prev_shutdown = {}
 
         seq = np.random.SeedSequence(episode_seed)
         rng_world, rng_sim, rng_variants = (np.random.default_rng(s) for s in seq.spawn(3))
@@ -213,6 +281,14 @@ class EchelonEnv:
         )
         clear_capture_zone(world, meta=world.meta)
 
+        carve_macro_corridors(
+            world,
+            spawn_corners=spawn_corners,
+            spawn_clear=spawn_clear,
+            meta=world.meta,
+            rng=rng_variants,
+        )
+
         if self.config.world.ensure_connectivity:
             validator = ConnectivityValidator(
                 (world.size_z, world.size_y, world.size_x),
@@ -259,7 +335,15 @@ class EchelonEnv:
                 else:
                     y = float(world.size_y) - 2.0 - float(i // cols) * 3.5 - float(hs[1])
 
-                yaw = float(math.atan2(zone_cy - y, zone_cx - x))
+                # Small spawn jitter improves replay variety and reduces brittle overfitting
+                # to a fixed formation grid.
+                jitter = 0.25
+                x = float(x + float(rng_variants.uniform(-jitter, jitter)))
+                y = float(y + float(rng_variants.uniform(-jitter, jitter)))
+                x = float(np.clip(x, float(hs[0]), float(world.size_x) - float(hs[0])))
+                y = float(np.clip(y, float(hs[1]), float(world.size_y) - float(hs[1])))
+
+                yaw = float(math.atan2(zone_cy - y, zone_cx - x) + float(rng_variants.uniform(-0.15, 0.15)))
 
                 z = float(hs[2])
                 pos = np.asarray([x, y, z], dtype=np.float32)
@@ -293,11 +377,19 @@ class EchelonEnv:
             self._contact_sort_mode[aid] = 0
         for aid in self._contact_filter_hostile:
             self._contact_filter_hostile[aid] = False
+        for aid in self._last_contact_slots:
+            self._last_contact_slots[aid] = [None] * self.CONTACT_SLOTS
 
         if self.config.record_replay:
             self._replay = []
         else:
             self._replay = None
+
+        # Seed transition trackers.
+        for mid, m in sim.mechs.items():
+            self._prev_fallen[mid] = bool(m.fallen_time > 0.0)
+            self._prev_legged[mid] = bool(m.is_legged)
+            self._prev_shutdown[mid] = bool(m.shutdown)
 
         obs = self._obs()
         infos = {aid: {} for aid in self.agents}
@@ -368,12 +460,74 @@ class EchelonEnv:
         feat[20] = 1.0  # visible
         return feat
 
+    def _ewar_levels(self, viewer: MechState) -> tuple[float, float, float]:
+        """
+        Returns (sensor_quality, jam_level, eccm_level).
+
+        - jam_level/eccm_level are in [0, 1] based on strongest nearby sources.
+        - sensor_quality is clipped to [SENSOR_QUALITY_MIN, SENSOR_QUALITY_MAX].
+        """
+        sim = self.sim
+        assert sim is not None
+
+        if not viewer.alive or viewer.shutdown:
+            return float(SENSOR_QUALITY_MIN), 0.0, 0.0
+
+        jam = 0.0
+        eccm = 0.0
+        for other in sim.mechs.values():
+            if not other.alive or other.mech_id == viewer.mech_id:
+                continue
+            if other.shutdown:
+                continue
+
+            d = other.pos - viewer.pos
+            dist = float(np.linalg.norm(d))
+            if other.team != viewer.team and other.ecm_on and dist <= ECM_RADIUS_VOX:
+                jam = max(jam, max(0.0, 1.0 - dist / max(1e-6, float(ECM_RADIUS_VOX))))
+            if other.team == viewer.team and other.eccm_on and dist <= ECCM_RADIUS_VOX:
+                eccm = max(eccm, max(0.0, 1.0 - dist / max(1e-6, float(ECCM_RADIUS_VOX))))
+
+        sensor_quality = 1.0 - float(ECM_WEIGHT) * jam + float(ECCM_WEIGHT) * eccm
+        sensor_quality = float(np.clip(sensor_quality, float(SENSOR_QUALITY_MIN), float(SENSOR_QUALITY_MAX)))
+        return sensor_quality, float(jam), float(eccm)
+
+    def _local_map(self, viewer: MechState) -> np.ndarray:
+        world = self.world
+        assert world is not None
+
+        r = int(self.LOCAL_MAP_R)
+        out = np.zeros((2 * r + 1, 2 * r + 1), dtype=np.float32)
+
+        # Use a short Z band (movement/cover footprint).
+        clearance_z = int(max(1, min(getattr(self.config.world, "connectivity_clearance_z", 4), world.size_z)))
+
+        yaw = float(viewer.yaw)
+        c = float(math.cos(yaw))
+        s = float(math.sin(yaw))
+
+        # Sample local grid in (forward, right) coordinates, mapped into world XY.
+        base_x = float(viewer.pos[0])
+        base_y = float(viewer.pos[1])
+        for iy, fwd in enumerate(range(-r, r + 1)):
+            for ix, right in enumerate(range(-r, r + 1)):
+                dx = c * float(fwd) - s * float(right)
+                dy = s * float(fwd) + c * float(right)
+                x = int(math.floor(base_x + dx))
+                y = int(math.floor(base_y + dy))
+                if x < 0 or y < 0 or x >= world.size_x or y >= world.size_y:
+                    out[iy, ix] = 1.0
+                    continue
+                out[iy, ix] = 1.0 if bool(np.any(world.solid[:clearance_z, y, x])) else 0.0
+
+        return out.reshape(-1)
+
     def _obs(self) -> dict[str, np.ndarray]:
         sim = self.sim
         world = self.world
         assert sim is not None and world is not None
 
-        radar_range = 14.0
+        base_radar_range = 14.0
         zone_cx, zone_cy, zone_r = capture_zone_params(world.meta, size_x=world.size_x, size_y=world.size_y)
         max_xy = float(max(world.size_x, world.size_y))
         zone_r_norm = float(np.clip(zone_r / max(1.0, max_xy), 0.0, 1.0))
@@ -408,11 +562,15 @@ class EchelonEnv:
             viewer = sim.mechs[aid]
             if not viewer.alive:
                 obs[aid] = np.zeros(self._obs_dim(), dtype=np.float32)
+                self._last_contact_slots[aid] = [None] * self.CONTACT_SLOTS
                 continue
 
             pack_ids = self._packmates.get(aid, [])
             sort_mode = int(self._contact_sort_mode.get(aid, 0))
             hostile_only = bool(self._contact_filter_hostile.get(aid, False))
+
+            sensor_quality, jam_level, _eccm_level = self._ewar_levels(viewer)
+            radar_range = float(base_radar_range) * float(sensor_quality)
 
             # Top-K contact table (fixed size).
             contacts: dict[str, list[tuple[float, str, bool]]] = {"friendly": [], "hostile": [], "neutral": []}
@@ -435,7 +593,8 @@ class EchelonEnv:
                 if self.config.observation_mode == "full":
                     visible = True
                 else:
-                    if painted_by_pack or dist <= radar_range:
+                    painted_visible = painted_by_pack and (sensor_quality >= float(PAINT_LOCK_MIN_QUALITY))
+                    if painted_visible or dist <= radar_range:
                         visible = True
                     else:
                         visible = _cached_los(aid, other_id, viewer.pos, other.pos)
@@ -497,6 +656,11 @@ class EchelonEnv:
                     viewer, sim.mechs[oid], relation=rel, painted_by_pack=painted
                 )
 
+            slot_ids: list[str | None] = [None] * self.CONTACT_SLOTS
+            for i, (_, oid, _) in enumerate(selected[: self.CONTACT_SLOTS]):
+                slot_ids[i] = oid
+            self._last_contact_slots[aid] = slot_ids
+
             parts: list[np.ndarray] = []
             parts.append(contact_feats.reshape(-1))
 
@@ -512,11 +676,34 @@ class EchelonEnv:
                     comm[i, :] = msg
                 parts.append(comm.reshape(-1))
 
+            # Ego-centric local map (footprint occupancy).
+            parts.append(self._local_map(viewer))
+
             # Extra per-agent scalars.
             targeted = 1.0 if self._is_targeted(viewer) else 0.0
             under_fire = 1.0 if viewer.was_hit else 0.0
             painted = 1.0 if viewer.painted_remaining > 0.0 else 0.0
             shutdown = 1.0 if viewer.shutdown else 0.0
+
+            incoming_missile = 0.0
+            for p in sim.projectiles:
+                if not getattr(p, "alive", False):
+                    continue
+                if getattr(p, "weapon", None) != MISSILE.name:
+                    continue
+                if getattr(p, "guidance", None) != "homing":
+                    continue
+                if getattr(p, "target_id", None) == viewer.mech_id:
+                    incoming_missile = 1.0
+                    break
+
+            sensor_quality_norm = float(np.clip(sensor_quality / float(SENSOR_QUALITY_MAX), 0.0, 1.0))
+            jam_norm = float(np.clip(jam_level, 0.0, 1.0))
+
+            ecm_on = 1.0 if (viewer.ecm_on and (not viewer.shutdown)) else 0.0
+            eccm_on = 1.0 if (viewer.eccm_on and (not viewer.shutdown)) else 0.0
+            suppressed_norm = float(np.clip(viewer.suppressed_time / max(1e-6, float(SUPPRESS_DURATION_S)), 0.0, 1.0))
+            ams_cd_norm = float(np.clip(viewer.ams_cooldown / max(1e-6, float(AMS_COOLDOWN_S)), 0.0, 1.0))
 
             # Self kinematics (needed for jump jets and movement control).
             self_vel = (viewer.vel / 10.0).astype(np.float32, copy=False)
@@ -553,6 +740,13 @@ class EchelonEnv:
                         under_fire,
                         painted,
                         shutdown,
+                        incoming_missile,
+                        sensor_quality_norm,
+                        jam_norm,
+                        ecm_on,
+                        eccm_on,
+                        suppressed_norm,
+                        ams_cd_norm,
                         self_vel[0],
                         self_vel[1],
                         self_vel[2],
@@ -582,10 +776,13 @@ class EchelonEnv:
 
     def _obs_dim(self) -> int:
         comm_dim = PACK_SIZE * int(max(0, int(getattr(self.config, "comm_dim", 0))))
-        # self features = targeted, under_fire, painted, shutdown, self_vel(3), cooldowns(4), in_zone,
-        #                vec_to_zone(3), zone_radius, my_control, my_score, enemy_score, time_frac,
-        #                obs_sort_onehot(3), hostile_only = 24
-        return self.CONTACT_SLOTS * self.CONTACT_DIM + comm_dim + 24
+        # self features =
+        #   targeted, under_fire, painted, shutdown,
+        #   incoming_missile, sensor_quality, jam_level, ecm_on, eccm_on, suppressed, ams_cd,
+        #   self_vel(3), cooldowns(4), in_zone, vec_to_zone(3), zone_radius,
+        #   my_control, my_score, enemy_score, time_frac, obs_sort_onehot(3), hostile_only = 31
+        self_dim = 31
+        return self.CONTACT_SLOTS * self.CONTACT_DIM + comm_dim + int(self.LOCAL_MAP_DIM) + self_dim
 
     def _is_targeted(self, mech: MechState) -> bool:
         sim = self.sim
@@ -627,10 +824,51 @@ class EchelonEnv:
                 if a.size != self.ACTION_DIM:
                     raise ValueError(
                         f"action[{aid!r}] has size {a.size}, expected {self.ACTION_DIM} "
-                        f"(base={self.BASE_ACTION_DIM}, obs_ctrl={self.OBS_CTRL_DIM}, comm_dim={self.comm_dim})"
+                        f"(base={self.BASE_ACTION_DIM}, target={self.TARGET_DIM}, ewar={self.EWAR_DIM}, "
+                        f"obs_ctrl={self.OBS_CTRL_DIM}, comm_dim={self.comm_dim})"
                     )
                 a = a.reshape(self.ACTION_DIM)
             act[aid] = a.astype(np.float32, copy=False)
+
+        # Apply target selection + EWAR toggles immediately (affects this sim step).
+        for aid in self.agents:
+            m = sim.mechs[aid]
+            a = act[aid]
+
+            if not m.alive:
+                m.focus_target_id = None
+                m.ecm_on = False
+                m.eccm_on = False
+                continue
+
+            # Target selection is an argmax over the last-observed contact slots.
+            prefs = a[self.TARGET_START : self.TARGET_START + self.TARGET_DIM]
+            focus_id: str | None = None
+            if prefs.size:
+                i = int(np.argmax(prefs))
+                if float(prefs[i]) > 0.0:
+                    slots = self._last_contact_slots.get(aid) or []
+                    if i < len(slots):
+                        cand = slots[i]
+                        if cand is not None:
+                            tgt = sim.mechs.get(cand)
+                            if tgt is not None and tgt.alive and tgt.team != m.team:
+                                focus_id = str(cand)
+            m.focus_target_id = focus_id
+
+            # Light-only ECM/ECCM (mutually exclusive; ECCM wins).
+            ecm_cmd = float(a[self.EWAR_START + 0]) > 0.0
+            eccm_cmd = float(a[self.EWAR_START + 1]) > 0.0
+            if m.spec.name == "light":
+                if eccm_cmd:
+                    m.eccm_on = True
+                    m.ecm_on = False
+                else:
+                    m.ecm_on = bool(ecm_cmd)
+                    m.eccm_on = False
+            else:
+                m.ecm_on = False
+                m.eccm_on = False
 
         # Update per-mech observation controls from the chosen action (applies to returned obs).
         for aid in self.agents:
@@ -643,6 +881,79 @@ class EchelonEnv:
         hp_before = self.team_hp()
 
         events = sim.step(act, num_substeps=self.config.decision_repeat)
+
+        # Episode stats (for logging/debugging).
+        if events:
+            for ev in events:
+                et = ev.get("type")
+                if et == "kill":
+                    shooter = sim.mechs.get(str(ev.get("shooter")))
+                    if shooter is not None:
+                        self._episode_stats[f"kills_{shooter.team}"] = float(self._episode_stats.get(f"kills_{shooter.team}", 0.0) + 1.0)
+                elif et == "assist":
+                    painter = sim.mechs.get(str(ev.get("painter")))
+                    if painter is not None:
+                        self._episode_stats[f"assists_{painter.team}"] = float(
+                            self._episode_stats.get(f"assists_{painter.team}", 0.0) + 1.0
+                        )
+                elif et == "paint":
+                    shooter = sim.mechs.get(str(ev.get("shooter")))
+                    if shooter is not None:
+                        self._episode_stats[f"paints_{shooter.team}"] = float(self._episode_stats.get(f"paints_{shooter.team}", 0.0) + 1.0)
+                elif et == "laser_hit":
+                    shooter = sim.mechs.get(str(ev.get("shooter")))
+                    if shooter is not None:
+                        self._episode_stats[f"laser_hits_{shooter.team}"] = float(
+                            self._episode_stats.get(f"laser_hits_{shooter.team}", 0.0) + 1.0
+                        )
+                        dmg = float(ev.get("damage", 0.0) or 0.0)
+                        self._episode_stats[f"damage_{shooter.team}"] = float(
+                            self._episode_stats.get(f"damage_{shooter.team}", 0.0) + dmg
+                        )
+                elif et == "projectile_hit":
+                    shooter = sim.mechs.get(str(ev.get("shooter")))
+                    if shooter is not None:
+                        dmg = float(ev.get("damage", 0.0) or 0.0)
+                        self._episode_stats[f"damage_{shooter.team}"] = float(
+                            self._episode_stats.get(f"damage_{shooter.team}", 0.0) + dmg
+                        )
+                elif et == "missile_launch":
+                    shooter = sim.mechs.get(str(ev.get("shooter")))
+                    if shooter is not None:
+                        self._episode_stats[f"missile_launches_{shooter.team}"] = float(
+                            self._episode_stats.get(f"missile_launches_{shooter.team}", 0.0) + 1.0
+                        )
+                elif et == "kinetic_fire":
+                    shooter = sim.mechs.get(str(ev.get("shooter")))
+                    if shooter is not None:
+                        self._episode_stats[f"kinetic_fires_{shooter.team}"] = float(
+                            self._episode_stats.get(f"kinetic_fires_{shooter.team}", 0.0) + 1.0
+                        )
+                elif et == "ams_intercept":
+                    defender = sim.mechs.get(str(ev.get("defender")))
+                    if defender is not None:
+                        self._episode_stats[f"ams_intercepts_{defender.team}"] = float(
+                            self._episode_stats.get(f"ams_intercepts_{defender.team}", 0.0) + 1.0
+                        )
+
+        # Transition-derived episode stats.
+        for mid, m in sim.mechs.items():
+            now_fallen = bool(m.fallen_time > 0.0)
+            if now_fallen and (not self._prev_fallen.get(mid, False)):
+                self._episode_stats[f"knockdowns_{m.team}"] = float(self._episode_stats.get(f"knockdowns_{m.team}", 0.0) + 1.0)
+            self._prev_fallen[mid] = now_fallen
+
+            now_legged = bool(m.is_legged)
+            if now_legged and (not self._prev_legged.get(mid, False)):
+                self._episode_stats[f"legged_{m.team}"] = float(self._episode_stats.get(f"legged_{m.team}", 0.0) + 1.0)
+            self._prev_legged[mid] = now_legged
+
+            now_shutdown = bool(m.shutdown)
+            if now_shutdown and (not self._prev_shutdown.get(mid, False)):
+                self._episode_stats[f"shutdowns_{m.team}"] = float(
+                    self._episode_stats.get(f"shutdowns_{m.team}", 0.0) + 1.0
+                )
+            self._prev_shutdown[mid] = now_shutdown
 
         # Update comm buffers after the sim step (dead mechs do not broadcast).
         if self.comm_dim > 0:
@@ -797,6 +1108,7 @@ class EchelonEnv:
                 "hp": hp_after,
                 "zone_score": dict(self.team_zone_score),
                 "zone_score_to_win": float(self.zone_score_to_win),
+                "stats": dict(self._episode_stats),
             }
 
         # Attach aggregated events to all infos (for now).
@@ -836,10 +1148,18 @@ class EchelonEnv:
                     "vel": [float(v) for v in m.vel],
                     "yaw": float(m.yaw),
                     "hp": float(m.hp),
+                    "hp_max": float(m.spec.hp),
                     "heat": float(m.heat),
+                    "heat_cap": float(m.spec.heat_cap),
                     "stability": float(m.stability),
+                    "stability_max": float(m.max_stability),
                     "alive": bool(m.alive),
                     "fallen": bool(m.fallen_time > 0.0),
+                    "legged": bool(m.is_legged),
+                    "suppressed_time": float(m.suppressed_time),
+                    "ams_cooldown": float(m.ams_cooldown),
+                    "ecm_on": bool(m.ecm_on and (not m.shutdown)),
+                    "eccm_on": bool(m.eccm_on and (not m.shutdown)),
                 }
                 for mid, m in sim.mechs.items()
             },

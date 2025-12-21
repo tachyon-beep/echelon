@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from echelon.env.env import default_mech_classes
 from echelon.config import WorldConfig
 from echelon.gen.objective import capture_zone_params, clear_capture_zone, sample_capture_zone
+from echelon.gen.corridors import carve_macro_corridors
 from echelon.gen.recipe import build_recipe
 from echelon.gen.transforms import apply_transform_solids, list_transforms, opposite_corner, transform_corner
 from echelon.gen.validator import ConnectivityValidator
@@ -163,6 +164,14 @@ def main() -> None:
             world, rng_variants, spawn_clear=spawn_clear, spawn_corners=spawn_corners
         )
         clear_capture_zone(world, meta=world.meta)
+
+        carve_macro_corridors(
+            world,
+            spawn_corners=spawn_corners,
+            spawn_clear=spawn_clear,
+            meta=world.meta,
+            rng=rng_variants,
+        )
 
         validator.validate_and_fix(world.solid, spawn_corners=spawn_corners, spawn_clear=spawn_clear, meta=world.meta)
 

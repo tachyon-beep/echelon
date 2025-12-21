@@ -89,6 +89,30 @@ PAINTER = WeaponSpec(
     arc_deg=60.0,
 )
 
+# Lightweight "role" extensions (kept simple and readable in replays).
+LASER_HEAT_TRANSFER = 6.0  # Heat applied to the target on laser hit.
+
+# Autocannon suppression: slows stability regen briefly after AC hits.
+SUPPRESS_DURATION_S = 1.2
+SUPPRESS_REGEN_SCALE = 0.25
+
+# Electronic warfare: ECM reduces sensor quality; ECCM restores it.
+ECM_RADIUS_VOX = 18.0
+ECCM_RADIUS_VOX = 18.0
+ECM_WEIGHT = 0.85
+ECCM_WEIGHT = 0.65
+SENSOR_QUALITY_MIN = 0.25
+SENSOR_QUALITY_MAX = 1.5
+PAINT_LOCK_MIN_QUALITY = 0.70
+
+ECM_HEAT_PER_S = 3.0
+ECCM_HEAT_PER_S = 2.0
+
+# Simple self-defense point-defense against homing missiles.
+AMS_RANGE_VOX = 5.5
+AMS_COOLDOWN_S = 1.0
+AMS_INTERCEPT_PROB = 0.60
+
 
 def _wrap_pi(angle: float) -> float:
     # Wrap to (-pi, pi]
@@ -158,6 +182,36 @@ class Sim:
 
     def team_alive(self, team: str) -> bool:
         return any(m.alive and m.team == team for m in self.mechs.values())
+
+    def _ewar_levels(self, viewer: MechState) -> tuple[float, float]:
+        # Returns (jam_level, eccm_level) in [0, 1], based on strongest nearby sources.
+        if not viewer.alive:
+            return 0.0, 0.0
+        if viewer.shutdown:
+            return 0.0, 0.0
+
+        jam = 0.0
+        eccm = 0.0
+        for other in self.mechs.values():
+            if not other.alive or other.mech_id == viewer.mech_id:
+                continue
+            if other.shutdown:
+                continue
+
+            d = other.pos - viewer.pos
+            dist = float(np.linalg.norm(d))
+
+            if other.team != viewer.team and other.ecm_on and dist <= ECM_RADIUS_VOX:
+                jam = max(jam, max(0.0, 1.0 - dist / max(1e-6, ECM_RADIUS_VOX)))
+            if other.team == viewer.team and other.eccm_on and dist <= ECCM_RADIUS_VOX:
+                eccm = max(eccm, max(0.0, 1.0 - dist / max(1e-6, ECCM_RADIUS_VOX)))
+
+        return float(jam), float(eccm)
+
+    def _sensor_quality(self, viewer: MechState) -> float:
+        jam, eccm = self._ewar_levels(viewer)
+        q = 1.0 - ECM_WEIGHT * jam + ECCM_WEIGHT * eccm
+        return float(np.clip(q, SENSOR_QUALITY_MIN, SENSOR_QUALITY_MAX))
 
     def _collides_world(self, mech: MechState, pos: np.ndarray) -> bool:
         hs = mech.half_size
@@ -346,9 +400,25 @@ class Sim:
         if shooter.laser_cooldown > 0.0:
             return []
 
+        focus: MechState | None = None
+        if shooter.focus_target_id:
+            cand = self.mechs.get(shooter.focus_target_id)
+            if cand is not None and cand.alive and cand.team != shooter.team:
+                focus = cand
+
         best: tuple[float, MechState] | None = None
+        if focus is not None:
+            delta = focus.pos - shooter.pos
+            dist = float(np.linalg.norm(delta))
+            if dist <= LASER.range_vox:
+                yaw_delta = _angle_between_yaw(shooter.yaw, delta[:2])
+                if yaw_delta <= math.radians(LASER.arc_deg * 0.5) and has_los(self.world, shooter.pos, focus.pos):
+                    best = (dist, focus)
+
         for target in self.mechs.values():
             if not target.alive or target.team == shooter.team:
+                continue
+            if best is not None and target is focus:
                 continue
             delta = target.pos - shooter.pos
             dist = float(np.linalg.norm(delta))
@@ -383,6 +453,7 @@ class Sim:
         final_dmg, bonus_events = self._get_paint_bonus(target, base_dmg, shooter.mech_id)
 
         target.hp -= final_dmg
+        target.heat = float(target.heat + LASER_HEAT_TRANSFER)
         target.was_hit = True
         shooter.dealt_damage += final_dmg
         target.took_damage += final_dmg
@@ -390,8 +461,10 @@ class Sim:
         events: list[dict] = [
             {
                 "type": "laser_hit",
+                "weapon": LASER.name,
                 "shooter": shooter.mech_id,
                 "target": target.mech_id,
+                "pos": [float(target.pos[0]), float(target.pos[1]), float(target.pos[2])],
                 "damage": final_dmg,
                 "is_crit": is_crit,
                 "is_leg_hit": is_leg_hit,
@@ -415,9 +488,37 @@ class Sim:
         if shooter.missile_cooldown > 0.0:
             return []
 
-        best: tuple[float, MechState] | None = None
+        def _lock_type(target: MechState) -> str | None:
+            if has_los(self.world, shooter.pos, target.pos):
+                return "los"
+            if target.painted_remaining > 0.0 and target.last_painter_id:
+                painter = self.mechs.get(target.last_painter_id)
+                if painter is not None and _same_pack(painter, shooter):
+                    if self._sensor_quality(shooter) >= PAINT_LOCK_MIN_QUALITY:
+                        return "paint"
+            return None
+
+        focus: MechState | None = None
+        if shooter.focus_target_id:
+            cand = self.mechs.get(shooter.focus_target_id)
+            if cand is not None and cand.alive and cand.team != shooter.team:
+                focus = cand
+
+        best: tuple[float, MechState, str] | None = None
+        if focus is not None:
+            delta = focus.pos - shooter.pos
+            dist = float(np.linalg.norm(delta))
+            if dist <= MISSILE.range_vox:
+                yaw_delta = _angle_between_yaw(shooter.yaw, delta[:2])
+                if yaw_delta <= math.radians(MISSILE.arc_deg * 0.5):
+                    lt = _lock_type(focus)
+                    if lt is not None:
+                        best = (dist, focus, lt)
+
         for target in self.mechs.values():
             if not target.alive or target.team == shooter.team:
+                continue
+            if best is not None and target is focus:
                 continue
             delta = target.pos - shooter.pos
             dist = float(np.linalg.norm(delta))
@@ -429,26 +530,18 @@ class Sim:
             if yaw_delta > math.radians(MISSILE.arc_deg * 0.5):
                 continue
 
-            has_lock = False
-            # Primary lock: direct LOS.
-            if has_los(self.world, shooter.pos, target.pos):
-                has_lock = True
-            # Secondary lock: painted target via pack network (indirect).
-            elif target.painted_remaining > 0.0 and target.last_painter_id:
-                painter = self.mechs.get(target.last_painter_id)
-                if painter is not None and _same_pack(painter, shooter):
-                    has_lock = True
-            
-            if not has_lock:
+            lt = _lock_type(target)
+            if lt is None:
                 continue
 
             if best is None or dist < best[0]:
-                best = (dist, target)
+                best = (dist, target, lt)
 
         if best is None:
             return []
 
         target = best[1]
+        lock_type = best[2]
         shooter.missile_cooldown = MISSILE.cooldown_s
         shooter.heat = float(shooter.heat + MISSILE.heat)
 
@@ -465,6 +558,7 @@ class Sim:
         proj = Projectile(
             shooter_id=shooter.mech_id,
             target_id=target.mech_id,
+            weapon=MISSILE.name,
             pos=shooter.pos.copy() + np.array([0, 0, shooter.half_size[2] + 0.5], dtype=np.float32),
             vel=vel,
             speed=speed,
@@ -477,7 +571,16 @@ class Sim:
         )
         self.projectiles.append(proj)
 
-        return [{"type": "missile_launch", "shooter": shooter.mech_id, "target": target.mech_id}]
+        return [
+            {
+                "type": "missile_launch",
+                "weapon": MISSILE.name,
+                "lock": lock_type,
+                "shooter": shooter.mech_id,
+                "target": target.mech_id,
+                "pos": [float(proj.pos[0]), float(proj.pos[1]), float(proj.pos[2])],
+            }
+        ]
 
     def _try_paint(self, shooter: MechState, action: np.ndarray) -> list[dict]:
         if len(action) < ACTION_DIM:
@@ -491,9 +594,25 @@ class Sim:
         if shooter.painter_cooldown > 0.0:
             return []
 
+        focus: MechState | None = None
+        if shooter.focus_target_id:
+            cand = self.mechs.get(shooter.focus_target_id)
+            if cand is not None and cand.alive and cand.team != shooter.team:
+                focus = cand
+
         best: tuple[float, MechState] | None = None
+        if focus is not None:
+            delta = focus.pos - shooter.pos
+            dist = float(np.linalg.norm(delta))
+            if dist <= PAINTER.range_vox:
+                yaw_delta = _angle_between_yaw(shooter.yaw, delta[:2])
+                if yaw_delta <= math.radians(PAINTER.arc_deg * 0.5) and has_los(self.world, shooter.pos, focus.pos):
+                    best = (dist, focus)
+
         for target in self.mechs.values():
             if not target.alive or target.team == shooter.team:
+                continue
+            if best is not None and target is focus:
                 continue
             delta = target.pos - shooter.pos
             dist = float(np.linalg.norm(delta))
@@ -518,7 +637,15 @@ class Sim:
         target.painted_remaining = 5.0 # 5 seconds of paint
         target.last_painter_id = shooter.mech_id
 
-        return [{"type": "paint", "shooter": shooter.mech_id, "target": target.mech_id}]
+        return [
+            {
+                "type": "paint",
+                "weapon": PAINTER.name,
+                "shooter": shooter.mech_id,
+                "target": target.mech_id,
+                "pos": [float(target.pos[0]), float(target.pos[1]), float(target.pos[2])],
+            }
+        ]
 
     def _try_fire_kinetic(self, shooter: MechState, action: np.ndarray) -> list[dict]:
         if len(action) < ACTION_DIM:
@@ -553,9 +680,26 @@ class Sim:
         # Let's add a simple "auto-pitch" if an enemy is in LOS and yaw-aligned.
         target_pos = None
         best_dist = spec.range_vox
+
+        focus: MechState | None = None
+        if shooter.focus_target_id:
+            cand = self.mechs.get(shooter.focus_target_id)
+            if cand is not None and cand.alive and cand.team != shooter.team:
+                focus = cand
+
+        if focus is not None:
+            delta = focus.pos - shooter.pos
+            dist = float(np.linalg.norm(delta))
+            if dist <= best_dist:
+                yaw_err = _angle_between_yaw(shooter.yaw, delta[:2])
+                if yaw_err < 0.2:
+                    target_pos = focus.pos
+                    best_dist = dist
         
         for t in self.mechs.values():
             if t.team != shooter.team and t.alive:
+                if focus is not None and t is focus:
+                    continue
                 delta = t.pos - shooter.pos
                 dist = np.linalg.norm(delta)
                 if dist < best_dist:
@@ -589,6 +733,7 @@ class Sim:
         proj = Projectile(
             shooter_id=shooter.mech_id,
             target_id=None, # Dumbfire
+            weapon=spec.name,
             pos=start_pos,
             vel=vel,
             speed=spec.speed_vox,
@@ -604,7 +749,14 @@ class Sim:
         shooter.kinetic_cooldown = spec.cooldown_s
         shooter.heat += spec.heat
 
-        return [{"type": "kinetic_fire", "shooter": shooter.mech_id, "weapon": spec.name}]
+        return [
+            {
+                "type": "kinetic_fire",
+                "weapon": spec.name,
+                "shooter": shooter.mech_id,
+                "pos": [float(proj.pos[0]), float(proj.pos[1]), float(proj.pos[2])],
+            }
+        ]
 
     def _explode(self, pos: np.ndarray, proj: Projectile, exclude_mech: MechState | None = None) -> list[dict]:
         events = []
@@ -636,8 +788,10 @@ class Sim:
                     
                     events.append({
                         "type": "projectile_hit",
+                        "weapon": proj.weapon,
                         "shooter": proj.shooter_id,
                         "target": m.mech_id,
+                        "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
                         "damage": raw_dmg,
                         "stability": raw_stab,
                         "is_crit": is_crit
@@ -647,6 +801,7 @@ class Sim:
         
         events.append({
             "type": "explosion",
+            "weapon": proj.weapon,
             "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
             "radius": proj.splash_rad,
             "shooter": proj.shooter_id
@@ -666,6 +821,32 @@ class Sim:
             if p.age > p.max_lifetime:
                 p.alive = False
                 continue
+
+            # Point-defense: allow the *target* to intercept incoming homing missiles.
+            if p.weapon == MISSILE.name and p.guidance == "homing" and p.target_id:
+                target = self.mechs.get(p.target_id)
+                if (
+                    target is not None
+                    and target.alive
+                    and (not target.shutdown)
+                    and target.spec.name in ("medium", "heavy")
+                    and target.ams_cooldown <= 0.0
+                ):
+                    dist = float(np.linalg.norm(target.pos - p.pos))
+                    if dist <= AMS_RANGE_VOX and self.rng.random() < AMS_INTERCEPT_PROB:
+                        p.alive = False
+                        target.ams_cooldown = AMS_COOLDOWN_S
+                        events.append(
+                            {
+                                "type": "ams_intercept",
+                                "weapon": "ams",
+                                "defender": target.mech_id,
+                                "shooter": p.shooter_id,
+                                "target": target.mech_id,
+                                "pos": [float(p.pos[0]), float(p.pos[1]), float(p.pos[2])],
+                            }
+                        )
+                        continue
 
             # Guidance & Physics
             if p.guidance == "homing":
@@ -770,6 +951,8 @@ class Sim:
                     
                     m.hp -= final_dmg
                     m.stability = max(0.0, m.stability - final_stab)
+                    if p.weapon == AUTOCANNON.name:
+                        m.suppressed_time = max(float(m.suppressed_time), float(SUPPRESS_DURATION_S))
                     m.was_hit = True
                     m.took_damage += final_dmg
                     
@@ -778,8 +961,10 @@ class Sim:
                         shooter.dealt_damage += final_dmg
                         events.append({
                             "type": "projectile_hit",
+                            "weapon": p.weapon,
                             "shooter": shooter.mech_id,
                             "target": m.mech_id,
+                            "pos": [float(impact_pos[0]), float(impact_pos[1]), float(impact_pos[2])],
                             "damage": final_dmg,
                             "stability": final_stab,
                             "is_crit": is_crit,
@@ -825,6 +1010,15 @@ class Sim:
                 mech.kinetic_cooldown = max(0.0, float(mech.kinetic_cooldown - self.dt))
                 mech.painter_cooldown = max(0.0, float(mech.painter_cooldown - self.dt))
                 mech.painted_remaining = max(0.0, float(mech.painted_remaining - self.dt))
+                mech.suppressed_time = max(0.0, float(mech.suppressed_time - self.dt))
+                mech.ams_cooldown = max(0.0, float(mech.ams_cooldown - self.dt))
+
+                # Continuous EWAR cost (when not shutdown, equipment is assumed offline).
+                if not mech.shutdown:
+                    if mech.ecm_on:
+                        mech.heat = float(mech.heat + ECM_HEAT_PER_S * self.dt)
+                    if mech.eccm_on:
+                        mech.heat = float(mech.heat + ECCM_HEAT_PER_S * self.dt)
                 
                 # Stability Logic
                 if mech.fallen_time > 0.0:
@@ -850,6 +1044,9 @@ class Sim:
                             
                         if np.linalg.norm(mech.vel) > 1.0:
                             regen *= 0.5 # Slower while moving
+
+                        if mech.suppressed_time > 0.0:
+                            regen *= SUPPRESS_REGEN_SCALE
                         
                         mech.stability = min(max_stab, mech.stability + regen)
 
