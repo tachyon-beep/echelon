@@ -1,7 +1,7 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 import sys
-import math
 from pathlib import Path
 import numpy as np
 
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from echelon.sim.sim import Sim, MISSILE
+from echelon.sim.sim import Sim
 from echelon.sim.los import has_los
 from echelon.sim.world import VoxelWorld
 from echelon.sim.mech import MechState
@@ -39,7 +39,7 @@ def test_indirect_fire():
     # Wall at x=10
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
     # Clear world
-    world.solid[:] = False
+    world.voxels.fill(VoxelWorld.AIR)
     # Build wall
     world.set_box_solid(10, 0, 0, 11, 20, 10, True)
 
@@ -79,7 +79,7 @@ def test_indirect_fire():
 
 def test_missile_arc_blocks_rear_shots():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
-    world.solid[:] = False
+    world.voxels.fill(VoxelWorld.AIR)
 
     sim = Sim(world, 0.05, np.random.default_rng(0))
 
@@ -98,10 +98,11 @@ def test_missile_arc_blocks_rear_shots():
     events = sim._try_fire_missile(heavy, fire_action)
     assert len(events) == 0, "Paint should not bypass missile firing arc"
     assert len(sim.projectiles) == 0
+    print("Missile arc blocks rear shots test passed!")
 
 def test_paint_lock_is_pack_scoped():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
-    world.solid[:] = False
+    world.voxels.fill(VoxelWorld.AIR)
     # Wall blocks LOS.
     world.set_box_solid(10, 0, 0, 11, 20, 10, True)
 
@@ -121,10 +122,11 @@ def test_paint_lock_is_pack_scoped():
     events = sim._try_fire_missile(heavy, fire_action)
     assert len(events) == 0, "Paint from a different pack should not grant indirect lock"
     assert len(sim.projectiles) == 0
+    print("Paint lock is pack scoped test passed!")
 
 def test_shutdown_keeps_physics():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
-    world.solid[:] = False
+    world.voxels.fill(VoxelWorld.AIR)
 
     sim = Sim(world, 0.05, np.random.default_rng(0))
     mech = make_mech("m", "blue", [10.0, 10.0, 10.0], "heavy")
@@ -139,10 +141,11 @@ def test_shutdown_keeps_physics():
     assert mech.pos[2] < pos0[2], "Shutdown mech should fall under gravity"
     assert mech.pos[0] > pos0[0], "Shutdown mech should coast (not instantly stop)"
     assert mech.vel[0] != 0.0 and mech.vel[0] < vel0[0], "Shutdown mech should damp, not zero velocity"
+    print("Shutdown keeps physics test passed!")
 
 def test_autocannon_auto_pitch():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
-    world.solid[:] = False
+    world.voxels.fill(VoxelWorld.AIR)
 
     sim = Sim(world, 0.05, np.random.default_rng(0))
     medium = make_mech("medium", "blue", [5.0, 5.0, 1.0], "medium")
@@ -156,10 +159,11 @@ def test_autocannon_auto_pitch():
     assert len(events) == 1
     assert len(sim.projectiles) == 1
     assert float(sim.projectiles[0].vel[2]) > 0.1, "Autocannon should auto-pitch toward elevated targets"
+    print("Autocannon auto pitch test passed!")
 
 def test_knockdown_immobilizes():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
-    world.solid[:] = False
+    world.voxels.fill(VoxelWorld.AIR)
 
     # Large dt so the 3s stun resolves quickly in test.
     sim = Sim(world, 1.0, np.random.default_rng(0))
@@ -190,10 +194,11 @@ def test_knockdown_immobilizes():
     sim.step({"m": action}, num_substeps=3)
     assert mech.fallen_time == 0.0, "Mech should recover after fallen_time elapses"
     assert float(np.linalg.norm(mech.pos[:2] - pos0[:2])) > 0.5, "Recovered mech should be able to move again"
+    print("Knockdown immobilizes test passed!")
 
 def test_gauss_projectile_does_not_tunnel_through_wall():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
-    world.solid[:] = False
+    world.voxels.fill(VoxelWorld.AIR)
     # 1-voxel thick wall directly between shooter and target.
     world.set_box_solid(10, 0, 0, 11, 20, 20, True)
 
@@ -220,6 +225,7 @@ def test_gauss_projectile_does_not_tunnel_through_wall():
         ev.get("type") == "projectile_hit" and ev.get("target") == "enemy"
         for ev in events
     ), "Should not record a hit through terrain"
+    print("Gauss projectile tunneling test passed!")
 
 def test_pack_comm_is_pack_scoped():
     # Two packs per team so we can verify comm does not leak across packs.
@@ -255,6 +261,7 @@ def test_pack_comm_is_pack_scoped():
     row0 = comm_same_pack[: int(cfg.comm_dim)]
     assert np.allclose(row0, msg), "Packmate should receive sender's message"
     assert np.allclose(comm_other_pack, 0.0), "Other pack should not receive sender's message"
+    print("Pack comm is pack scoped test passed!")
 
 def test_partial_visibility_is_pack_scoped():
     cfg = EnvConfig(
@@ -270,7 +277,7 @@ def test_partial_visibility_is_pack_scoped():
     assert env.world is not None and env.sim is not None
 
     # Construct a deterministic LOS-blocking wall between x<20 and x>=20.
-    env.world.solid[:] = False
+    env.world.voxels.fill(VoxelWorld.AIR)
     env.world.set_box_solid(20, 0, 0, 21, env.world.size_y, env.world.size_z, True)
 
     viewer_id = "blue_0"
@@ -313,6 +320,7 @@ def test_partial_visibility_is_pack_scoped():
 
     rel = contacts2[:, 13:16]
     assert float(rel[:, 0].sum()) == 1.0, "Visible contact should be marked friendly"
+    print("Partial visibility is pack scoped test passed!")
 
 def test_topk_contact_quota_and_repurpose():
     cfg = EnvConfig(
@@ -357,6 +365,7 @@ def test_topk_contact_quota_and_repurpose():
     assert n_visible == 5
     assert n_hostile == 2
     assert n_friendly == 3
+    print("Top-K contact quota test passed!")
 
 if __name__ == "__main__":
     test_indirect_fire()

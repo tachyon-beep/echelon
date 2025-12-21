@@ -7,141 +7,41 @@ import numpy as np
 
 from ..actions import ACTION_DIM, ActionIndex
 from ..constants import PACK_SIZE
+from ..config import (
+    AMS_COOLDOWN_S,
+    AMS_INTERCEPT_PROB,
+    AMS_RANGE_VOX,
+    AUTOCANNON,
+    ECCM_HEAT_PER_S,
+    ECCM_RADIUS_VOX,
+    ECCM_WEIGHT,
+    ECM_HEAT_PER_S,
+    ECM_RADIUS_VOX,
+    ECM_WEIGHT,
+    FLAME_HEAT_TRANSFER,
+    FLAMER,
+    GAUSS,
+    LASER,
+    LASER_HEAT_TRANSFER,
+    LAVA_DMG_PER_S,
+    LAVA_HEAT_PER_S,
+    MISSILE,
+    PAINT_LOCK_MIN_QUALITY,
+    PAINTER,
+    SENSOR_QUALITY_MAX,
+    SENSOR_QUALITY_MIN,
+    SMOKE,
+    SUPPRESS_DURATION_S,
+    SUPPRESS_REGEN_SCALE,
+    WATER_COOLING_PER_S,
+    WATER_SPEED_MULT,
+)
 from .los import has_los, raycast_voxels
 from .mech import MechState
 from .projectile import Projectile
 from .world import VoxelWorld
 
-
-@dataclass(frozen=True)
-class WeaponSpec:
-    name: str
-    range_vox: float
-    damage: float
-    stability_damage: float
-    heat: float
-    cooldown_s: float
-    arc_deg: float
-    speed_vox: float = 0.0 # 0 for hitscan
-    guidance: str = "none" # "homing", "ballistic", "linear"
-    splash_rad_vox: float = 0.0
-    splash_dmg_scale: float = 0.0
-
-
-LASER = WeaponSpec(
-    name="laser",
-    range_vox=8.0,
-    damage=14.0,
-    stability_damage=0.0,
-    heat=22.0,
-    cooldown_s=0.6,
-    arc_deg=120.0,
-)
-
-FLAMER = WeaponSpec(
-    name="flamer",
-    range_vox=4.5,
-    damage=4.0,
-    stability_damage=0.0,
-    heat=10.0, # Self heat
-    cooldown_s=0.15,
-    arc_deg=90.0,
-)
-
-MISSILE = WeaponSpec(
-    name="missile",
-    range_vox=35.0,
-    damage=40.0,
-    stability_damage=15.0,
-    heat=45.0,
-    cooldown_s=3.0,
-    arc_deg=180.0,
-    speed_vox=12.0,
-    guidance="homing",
-    splash_rad_vox=2.5,
-    splash_dmg_scale=0.5,
-)
-
-SMOKE = WeaponSpec(
-    name="smoke",
-    range_vox=20.0,
-    damage=0.0,
-    stability_damage=0.0,
-    heat=10.0,
-    cooldown_s=5.0,
-    arc_deg=180.0,
-    speed_vox=15.0,
-    guidance="linear",
-    splash_rad_vox=4.0,
-)
-
-GAUSS = WeaponSpec(
-    name="gauss",
-    range_vox=60.0,
-    damage=50.0,
-    stability_damage=60.0, # Huge impact
-    heat=15.0,
-    cooldown_s=4.0,
-    arc_deg=60.0,
-    speed_vox=40.0, # Very fast
-    guidance="ballistic",
-    splash_rad_vox=1.5,
-    splash_dmg_scale=0.5,
-)
-
-AUTOCANNON = WeaponSpec(
-    name="autocannon",
-    range_vox=20.0,
-    damage=8.0,
-    stability_damage=5.0,
-    heat=6.0,
-    cooldown_s=0.2, # Rapid fire
-    arc_deg=90.0,
-    speed_vox=25.0,
-    guidance="linear",
-    splash_rad_vox=0.0,
-)
-
-PAINTER = WeaponSpec(
-    name="painter",
-    range_vox=15.0,
-    damage=0.0,
-    stability_damage=0.0,
-    heat=5.0,
-    cooldown_s=1.0,
-    arc_deg=60.0,
-)
-
 # Lightweight "role" extensions (kept simple and readable in replays).
-LASER_HEAT_TRANSFER = 6.0  # Heat applied to the target on laser hit.
-FLAME_HEAT_TRANSFER = 15.0 # High heat for flamer.
-
-# Autocannon suppression: slows stability regen briefly after AC hits.
-SUPPRESS_DURATION_S = 1.2
-SUPPRESS_REGEN_SCALE = 0.25
-
-# Electronic warfare: ECM reduces sensor quality; ECCM restores it.
-ECM_RADIUS_VOX = 18.0
-ECCM_RADIUS_VOX = 18.0
-ECM_WEIGHT = 0.85
-ECCM_WEIGHT = 0.65
-SENSOR_QUALITY_MIN = 0.25
-SENSOR_QUALITY_MAX = 1.5
-PAINT_LOCK_MIN_QUALITY = 0.70
-
-ECM_HEAT_PER_S = 3.0
-ECCM_HEAT_PER_S = 2.0
-
-# Simple self-defense point-defense against homing missiles.
-AMS_RANGE_VOX = 5.5
-AMS_COOLDOWN_S = 1.0
-AMS_INTERCEPT_PROB = 0.60
-
-# Hazards
-LAVA_HEAT_PER_S = 40.0
-LAVA_DMG_PER_S = 5.0
-WATER_COOLING_PER_S = 30.0
-WATER_SPEED_MULT = 0.6
 
 @dataclass
 class SmokeCloud:
@@ -399,11 +299,11 @@ class Sim:
         else:
             mech.vel[2] = 0.0
 
-        # Ground plane at z = half-height.
-        min_z = float(mech.half_size[2])
-        if pos[2] < min_z:
-            pos[2] = min_z
-            mech.vel[2] = 0.0
+        # Clamp to world boundaries.
+        hs = mech.half_size
+        pos[0] = float(np.clip(pos[0], hs[0], float(self.world.size_x) - hs[0]))
+        pos[1] = float(np.clip(pos[1], hs[1], float(self.world.size_y) - hs[1]))
+        pos[2] = float(max(hs[2], pos[2])) # Ground floor
 
         mech.pos[:] = pos
 
@@ -421,7 +321,8 @@ class Sim:
         # Vector from origin to target
         attack_vec = target.pos[:2] - origin[:2]
         dist = np.linalg.norm(attack_vec)
-        if dist < 1e-6: return 1.0, False
+        if dist < 1e-6:
+            return 1.0, False
         attack_dir = attack_vec / dist
         
         # Target facing
@@ -488,7 +389,7 @@ class Sim:
         return events
 
     def _try_fire_laser(self, shooter: MechState, action: np.ndarray) -> list[dict]:
-        fire_laser = float(action[ActionIndex.FIRE_LASER]) > 0.0
+        fire_laser = float(action[ActionIndex.FIRE_LASER]) > 0.0 and shooter.spec.name != "scout"
         fire_flame = float(action[ActionIndex.FIRE_KINETIC]) > 0.0 if shooter.spec.name == "light" else False
         
         if not (fire_laser or fire_flame) or shooter.shutdown or not shooter.alive:
@@ -504,8 +405,10 @@ class Sim:
 
         # Which one to fire? If both requested, let's prioritize laser for now or just fire both?
         specs = []
-        if fire_laser: specs.append(LASER)
-        if fire_flame: specs.append(FLAMER)
+        if fire_laser:
+            specs.append(LASER)
+        if fire_flame:
+            specs.append(FLAMER)
 
         all_events = []
         for spec in specs:
@@ -557,15 +460,19 @@ class Sim:
 
             mult, is_crit = self._get_damage_multiplier(target, shooter.pos)
             base_dmg = spec.damage * mult
-            
-            # Leg Hit Check (Approximate for Hitscan)
-            is_leg_hit = False
-            if self.rng.random() < 0.2:
-                is_leg_hit = True
-                target.leg_hp -= base_dmg
-                base_dmg *= 0.5
 
             final_dmg, bonus_events = self._get_paint_bonus(target, base_dmg, shooter.mech_id)
+
+            # Leg Hit Check (Consistent with Projectiles)
+            is_leg_hit = False
+            # Assume laser hits with some vertical jitter around the target center.
+            hit_z = target.pos[2] + float(self.rng.uniform(-target.half_size[2], target.half_size[2])) * 0.5
+            min_z = float(target.pos[2] - target.half_size[2])
+            height = float(target.half_size[2] * 2.0)
+            if hit_z < min_z + height * 0.3:
+                is_leg_hit = True
+                target.leg_hp -= final_dmg
+                final_dmg *= 0.5
 
             target.hp -= final_dmg
             target.heat = float(target.heat + heat_transfer)
@@ -757,8 +664,8 @@ class Sim:
         if len(action) < ACTION_DIM:
             return []
         paint = float(action[ActionIndex.PAINT]) > 0.0
-        # Only lights have painter
-        if shooter.spec.name != "light":
+        # Only scouts have painter
+        if shooter.spec.name != "scout":
             return []
         if not paint or shooter.shutdown or not shooter.alive:
             return []
@@ -918,8 +825,10 @@ class Sim:
     def _explode(self, pos: np.ndarray, proj: Projectile, exclude_mech: MechState | None = None) -> list[dict]:
         events = []
         for m in self.mechs.values():
-            if not m.alive: continue
-            if exclude_mech and m is exclude_mech: continue
+            if not m.alive:
+                continue
+            if exclude_mech and m is exclude_mech:
+                continue
             
             dist = np.linalg.norm(m.pos - pos)
             
@@ -981,7 +890,7 @@ class Sim:
                             defender.team == missile_target.team
                             and defender.alive
                             and (not defender.shutdown)
-                            and defender.spec.name in ("medium", "heavy")
+                            and defender.spec.name == "heavy"
                             and defender.ams_cooldown <= 0.0
                         ):
                             dist = float(np.linalg.norm(defender.pos - p.pos))

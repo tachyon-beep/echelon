@@ -132,8 +132,8 @@ class VoxelWorld:
 
     def aabb_collides(self, aabb_min: np.ndarray, aabb_max: np.ndarray) -> bool:
         # Only SOLID voxels (walls) cause physics collisions.
-        # Treat out-of-bounds as solid.
-        if np.any(aabb_min < 0) or aabb_max[0] > self.size_x or aabb_max[1] > self.size_y or aabb_max[2] > self.size_z:
+        # Below ground (z < 0) is always solid.
+        if aabb_min[2] < 0:
             return True
 
         min_ix = int(np.floor(aabb_min[0]))
@@ -142,14 +142,21 @@ class VoxelWorld:
         max_ix = int(np.ceil(aabb_max[0]))
         max_iy = int(np.ceil(aabb_max[1]))
         max_iz = int(np.ceil(aabb_max[2]))
-        min_ix = max(min_ix, 0)
-        min_iy = max(min_iy, 0)
-        min_iz = max(min_iz, 0)
-        max_ix = min(max_ix, self.size_x)
-        max_iy = min(max_iy, self.size_y)
-        max_iz = min(max_iz, self.size_z)
 
-        region = self.voxels[min_iz:max_iz, min_iy:max_iy, min_ix:max_ix]
+        # Clamp search region to world bounds.
+        s_min_ix = max(min_ix, 0)
+        s_min_iy = max(min_iy, 0)
+        s_min_iz = max(min_iz, 0)
+        s_max_ix = min(max_ix, self.size_x)
+        s_max_iy = min(max_iy, self.size_y)
+        s_max_iz = min(max_iz, self.size_z)
+
+        if s_min_ix >= s_max_ix or s_min_iy >= s_max_iy or s_min_iz >= s_max_iz:
+            # Entirely out of bounds (and not below ground).
+            # We treat horizontal OOB as non-colliding here; the Sim handles map boundaries.
+            return False
+
+        region = self.voxels[s_min_iz:s_max_iz, s_min_iy:s_max_iy, s_min_ix:s_max_ix]
         return bool(np.any(region == self.SOLID))
 
     @classmethod

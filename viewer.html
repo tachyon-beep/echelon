@@ -82,12 +82,13 @@
         const VOXEL_SIZE = 1.0; // Visual scale
 	        const TEAM_COLORS = { "blue": 0x3388ff, "red": 0xff3333 };
 	        const MECH_SIZES = {
+	            "scout": [0.5, 0.5, 0.9],
 	            "light": [0.6, 0.6, 1.0],
 	            "medium": [1.0, 1.0, 1.0],
 	            "heavy": [1.5, 1.5, 2.0]
 	        };
 	        // Sim mech positions are AABB centers; these are the sim half-heights so models sit on z=0.
-	        const MECH_HALF_HEIGHTS = { "light": 1.0, "medium": 1.5, "heavy": 2.0 };
+	        const MECH_HALF_HEIGHTS = { "scout": 0.9, "light": 1.0, "medium": 1.5, "heavy": 2.0 };
 
         let selectedMechId = null;
         let raycaster = new THREE.Raycaster();
@@ -432,7 +433,7 @@
             const sizes = MECH_SIZES[cls]; // [w, d, h]
             const w = sizes[0], d = sizes[1], h = sizes[2];
 
-            if (cls === 'light') {
+            if (cls === 'light' || cls === 'scout') {
                 // LIGHT: Chicken Walker, Narrow
                 // Legs
                 const legGeo = new THREE.BoxGeometry(w*0.2, d*0.4, h*0.5);
@@ -594,7 +595,7 @@
                     }
                     sb.group.lookAt(camera.position);
 
-                    const fallbackMaxHp = {light: 80, medium: 120, heavy: 200}[state.class] || 100;
+                    const fallbackMaxHp = {scout: 60, light: 80, medium: 120, heavy: 200}[state.class] || 100;
                     const maxHp = (typeof state.hp_max === 'number') ? state.hp_max : fallbackMaxHp;
                     const maxStab = (typeof state.stability_max === 'number') ? state.stability_max : 100.0;
                     const heatCap = (typeof state.heat_cap === 'number') ? state.heat_cap : 100.0;
@@ -608,7 +609,7 @@
                     document.getElementById('selId').innerText = id;
                     document.getElementById('selClass').innerText = state.class;
                     document.getElementById('selHp').innerText = Math.round(state.hp);
-                    document.getElementById('selMaxHp').innerText = Math.round((typeof state.hp_max === 'number') ? state.hp_max : ({light: 80, medium: 120, heavy: 200}[state.class] || 100));
+                    document.getElementById('selMaxHp').innerText = Math.round((typeof state.hp_max === 'number') ? state.hp_max : ({scout: 60, light: 80, medium: 120, heavy: 200}[state.class] || 100));
                     document.getElementById('selHeat').innerText = Math.round(state.heat);
                     document.getElementById('selHeatCap').innerText = Math.round((typeof state.heat_cap === 'number') ? state.heat_cap : 100);
                     document.getElementById('selStab').innerText = Math.round(state.stability || 0);

@@ -19,7 +19,7 @@ from echelon.config import WorldConfig
 from echelon.gen.objective import capture_zone_params, clear_capture_zone, sample_capture_zone
 from echelon.gen.corridors import carve_macro_corridors
 from echelon.gen.recipe import build_recipe
-from echelon.gen.transforms import apply_transform_solids, list_transforms, opposite_corner, transform_corner
+from echelon.gen.transforms import apply_transform_voxels, list_transforms, opposite_corner, transform_corner
 from echelon.gen.validator import ConnectivityValidator
 from echelon.sim.world import VoxelWorld
 
@@ -126,7 +126,7 @@ def main() -> None:
         blue_canon = str(rng_variants.choice(["BL", "BR", "TL", "TR"]))
         red_canon = opposite_corner(blue_canon)
         transform = str(rng_variants.choice(list_transforms()))
-        world.solid = apply_transform_solids(world.solid, transform)
+        world.voxels = apply_transform_voxels(world.voxels, transform)
         spawn_corners = {"blue": transform_corner(blue_canon, transform), "red": transform_corner(red_canon, transform)}
 
         # Apply spawn clears (matching env defaults today).
@@ -191,7 +191,7 @@ def main() -> None:
             seed=seed,
             world_config=world_cfg,
             world_meta=world.meta,
-            solids_zyx=world.solid,
+            solids_zyx=world.voxels,
         )
 
         paths = dict(world.meta.get("stats", {}).get("paths", {}))

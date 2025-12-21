@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from echelon.config import WorldConfig
 from echelon.gen.objective import clear_capture_zone
 from echelon.gen.recipe import build_recipe
-from echelon.gen.transforms import apply_transform_solids
+from echelon.gen.transforms import apply_transform_voxels
 from echelon.gen.validator import ConnectivityValidator
 from echelon.sim.world import VoxelWorld
 
@@ -76,7 +76,7 @@ def main() -> None:
     rng_world = np.random.default_rng(seq.spawn(1)[0])
 
     repro_world = VoxelWorld.generate(world_cfg, rng_world)
-    repro_world.solid = apply_transform_solids(repro_world.solid, transform)
+    repro_world.voxels = apply_transform_voxels(repro_world.voxels, transform)
     repro_world.meta["transform"] = transform
     repro_world.meta["spawn_corners"] = dict(spawn_corners)
     repro_world.meta["spawn_clear"] = int(spawn_clear)
@@ -121,7 +121,7 @@ def main() -> None:
         seed=seed,
         world_config=world_cfg,
         world_meta=repro_world.meta,
-        solids_zyx=repro_world.solid,
+        solids_zyx=repro_world.voxels,
     )
 
     expected_hashes = recipe.get("hashes", {}) or {}

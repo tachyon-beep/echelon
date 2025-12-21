@@ -18,7 +18,7 @@ from echelon.env.env import default_mech_classes
 from echelon.gen.corridors import carve_macro_corridors
 from echelon.gen.objective import clear_capture_zone, sample_capture_zone
 from echelon.gen.recipe import build_recipe
-from echelon.gen.transforms import apply_transform_solids, list_transforms, opposite_corner, transform_corner
+from echelon.gen.transforms import apply_transform_voxels, list_transforms, opposite_corner, transform_corner
 from echelon.gen.validator import ConnectivityValidator
 from echelon.sim.world import VoxelWorld
 
@@ -62,7 +62,7 @@ def generate_hashes(seed: int, world_cfg: WorldConfig, *, packs_per_team: int) -
     blue_canon = str(rng_variants.choice(["BL", "BR", "TL", "TR"]))
     red_canon = opposite_corner(blue_canon)
     transform = str(rng_variants.choice(list_transforms()))
-    world.solid = apply_transform_solids(world.solid, transform)
+    world.voxels = apply_transform_voxels(world.voxels, transform)
     spawn_corners = {"blue": transform_corner(blue_canon, transform), "red": transform_corner(red_canon, transform)}
 
     spawn_clear = _spawn_clear_for_packs(world_cfg, packs_per_team)
@@ -109,7 +109,7 @@ def generate_hashes(seed: int, world_cfg: WorldConfig, *, packs_per_team: int) -
         seed=seed,
         world_config=world_cfg,
         world_meta=world.meta,
-        solids_zyx=world.solid,
+        solids_zyx=world.voxels,
     )
     return {
         "seed": int(seed),

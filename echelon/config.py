@@ -33,6 +33,138 @@ class MechClassConfig:
 
 
 @dataclass(frozen=True)
+class WeaponSpec:
+    name: str
+    range_vox: float
+    damage: float
+    stability_damage: float
+    heat: float
+    cooldown_s: float
+    arc_deg: float
+    speed_vox: float = 0.0 # 0 for hitscan
+    guidance: str = "none" # "homing", "ballistic", "linear"
+    splash_rad_vox: float = 0.0
+    splash_dmg_scale: float = 0.0
+
+
+LASER = WeaponSpec(
+    name="laser",
+    range_vox=8.0,
+    damage=14.0,
+    stability_damage=0.0,
+    heat=22.0,
+    cooldown_s=0.6,
+    arc_deg=120.0,
+)
+
+FLAMER = WeaponSpec(
+    name="flamer",
+    range_vox=4.5,
+    damage=4.0,
+    stability_damage=0.0,
+    heat=10.0, # Self heat
+    cooldown_s=0.15,
+    arc_deg=90.0,
+)
+
+MISSILE = WeaponSpec(
+    name="missile",
+    range_vox=35.0,
+    damage=40.0,
+    stability_damage=15.0,
+    heat=45.0,
+    cooldown_s=3.0,
+    arc_deg=180.0,
+    speed_vox=12.0,
+    guidance="homing",
+    splash_rad_vox=2.5,
+    splash_dmg_scale=0.5,
+)
+
+SMOKE = WeaponSpec(
+    name="smoke",
+    range_vox=20.0,
+    damage=0.0,
+    stability_damage=0.0,
+    heat=10.0,
+    cooldown_s=5.0,
+    arc_deg=180.0,
+    speed_vox=15.0,
+    guidance="linear",
+    splash_rad_vox=4.0,
+)
+
+GAUSS = WeaponSpec(
+    name="gauss",
+    range_vox=60.0,
+    damage=50.0,
+    stability_damage=60.0, # Huge impact
+    heat=15.0,
+    cooldown_s=4.0,
+    arc_deg=60.0,
+    speed_vox=40.0, # Very fast
+    guidance="ballistic",
+    splash_rad_vox=1.5,
+    splash_dmg_scale=0.5,
+)
+
+AUTOCANNON = WeaponSpec(
+    name="autocannon",
+    range_vox=20.0,
+    damage=8.0,
+    stability_damage=5.0,
+    heat=6.0,
+    cooldown_s=0.2, # Rapid fire
+    arc_deg=90.0,
+    speed_vox=25.0,
+    guidance="linear",
+    splash_rad_vox=0.0,
+)
+
+PAINTER = WeaponSpec(
+    name="painter",
+    range_vox=15.0,
+    damage=0.0,
+    stability_damage=0.0,
+    heat=5.0,
+    cooldown_s=1.0,
+    arc_deg=60.0,
+)
+
+
+# Lightweight "role" extensions (kept simple and readable in replays).
+LASER_HEAT_TRANSFER = 6.0  # Heat applied to the target on laser hit.
+FLAME_HEAT_TRANSFER = 15.0 # High heat for flamer.
+
+# Autocannon suppression: slows stability regen briefly after AC hits.
+SUPPRESS_DURATION_S = 1.2
+SUPPRESS_REGEN_SCALE = 0.25
+
+# Electronic warfare: ECM reduces sensor quality; ECCM restores it.
+ECM_RADIUS_VOX = 18.0
+ECCM_RADIUS_VOX = 18.0
+ECM_WEIGHT = 0.85
+ECCM_WEIGHT = 0.65
+SENSOR_QUALITY_MIN = 0.25
+SENSOR_QUALITY_MAX = 1.5
+PAINT_LOCK_MIN_QUALITY = 0.70
+
+ECM_HEAT_PER_S = 3.0
+ECCM_HEAT_PER_S = 2.0
+
+# Simple self-defense point-defense against homing missiles.
+AMS_RANGE_VOX = 5.5
+AMS_COOLDOWN_S = 1.0
+AMS_INTERCEPT_PROB = 0.60
+
+# Hazards
+LAVA_HEAT_PER_S = 40.0
+LAVA_DMG_PER_S = 5.0
+WATER_COOLING_PER_S = 30.0
+WATER_SPEED_MULT = 0.6
+
+
+@dataclass(frozen=True)
 class EnvConfig:
     world: WorldConfig = WorldConfig()
     num_packs: int = 1

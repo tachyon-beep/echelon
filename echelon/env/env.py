@@ -6,32 +6,43 @@ import numpy as np
 
 from ..actions import ACTION_DIM as ACTION_DIM_CONST
 from ..constants import PACK_SIZE
-from ..config import EnvConfig, MechClassConfig
-from ..gen.corridors import carve_macro_corridors
-from ..gen.objective import capture_zone_params, clear_capture_zone, sample_capture_zone
-from ..gen.recipe import build_recipe
-from ..gen.transforms import apply_transform_solids, list_transforms, opposite_corner, transform_corner
-from ..gen.validator import ConnectivityValidator
-from ..sim.los import has_los
-from ..sim.mech import MechState
-from ..sim.sim import (
+from ..config import (
     AMS_COOLDOWN_S,
     ECCM_RADIUS_VOX,
     ECCM_WEIGHT,
     ECM_RADIUS_VOX,
     ECM_WEIGHT,
+    EnvConfig,
+    MechClassConfig,
     MISSILE,
     PAINT_LOCK_MIN_QUALITY,
     SENSOR_QUALITY_MAX,
     SENSOR_QUALITY_MIN,
     SUPPRESS_DURATION_S,
-    Sim,
 )
+from ..gen.corridors import carve_macro_corridors
+from ..gen.objective import capture_zone_params, clear_capture_zone, sample_capture_zone
+from ..gen.recipe import build_recipe
+from ..gen.transforms import apply_transform_voxels, list_transforms, opposite_corner, transform_corner
+from ..gen.validator import ConnectivityValidator
+from ..sim.mech import MechState
+from ..sim.sim import Sim
 from ..sim.world import VoxelWorld
 
 
 def default_mech_classes() -> dict[str, MechClassConfig]:
     return {
+        "scout": MechClassConfig(
+            name="scout",
+            size_voxels=(1.2, 1.2, 1.8),
+            max_speed=7.0,
+            max_yaw_rate=1.8,
+            max_jet_accel=18.0,
+            hp=60.0,
+            leg_hp=30.0,
+            heat_cap=75.0,
+            heat_dissipation=13.0,
+        ),
         "light": MechClassConfig(
             name="light",
             size_voxels=(1.5, 1.5, 2.0),
@@ -76,14 +87,16 @@ def _team_ids(num_packs: int) -> tuple[list[str], list[str]]:
 
 
 def _roster_for_index(i: int) -> str:
-    # Pack structure (10 mechs): 2 Heavy, 5 Medium, 3 Light
+    # Pack structure (10 mechs): 2 Heavy, 5 Medium, 2 Light, 1 Scout
     idx_in_pack = i % PACK_SIZE
     if idx_in_pack < 2:
         return "heavy"
-    elif idx_in_pack < 7: # 2+5 = 7
+    elif idx_in_pack < 7:  # 2+5 = 7
         return "medium"
-    else:
+    elif idx_in_pack < 9:  # 2+5+2 = 9
         return "light"
+    else:
+        return "scout"
 
 
 class EchelonEnv:
@@ -101,7 +114,7 @@ class EchelonEnv:
     Action layout (by default):
     - base (9): movement + weapons
     - target selection (5): argmax selects a contact slot from the last obs
-    - EWAR (2): [ECM, ECCM] (light-only; ECCM wins if both set)
+    - EWAR (2): [ECM, ECCM] (scout-only; ECCM wins if both set)
     - obs control (4): sort(3) + hostile-only(1) for the *next* obs
     - comm (comm_dim): pack-local message tail (1 decision-tick delayed)
 
@@ -123,7 +136,7 @@ class EchelonEnv:
     TARGET_DIM = CONTACT_SLOTS
     TARGET_START = BASE_ACTION_DIM
 
-    # EWAR toggles (light-only; if both are set, ECCM wins).
+    # EWAR toggles (scout-only; if both are set, ECCM wins).
     EWAR_DIM = 2  # [ecm, eccm]
     EWAR_START = TARGET_START + TARGET_DIM
 
@@ -238,7 +251,7 @@ class EchelonEnv:
         blue_canon = str(rng_variants.choice(["BL", "BR", "TL", "TR"]))
         red_canon = opposite_corner(blue_canon)
         transform = str(rng_variants.choice(list_transforms()))
-        world.voxels = apply_transform_solids(world.voxels, transform)
+        world.voxels = apply_transform_voxels(world.voxels, transform)
         world.meta["transform"] = transform
 
         # Clear spawn regions in corners.
@@ -446,7 +459,7 @@ class EchelonEnv:
 
         cls = other.spec.name
         class_onehot = np.zeros(3, dtype=np.float32)
-        if cls == "light":
+        if cls in ("light", "scout"):
             class_onehot[0] = 1.0
         elif cls == "medium":
             class_onehot[1] = 1.0
@@ -501,29 +514,40 @@ class EchelonEnv:
         assert world is not None
 
         r = int(self.LOCAL_MAP_R)
-        out = np.zeros((2 * r + 1, 2 * r + 1), dtype=np.float32)
-
+        size = 2 * r + 1
+        
         # Use a short Z band (movement/cover footprint).
         clearance_z = int(max(1, min(getattr(self.config.world, "connectivity_clearance_z", 4), world.size_z)))
+        
+        # Pre-calculate 2D occupancy map (collapsed Z). 
+        # In a production env, this could be cached if terrain is static.
+        # But even here, doing it once per agent call is better than per-pixel.
+        # Actually, it's better to do it ONCE per _obs call and pass it in.
+        # For now, let's just vectorize the sampling.
+        
+        occupancy_2d = np.any(world.voxels[:clearance_z, :, :] == VoxelWorld.SOLID, axis=0)
 
         yaw = float(viewer.yaw)
-        c = float(math.cos(yaw))
-        s = float(math.sin(yaw))
+        c, s = math.cos(yaw), math.sin(yaw)
 
-        # Sample local grid in (forward, right) coordinates, mapped into world XY.
-        base_x = float(viewer.pos[0])
-        base_y = float(viewer.pos[1])
-        for iy, fwd in enumerate(range(-r, r + 1)):
-            for ix, right in enumerate(range(-r, r + 1)):
-                dx = c * float(fwd) - s * float(right)
-                dy = s * float(fwd) + c * float(right)
-                x = int(math.floor(base_x + dx))
-                y = int(math.floor(base_y + dy))
-                if x < 0 or y < 0 or x >= world.size_x or y >= world.size_y:
-                    out[iy, ix] = 1.0
-                    continue
-                out[iy, ix] = 1.0 if bool(np.any(world.voxels[:clearance_z, y, x] == VoxelWorld.SOLID)) else 0.0
-
+        # Create grid of (fwd, right) relative offsets
+        fwd_grid, right_grid = np.meshgrid(np.arange(-r, r + 1), np.arange(-r, r + 1), indexing='ij')
+        
+        # Rotate grid to world XY
+        dx = c * fwd_grid - s * right_grid
+        dy = s * fwd_grid + c * right_grid
+        
+        # World coordinates
+        wx = (viewer.pos[0] + dx).astype(np.int32)
+        wy = (viewer.pos[1] + dy).astype(np.int32)
+        
+        # Mask for in-bounds
+        mask = (wx >= 0) & (wx < world.size_x) & (wy >= 0) & (wy < world.size_y)
+        
+        out = np.ones((size, size), dtype=np.float32)
+        # Only sample if in bounds, otherwise leave as 1.0 (solid)
+        out[mask] = occupancy_2d[wy[mask], wx[mask]].astype(np.float32)
+        
         return out.reshape(-1)
 
     def _obs(self) -> dict[str, np.ndarray]:
@@ -559,25 +583,25 @@ class EchelonEnv:
             return ok
 
         # Satellite Telemetry: Downsampled 2D map of solid terrain.
-        # Assuming we want a fixed size for the observation.
-        # Let's say 16x16 or 32x32.
         TELEMETRY_SIZE = 16
         telemetry = np.zeros((TELEMETRY_SIZE, TELEMETRY_SIZE), dtype=np.float32)
-        # Scale world voxels to telemetry.
-        # We only care about solids for this 'cheat' map as requested.
+
+        # Collapse Z once
+        world_2d = np.any(world.voxels == VoxelWorld.SOLID, axis=0)
+
         for iy in range(TELEMETRY_SIZE):
+            wy0 = int(iy * world.size_y / TELEMETRY_SIZE)
+            wy1 = int((iy + 1) * world.size_y / TELEMETRY_SIZE)
+            if wy1 == wy0:
+                wy1 = wy0 + 1
+
             for ix in range(TELEMETRY_SIZE):
                 wx0 = int(ix * world.size_x / TELEMETRY_SIZE)
                 wx1 = int((ix + 1) * world.size_x / TELEMETRY_SIZE)
-                wy0 = int(iy * world.size_y / TELEMETRY_SIZE)
-                wy1 = int((iy + 1) * world.size_y / TELEMETRY_SIZE)
-                
-                # Ensure at least one voxel is checked even if resolution is higher than world size
-                if wx1 == wx0: wx1 = wx0 + 1
-                if wy1 == wy0: wy1 = wy0 + 1
-                
-                # Check if any voxel in this 'pixel' is solid.
-                telemetry[iy, ix] = 1.0 if np.any(world.voxels[:, wy0:wy1, wx0:wx1] == VoxelWorld.SOLID) else 0.0
+                if wx1 == wx0:
+                    wx1 = wx0 + 1
+
+                telemetry[iy, ix] = 1.0 if np.any(world_2d[wy0:wy1, wx0:wx1]) else 0.0
         telemetry_flat = telemetry.reshape(-1)
 
         reserved = {"friendly": 3, "hostile": 1, "neutral": 1}
@@ -632,7 +656,7 @@ class EchelonEnv:
                 if sort_mode == 0:
                     key = (dist,)
                 elif sort_mode == 1:
-                    cls_rank = {"light": 1, "medium": 2, "heavy": 3}.get(other.spec.name, 0)
+                    cls_rank = {"scout": 1, "light": 1, "medium": 2, "heavy": 3}.get(other.spec.name, 0)
                     key = (-cls_rank, dist)
                 elif sort_mode == 2:
                     hp_norm = float(np.clip(other.hp / max(1.0, other.spec.hp), 0.0, 1.0))
@@ -902,10 +926,10 @@ class EchelonEnv:
                                 focus_id = str(cand)
             m.focus_target_id = focus_id
 
-            # Light-only ECM/ECCM (mutually exclusive; ECCM wins).
+            # Scout-only ECM/ECCM (mutually exclusive; ECCM wins).
             ecm_cmd = float(a[self.EWAR_START + 0]) > 0.0
             eccm_cmd = float(a[self.EWAR_START + 1]) > 0.0
-            if m.spec.name == "light":
+            if m.spec.name == "scout":
                 if eccm_cmd:
                     m.eccm_on = True
                     m.ecm_on = False
