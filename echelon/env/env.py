@@ -87,13 +87,13 @@ def _team_ids(num_packs: int) -> tuple[list[str], list[str]]:
 
 
 def _roster_for_index(i: int) -> str:
-    # Pack structure (10 mechs): 2 Heavy, 5 Medium, 2 Light, 1 Scout
+    # Pack structure (10 mechs): 1 Heavy, 5 Medium, 3 Light, 1 Scout
     idx_in_pack = i % PACK_SIZE
-    if idx_in_pack < 2:
+    if idx_in_pack < 1:
         return "heavy"
-    elif idx_in_pack < 7:  # 2+5 = 7
+    elif idx_in_pack < 6:  # 1+5 = 6
         return "medium"
-    elif idx_in_pack < 9:  # 2+5+2 = 9
+    elif idx_in_pack < 9:  # 1+5+3 = 9
         return "light"
     else:
         return "scout"
@@ -189,6 +189,7 @@ class EchelonEnv:
         self.max_steps = int(math.ceil(config.max_episode_seconds / (config.dt_sim * config.decision_repeat)))
         self.step_count = 0
         self._replay: list[dict] | None = None
+        self._replay_world: dict | None = None
         self.team_zone_score: dict[str, float] = {"blue": 0.0, "red": 0.0}
         self.zone_score_to_win: float = float(config.max_episode_seconds * 0.5)
         self._max_team_hp: dict[str, float] = {"blue": 0.0, "red": 0.0}
@@ -399,8 +400,10 @@ class EchelonEnv:
 
         if self.config.record_replay:
             self._replay = []
+            self._replay_world = self._serialize_world(world, seed=episode_seed)
         else:
             self._replay = None
+            self._replay_world = None
 
         # Seed transition trackers.
         for mid, m in sim.mechs.items():
@@ -525,7 +528,11 @@ class EchelonEnv:
         # Actually, it's better to do it ONCE per _obs call and pass it in.
         # For now, let's just vectorize the sampling.
         
-        occupancy_2d = np.any(world.voxels[:clearance_z, :, :] == VoxelWorld.SOLID, axis=0)
+        solid_slice = world.voxels[:clearance_z, :, :]
+        occupancy_2d = np.any(
+            (solid_slice == VoxelWorld.SOLID) | (solid_slice == VoxelWorld.KILLED_HULL),
+            axis=0,
+        )
 
         yaw = float(viewer.yaw)
         c, s = math.cos(yaw), math.sin(yaw)
@@ -587,7 +594,10 @@ class EchelonEnv:
         telemetry = np.zeros((TELEMETRY_SIZE, TELEMETRY_SIZE), dtype=np.float32)
 
         # Collapse Z once
-        world_2d = np.any(world.voxels == VoxelWorld.SOLID, axis=0)
+        world_2d = np.any(
+            (world.voxels == VoxelWorld.SOLID) | (world.voxels == VoxelWorld.KILLED_HULL),
+            axis=0,
+        )
 
         for iy in range(TELEMETRY_SIZE):
             wy0 = int(iy * world.size_y / TELEMETRY_SIZE)
@@ -737,6 +747,7 @@ class EchelonEnv:
             under_fire = 1.0 if viewer.was_hit else 0.0
             painted = 1.0 if viewer.painted_remaining > 0.0 else 0.0
             shutdown = 1.0 if viewer.shutdown else 0.0
+            crit_heat = 1.0 if (viewer.heat / max(1.0, viewer.spec.heat_cap)) > 0.85 else 0.0
 
             incoming_missile = 0.0
             for p in sim.projectiles:
@@ -793,6 +804,7 @@ class EchelonEnv:
                         under_fire,
                         painted,
                         shutdown,
+                        crit_heat,
                         incoming_missile,
                         sensor_quality_norm,
                         jam_norm,
@@ -834,11 +846,11 @@ class EchelonEnv:
     def _obs_dim(self) -> int:
         comm_dim = PACK_SIZE * int(max(0, int(getattr(self.config, "comm_dim", 0))))
         # self features =
-        #   targeted, under_fire, painted, shutdown,
+        #   targeted, under_fire, painted, shutdown, crit_heat,
         #   incoming_missile, sensor_quality, jam_level, ecm_on, eccm_on, suppressed, ams_cd,
         #   self_vel(3), cooldowns(4), in_zone, vec_to_zone(3), zone_radius,
-        #   my_control, my_score, enemy_score, time_frac, obs_sort_onehot(3), hostile_only = 31
-        self_dim = 31
+        #   my_control, my_score, enemy_score, time_frac, obs_sort_onehot(3), hostile_only = 32
+        self_dim = 32
         telemetry_dim = 16 * 16
         return self.CONTACT_SLOTS * self.CONTACT_DIM + comm_dim + int(self.LOCAL_MAP_DIM) + telemetry_dim + self_dim
 
@@ -1243,28 +1255,34 @@ class EchelonEnv:
     def get_replay(self) -> dict | None:
         if self._replay is None:
             return None
-        
-        # Serialize world (sparse list of solid blocks)
-        world_data = {}
-        if self.world is not None:
-            world_data["size"] = [self.world.size_x, self.world.size_y, self.world.size_z]
-            world_data["voxel_size_m"] = float(self.world.voxel_size_m)
-            if self._last_reset_seed is not None:
-                world_data["seed"] = int(self._last_reset_seed)
-            if self._spawn_clear is not None:
-                world_data["spawn_clear"] = int(self._spawn_clear)
-            if getattr(self.world, "meta", None):
-                world_data["meta"] = self.world.meta
-            
-            # Export all non-air voxels
-            idx_zyx = np.argwhere(self.world.voxels > 0)
-            if idx_zyx.size:
-                # Include type [x, y, z, type]
-                walls = []
-                for z, y, x in idx_zyx:
-                    walls.append([int(x), int(y), int(z), int(self.world.voxels[z, y, x])])
-                world_data["walls"] = walls
-            else:
-                world_data["walls"] = []
 
-        return {"world": world_data, "frames": self._replay}
+        # Use the world snapshot captured at reset so replays stay consistent
+        # even when the sim mutates voxels (e.g., death debris).
+        world_data = self._replay_world
+        if world_data is None and self.world is not None:
+            world_data = self._serialize_world(self.world, seed=self._last_reset_seed)
+
+        return {"world": world_data or {}, "frames": self._replay}
+
+    def _serialize_world(self, world: VoxelWorld, *, seed: int | None) -> dict:
+        world_data: dict[str, object] = {
+            "size": [world.size_x, world.size_y, world.size_z],
+            "voxel_size_m": float(world.voxel_size_m),
+        }
+        if seed is not None:
+            world_data["seed"] = int(seed)
+        if self._spawn_clear is not None:
+            world_data["spawn_clear"] = int(self._spawn_clear)
+        if getattr(world, "meta", None):
+            world_data["meta"] = dict(world.meta)
+
+        idx_zyx = np.argwhere(world.voxels > 0)
+        if idx_zyx.size:
+            walls: list[list[int]] = []
+            for z, y, x in idx_zyx:
+                walls.append([int(x), int(y), int(z), int(world.voxels[z, y, x])])
+            world_data["walls"] = walls
+        else:
+            world_data["walls"] = []
+
+        return world_data

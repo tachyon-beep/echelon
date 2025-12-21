@@ -47,6 +47,6 @@ uv run python scripts/train_ppo.py --run-dir runs/train --resume latest --update
 Teams spawn in “packs” to preserve combined-arms synergies.
 
 - `--packs-per-team N` spawns `N` identical packs on each team.
-- Each pack is 10 mechs: 2 Heavy, 5 Medium, 3 Light.
+- Each pack is 10 mechs: 1 Heavy, 5 Medium, 3 Light, 1 Scout.
 - Packs are the default coordination unit; comms/coordination features are scoped to pack membership.
 - Painted-target locks/bonuses are pack-scoped (not shared across packs).

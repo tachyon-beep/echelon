@@ -6,3 +6,9 @@ __pycache__/
 .venv/
 
 runs/
+.hypothesis/
+.pytest_cache/
+.coverage
+htmlcov/
+.mutmut-cache/
+mutants/

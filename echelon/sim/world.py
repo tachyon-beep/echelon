@@ -29,13 +29,13 @@ class _SolidMask:
         return int(self._world.voxels.size)
 
     def __array__(self, dtype: Any | None = None) -> np.ndarray:
-        out = self._world.voxels == self._world.SOLID
+        out = (self._world.voxels == self._world.SOLID) | (self._world.voxels == self._world.KILLED_HULL)
         if dtype is None:
             return out
         return out.astype(dtype, copy=False)
 
     def __getitem__(self, key: Any) -> Any:
-        return self._world.voxels[key] == self._world.SOLID
+        return (self._world.voxels[key] == self._world.SOLID) | (self._world.voxels[key] == self._world.KILLED_HULL)
 
     def __setitem__(self, key: Any, value: Any) -> None:
         if np.isscalar(value):
@@ -62,6 +62,8 @@ class VoxelWorld:
     SOLID = 1
     LAVA = 2
     WATER = 3
+    HOT_DEBRIS = 4
+    KILLED_HULL = 5
 
     voxels: np.ndarray  # uint8[sz, sy, sx] (z-major)
     voxel_size_m: float = 5.0
@@ -106,7 +108,8 @@ class VoxelWorld:
         return int(self.voxels[iz, iy, ix])
 
     def is_solid_index(self, ix: int, iy: int, iz: int) -> bool:
-        return self.get_voxel(ix, iy, iz) == self.SOLID
+        v = self.get_voxel(ix, iy, iz)
+        return v == self.SOLID or v == self.KILLED_HULL
 
     def set_box_solid(
         self,
@@ -157,7 +160,7 @@ class VoxelWorld:
             return False
 
         region = self.voxels[s_min_iz:s_max_iz, s_min_iy:s_max_iy, s_min_ix:s_max_ix]
-        return bool(np.any(region == self.SOLID))
+        return bool(np.any((region == self.SOLID) | (region == self.KILLED_HULL)))
 
     @classmethod
     def generate(cls, config: WorldConfig, rng: np.random.Generator) -> VoxelWorld:

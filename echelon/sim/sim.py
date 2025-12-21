@@ -309,13 +309,70 @@ class Sim:
 
     def _spawn_debris(self, mech: MechState) -> None:
         hs = mech.half_size
-        min_x = int(round(mech.pos[0] - hs[0]))
-        max_x = int(round(mech.pos[0] + hs[0]))
-        min_y = int(round(mech.pos[1] - hs[1]))
-        max_y = int(round(mech.pos[1] + hs[1]))
-        min_z = int(round(mech.pos[2] - hs[2]))
-        max_z = int(round(mech.pos[2] + hs[2]))
-        self.world.set_box_solid(min_x, min_y, min_z, max_x, max_y, max_z, VoxelWorld.SOLID)
+        aabb_min = mech.pos - hs
+        aabb_max = mech.pos + hs
+
+        min_ix = int(math.floor(float(aabb_min[0])))
+        min_iy = int(math.floor(float(aabb_min[1])))
+        min_iz = int(math.floor(float(aabb_min[2])))
+        max_ix = int(math.ceil(float(aabb_max[0])))
+        max_iy = int(math.ceil(float(aabb_max[1])))
+        max_iz = int(math.ceil(float(aabb_max[2])))
+
+        min_ix = max(0, min_ix)
+        min_iy = max(0, min_iy)
+        min_iz = max(0, min_iz)
+        max_ix = min(self.world.size_x, max_ix)
+        max_iy = min(self.world.size_y, max_iy)
+        max_iz = min(self.world.size_z, max_iz)
+
+        # Probabilistic hull survival based on size
+        # Heavy: High chance of solid hull. Scout: mostly debris.
+        probs = {"scout": 0.1, "light": 0.3, "medium": 0.6, "heavy": 0.9}
+        p_solid = probs.get(mech.spec.name, 0.5)
+        
+        # Roll once for the whole wreck or per-voxel? 
+        # Whole wreck is cleaner tactically.
+        is_solid_wreck = self.rng.random() < p_solid
+        voxel_type = VoxelWorld.KILLED_HULL if is_solid_wreck else VoxelWorld.HOT_DEBRIS
+
+        # Avoid embedding living mechs
+        living_aabbs: list[tuple[np.ndarray, np.ndarray]] = []
+        for other in self.mechs.values():
+            if not other.alive or other.mech_id == mech.mech_id:
+                continue
+            o_hs = other.half_size
+            living_aabbs.append((other.pos - o_hs, other.pos + o_hs))
+
+        for iz in range(min_iz, max_iz):
+            cell_min_z = float(iz)
+            cell_max_z = float(iz + 1)
+            for iy in range(min_iy, max_iy):
+                cell_min_y = float(iy)
+                cell_max_y = float(iy + 1)
+                for ix in range(min_ix, max_ix):
+                    if self.world.voxels[iz, iy, ix] != VoxelWorld.AIR:
+                        continue
+
+                    cell_min_x = float(ix)
+                    cell_max_x = float(ix + 1)
+
+                    intersects = False
+                    for other_min, other_max in living_aabbs:
+                        if (
+                            cell_min_x < float(other_max[0])
+                            and cell_max_x > float(other_min[0])
+                            and cell_min_y < float(other_max[1])
+                            and cell_max_y > float(other_min[1])
+                            and cell_min_z < float(other_max[2])
+                            and cell_max_z > float(other_min[2])
+                        ):
+                            intersects = True
+                            break
+                    if intersects:
+                        continue
+
+                    self.world.voxels[iz, iy, ix] = voxel_type
 
     def _get_damage_multiplier(self, target: MechState, origin: np.ndarray) -> tuple[float, bool]:
         # Vector from origin to target
@@ -383,6 +440,13 @@ class Sim:
             mech.hp -= dmg
             mech.took_damage += dmg
             events.extend(self._handle_death(mech, "lava"))
+        elif vox == VoxelWorld.HOT_DEBRIS:
+            # Hot debris is less lethal than lava but still hurts
+            mech.heat = float(mech.heat + LAVA_HEAT_PER_S * 0.5 * self.dt)
+            dmg = LAVA_DMG_PER_S * 0.25 * self.dt
+            mech.hp -= dmg
+            mech.took_damage += dmg
+            events.extend(self._handle_death(mech, "debris"))
         elif vox == VoxelWorld.WATER:
             mech.heat = float(max(0.0, mech.heat - WATER_COOLING_PER_S * self.dt))
             
@@ -875,6 +939,9 @@ class Sim:
         for p in self.projectiles:
             if not p.alive:
                 continue
+
+            shooter = self.mechs.get(p.shooter_id)
+            shooter_team = shooter.team if shooter is not None else None
             
             p.age += self.dt
             if p.age > p.max_lifetime:
@@ -942,6 +1009,8 @@ class Sim:
             if step_len2 > 1e-12:
                 for target in self.mechs.values():
                     if not target.alive:
+                        continue
+                    if shooter_team is not None and target.team == shooter_team:
                         continue
                     if target.mech_id == p.shooter_id and p.age < 0.2:
                         continue

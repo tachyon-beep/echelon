@@ -331,7 +331,9 @@
                     const materials = {
                         1: new THREE.MeshLambertMaterial({ color: 0x555555 }), // SOLID
                         2: new THREE.MeshLambertMaterial({ color: 0xff4400, emissive: 0x441100 }), // LAVA
-                        3: new THREE.MeshLambertMaterial({ color: 0x0044ff, transparent: true, opacity: 0.8 }) // WATER
+                        3: new THREE.MeshLambertMaterial({ color: 0x0044ff, transparent: true, opacity: 0.8 }), // WATER
+                        4: new THREE.MeshLambertMaterial({ color: 0x555555, emissive: 0xff2200, transparent: true, opacity: 0.7 }), // HOT_DEBRIS
+                        5: new THREE.MeshLambertMaterial({ color: 0x333333, roughness: 0.8 }) // KILLED_HULL
                     };
                     
                     // Group walls by type for efficient instancing
@@ -602,6 +604,14 @@
                     sb.hp.scale.x = Math.max(0.01, Math.max(0, state.hp) / Math.max(1e-6, maxHp));
                     sb.stab.scale.x = Math.max(0.01, Math.max(0, (state.stability || 0)) / Math.max(1e-6, maxStab));
                     sb.heat.scale.x = Math.max(0.01, Math.min(2.0, Math.max(0, state.heat)) / Math.max(1e-6, heatCap));
+                    
+                    // Critical Heat Pulse
+                    if (state.heat > heatCap * 0.85 && state.heat <= heatCap) {
+                        const pulse = (Math.sin(performance.now() * 0.02) + 1) * 0.5; // 0..1
+                        sb.heat.material.color.setHex(pulse > 0.5 ? 0xff0000 : 0xffff00);
+                    } else {
+                        sb.heat.material.color.setHex(0xff0000);
+                    }
                 }
                 
                 // Update Info Panel

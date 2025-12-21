@@ -208,7 +208,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto", help="auto | cpu | cuda | cuda:0 ...")
-    parser.add_argument("--packs-per-team", type=int, default=2, help="Number of 10-mech packs (2 Heavy, 5 Med, 3 Light) per team")
+    parser.add_argument("--packs-per-team", type=int, default=2, help="Number of 10-mech packs (1 Heavy, 5 Med, 3 Light, 1 Scout) per team")
     parser.add_argument("--size", type=int, default=100)
     parser.add_argument("--mode", type=str, default="full", choices=["full", "partial"])
     parser.add_argument("--dt-sim", type=float, default=0.05)

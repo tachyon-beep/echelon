@@ -27,3 +27,10 @@ packages = ["echelon"]
 [tool.ruff]
 line-length = 110
 
+[tool.mutmut]
+paths_to_mutate = ["echelon/sim/sim.py"]
+tests_dir = ["tests"]
+copy_dirs = ["tests", "echelon"]
+runner = "PYTHONPATH=. pytest -x tests"
+debug = true
+
