@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import subprocess
 import sys
 import time
 import warnings
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -24,6 +26,7 @@ from echelon.agents.heuristic import HeuristicPolicy
 from echelon.arena.glicko2 import GameResult
 from echelon.arena.league import League, LeagueEntry
 from echelon.arena.match import play_match
+from echelon.constants import PACK_SIZE
 from echelon.rl.model import ActorCriticLSTM
 
 
@@ -63,6 +66,44 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+def git_info(repo_root: Path) -> dict[str, Any]:
+    def _run(args: list[str]) -> str | None:
+        try:
+            p = subprocess.run(
+                args,
+                cwd=str(repo_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except Exception:
+            return None
+        if p.returncode != 0:
+            return None
+        out = (p.stdout or "").strip()
+        return out if out else None
+
+    is_git = _run(["git", "rev-parse", "--is-inside-work-tree"])
+    if is_git != "true":
+        return {"is_git_repo": False}
+
+    commit = _run(["git", "rev-parse", "HEAD"])
+    branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    describe = _run(["git", "describe", "--always", "--dirty", "--tags"])
+    status = _run(["git", "status", "--porcelain=v1"]) or ""
+    changed = [line[3:] for line in status.splitlines() if len(line) >= 4]
+    return {
+        "is_git_repo": True,
+        "commit": commit,
+        "branch": branch,
+        "describe": describe,
+        "dirty": bool(changed),
+        "changed_paths": changed[:200],
+    }
+
+
 def compute_gae(
     rewards: torch.Tensor,  # [T, B]
     values: torch.Tensor,  # [T, B]
@@ -90,6 +131,8 @@ def compute_gae(
 
 
 def push_replay(url: str, replay: dict) -> None:
+    if not url:
+        return
     try:
         import requests
         requests.post(url, json=replay, timeout=5)
@@ -104,6 +147,8 @@ def evaluate_vs_heuristic(
     episodes: int,
     seed: int,
     device: torch.device,
+    *,
+    seeds: list[int] | None = None,
     record: bool = False,
 ) -> tuple[dict, dict | None]:
     # Set record_replay if requested
@@ -114,12 +159,14 @@ def evaluate_vs_heuristic(
     blue_ids = env.blue_ids
     red_ids = env.red_ids
 
+    if seeds is None:
+        seeds = [int(seed) + int(i) for i in range(int(episodes))]
     wins = {"blue": 0, "red": 0, "draw": 0}
     hp_margins: list[float] = []
     last_replay = None
 
-    for ep in range(episodes):
-        obs, _ = env.reset(seed=seed + ep)
+    for ep, ep_seed in enumerate(seeds):
+        obs, _ = env.reset(seed=int(ep_seed))
         lstm_state = model.initial_state(batch_size=len(blue_ids), device=device)
         done = torch.zeros(len(blue_ids), device=device)
 
@@ -151,8 +198,8 @@ def evaluate_vs_heuristic(
                     last_replay = env.get_replay()
                 break
 
-    wins["episodes"] = episodes
-    wins["win_rate"] = float(wins["blue"] / max(1, episodes))
+    wins["episodes"] = int(len(seeds))
+    wins["win_rate"] = float(wins["blue"] / max(1, len(seeds)))
     wins["mean_hp_margin"] = float(np.mean(hp_margins)) if hp_margins else 0.0
     return wins, last_replay
 
@@ -180,6 +227,17 @@ def main() -> None:
     parser.add_argument("--update-epochs", type=int, default=4)
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument(
+        "--eval-seeds",
+        type=str,
+        default="",
+        help="Optional comma-separated eval seeds (overrides --eval-episodes/seed schedule)",
+    )
+    parser.add_argument(
+        "--save-eval-replay",
+        action="store_true",
+        help="Save one replay JSON from each evaluation to <run-dir>/replays/",
+    )
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--run-dir", type=str, default="runs/train")
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint path, or 'latest' (from run-dir)")
@@ -252,6 +310,9 @@ def main() -> None:
     env = EchelonEnv(env_cfg)
     heuristic = HeuristicPolicy() if args.train_mode == "heuristic" else None
 
+    # Run provenance (best-effort; safe to run outside git as well).
+    repo_git = git_info(ROOT)
+
     obs, _ = env.reset(seed=args.seed)
     next_obs_dict = obs
     blue_ids = env.blue_ids
@@ -268,6 +329,10 @@ def main() -> None:
         d.pop("seed", None)
         d.pop("record_replay", None)
         return d
+
+    eval_seeds: list[int] | None = None
+    if str(args.eval_seeds).strip():
+        eval_seeds = [int(s.strip()) for s in str(args.eval_seeds).split(",") if s.strip()]
 
     arena_league_path = Path(args.arena_league)
     arena_rng = random.Random(int(args.seed) + 13_371)
@@ -357,6 +422,7 @@ def main() -> None:
                 "device": str(device),
                 "cuda_available": bool(torch.cuda.is_available()),
                 "torch": torch.__version__,
+                "git": repo_git,
                 "run_dir": str(run_dir),
                 "resume_path": str(resume_path) if resume_path is not None else None,
                 "resume_update": int(resume_ckpt.get("update")) if resume_ckpt is not None else None,
@@ -364,8 +430,24 @@ def main() -> None:
                 "end_update": int(end_update),
                 "global_step": int(global_step),
                 "episodes": int(episodes),
+                "obs_dim": int(obs_dim),
+                "action_dim": int(action_dim),
+                "env_signature": _env_signature(env_cfg),
+                "env_constants": {
+                    "PACK_SIZE": int(PACK_SIZE),
+                    "CONTACT_SLOTS": int(getattr(env, "CONTACT_SLOTS", 0)),
+                    "CONTACT_DIM": int(getattr(env, "CONTACT_DIM", 0)),
+                    "LOCAL_MAP_R": int(getattr(env, "LOCAL_MAP_R", 0)),
+                    "LOCAL_MAP_DIM": int(getattr(env, "LOCAL_MAP_DIM", 0)),
+                    "BASE_ACTION_DIM": int(getattr(env, "BASE_ACTION_DIM", 0)),
+                    "TARGET_DIM": int(getattr(env, "TARGET_DIM", 0)),
+                    "EWAR_DIM": int(getattr(env, "EWAR_DIM", 0)),
+                    "OBS_CTRL_DIM": int(getattr(env, "OBS_CTRL_DIM", 0)),
+                    "COMM_DIM": int(getattr(env, "comm_dim", 0)),
+                },
                 "args": vars(args),
                 "env": asdict(env_cfg),
+                "eval_seeds": eval_seeds,
             }
         )
         + "\n"
@@ -557,17 +639,46 @@ def main() -> None:
 
         eval_stats = None
         if args.eval_every > 0 and update % args.eval_every == 0:
+            if eval_seeds is not None:
+                seeds_now = list(eval_seeds)
+                seed0 = int(seeds_now[0]) if seeds_now else int(args.seed)
+                eval_episodes = int(len(seeds_now))
+            else:
+                seed0 = int(args.seed + 10_000 + update * 13)
+                eval_episodes = int(args.eval_episodes)
+                seeds_now = [seed0 + i for i in range(eval_episodes)]
+
             eval_stats, replay = evaluate_vs_heuristic(
                 model=model,
                 env_cfg=env_cfg,
-                episodes=args.eval_episodes,
-                seed=args.seed + 10_000 + update * 13,
+                episodes=eval_episodes,
+                seed=seed0,
                 device=device,
-                record=(args.push_url is not None)
+                seeds=seeds_now,
+                record=(bool(args.push_url) or bool(args.save_eval_replay)),
             )
+            eval_stats["seeds"] = seeds_now
             print(f"eval vs heuristic: {eval_stats}")
-            if replay and args.push_url:
-                push_replay(args.push_url, replay)
+            if replay is not None:
+                replay["run"] = {
+                    "kind": "eval_vs_heuristic",
+                    "run_dir": str(run_dir),
+                    "update": int(update),
+                    "global_step": int(global_step),
+                    "episodes": int(episodes),
+                    "eval": dict(eval_stats),
+                    "eval_seeds": seeds_now,
+                    "git": dict(repo_git),
+                    "env_signature": _env_signature(env_cfg),
+                }
+                if args.save_eval_replay:
+                    replay_dir = run_dir / "replays"
+                    replay_dir.mkdir(parents=True, exist_ok=True)
+                    out_path = replay_dir / f"eval_update_{update:05d}_seed_{seed0}.json"
+                    out_path.write_text(json.dumps(replay), encoding="utf-8")
+                    print(f"saved eval replay: {out_path}")
+                if args.push_url:
+                    push_replay(args.push_url, replay)
 
         best_updated = False
         best_snapshot: str | None = None

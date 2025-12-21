@@ -220,6 +220,10 @@ class EchelonEnv:
             "legged_red": 0.0,
             "shutdowns_blue": 0.0,
             "shutdowns_red": 0.0,
+            "bad_actions_blue": 0.0,
+            "bad_actions_red": 0.0,
+            "bad_obs_blue": 0.0,
+            "bad_obs_red": 0.0,
         }
         self._prev_fallen = {}
         self._prev_legged = {}
@@ -234,7 +238,7 @@ class EchelonEnv:
         blue_canon = str(rng_variants.choice(["BL", "BR", "TL", "TR"]))
         red_canon = opposite_corner(blue_canon)
         transform = str(rng_variants.choice(list_transforms()))
-        world.solid = apply_transform_solids(world.solid, transform)
+        world.voxels = apply_transform_solids(world.voxels, transform)
         world.meta["transform"] = transform
 
         # Clear spawn regions in corners.
@@ -261,14 +265,14 @@ class EchelonEnv:
 
         def clear_corner(corner: str) -> None:
             if corner == "BL":
-                world.set_box_solid(0, 0, 0, spawn_clear, spawn_clear, world.size_z, False)
+                world.set_box_solid(0, 0, 0, spawn_clear, spawn_clear, world.size_z, VoxelWorld.AIR)
             elif corner == "BR":
-                world.set_box_solid(world.size_x - spawn_clear, 0, 0, world.size_x, spawn_clear, world.size_z, False)
+                world.set_box_solid(world.size_x - spawn_clear, 0, 0, world.size_x, spawn_clear, world.size_z, VoxelWorld.AIR)
             elif corner == "TL":
-                world.set_box_solid(0, world.size_y - spawn_clear, 0, spawn_clear, world.size_y, world.size_z, False)
+                world.set_box_solid(0, world.size_y - spawn_clear, 0, spawn_clear, world.size_y, world.size_z, VoxelWorld.AIR)
             elif corner == "TR":
                 world.set_box_solid(
-                    world.size_x - spawn_clear, world.size_y - spawn_clear, 0, world.size_x, world.size_y, world.size_z, False
+                    world.size_x - spawn_clear, world.size_y - spawn_clear, 0, world.size_x, world.size_y, world.size_z, VoxelWorld.AIR
                 )
             else:
                 raise ValueError(f"Unknown corner: {corner!r}")
@@ -299,8 +303,8 @@ class EchelonEnv:
                 penalty_cost=self.config.world.connectivity_penalty_cost,
                 carve_width=self.config.world.connectivity_carve_width,
             )
-            validator.validate_and_fix(
-                world.solid,
+            world.voxels = validator.validate_and_fix(
+                world.voxels,
                 spawn_corners=dict(world.meta.get("spawn_corners", spawn_corners)),
                 spawn_clear=spawn_clear,
                 meta=world.meta,
@@ -312,7 +316,7 @@ class EchelonEnv:
             seed=episode_seed,
             world_config=self.config.world,
             world_meta=world.meta,
-            solids_zyx=world.solid,
+            solids_zyx=world.voxels,
         )
 
         zone_cx, zone_cy, _ = capture_zone_params(world.meta, size_x=world.size_x, size_y=world.size_y)
@@ -518,7 +522,7 @@ class EchelonEnv:
                 if x < 0 or y < 0 or x >= world.size_x or y >= world.size_y:
                     out[iy, ix] = 1.0
                     continue
-                out[iy, ix] = 1.0 if bool(np.any(world.solid[:clearance_z, y, x])) else 0.0
+                out[iy, ix] = 1.0 if bool(np.any(world.voxels[:clearance_z, y, x] == VoxelWorld.SOLID)) else 0.0
 
         return out.reshape(-1)
 
@@ -550,9 +554,31 @@ class EchelonEnv:
             hit = los_cache.get(key)
             if hit is not None:
                 return hit
-            ok = bool(has_los(world, a_pos, b_pos))
+            ok = bool(sim.has_los(a_pos, b_pos))
             los_cache[key] = ok
             return ok
+
+        # Satellite Telemetry: Downsampled 2D map of solid terrain.
+        # Assuming we want a fixed size for the observation.
+        # Let's say 16x16 or 32x32.
+        TELEMETRY_SIZE = 16
+        telemetry = np.zeros((TELEMETRY_SIZE, TELEMETRY_SIZE), dtype=np.float32)
+        # Scale world voxels to telemetry.
+        # We only care about solids for this 'cheat' map as requested.
+        for iy in range(TELEMETRY_SIZE):
+            for ix in range(TELEMETRY_SIZE):
+                wx0 = int(ix * world.size_x / TELEMETRY_SIZE)
+                wx1 = int((ix + 1) * world.size_x / TELEMETRY_SIZE)
+                wy0 = int(iy * world.size_y / TELEMETRY_SIZE)
+                wy1 = int((iy + 1) * world.size_y / TELEMETRY_SIZE)
+                
+                # Ensure at least one voxel is checked even if resolution is higher than world size
+                if wx1 == wx0: wx1 = wx0 + 1
+                if wy1 == wy0: wy1 = wy0 + 1
+                
+                # Check if any voxel in this 'pixel' is solid.
+                telemetry[iy, ix] = 1.0 if np.any(world.voxels[:, wy0:wy1, wx0:wx1] == VoxelWorld.SOLID) else 0.0
+        telemetry_flat = telemetry.reshape(-1)
 
         reserved = {"friendly": 3, "hostile": 1, "neutral": 1}
         repurpose_priority = ["hostile", "friendly", "neutral"]
@@ -679,6 +705,9 @@ class EchelonEnv:
             # Ego-centric local map (footprint occupancy).
             parts.append(self._local_map(viewer))
 
+            # Global satellite telemetry (downsampled 2D solid map).
+            parts.append(telemetry_flat)
+
             # Extra per-agent scalars.
             targeted = 1.0 if self._is_targeted(viewer) else 0.0
             under_fire = 1.0 if viewer.was_hit else 0.0
@@ -771,7 +800,11 @@ class EchelonEnv:
                     dtype=np.float32,
                 )
             )
-            obs[aid] = np.concatenate(parts).astype(np.float32, copy=False)
+            vec = np.concatenate(parts).astype(np.float32, copy=False)
+            if not np.all(np.isfinite(vec)):
+                vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+                self._episode_stats[f"bad_obs_{viewer.team}"] = float(self._episode_stats.get(f"bad_obs_{viewer.team}", 0.0) + 1.0)
+            obs[aid] = vec
         return obs
 
     def _obs_dim(self) -> int:
@@ -782,7 +815,8 @@ class EchelonEnv:
         #   self_vel(3), cooldowns(4), in_zone, vec_to_zone(3), zone_radius,
         #   my_control, my_score, enemy_score, time_frac, obs_sort_onehot(3), hostile_only = 31
         self_dim = 31
-        return self.CONTACT_SLOTS * self.CONTACT_DIM + comm_dim + int(self.LOCAL_MAP_DIM) + self_dim
+        telemetry_dim = 16 * 16
+        return self.CONTACT_SLOTS * self.CONTACT_DIM + comm_dim + int(self.LOCAL_MAP_DIM) + telemetry_dim + self_dim
 
     def _is_targeted(self, mech: MechState) -> bool:
         sim = self.sim
@@ -795,7 +829,7 @@ class EchelonEnv:
                 continue
             if float(np.linalg.norm(other.pos - mech.pos)) > 8.0:
                 continue
-            if has_los(world, other.pos, mech.pos):
+            if sim.has_los(other.pos, mech.pos):
                 return True
         return False
 
@@ -828,7 +862,19 @@ class EchelonEnv:
                         f"obs_ctrl={self.OBS_CTRL_DIM}, comm_dim={self.comm_dim})"
                     )
                 a = a.reshape(self.ACTION_DIM)
-            act[aid] = a.astype(np.float32, copy=False)
+
+            bad = bool(not np.all(np.isfinite(a)))
+            if bad:
+                a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+            a = a.astype(np.float32, copy=False)
+            np.clip(a, -1.0, 1.0, out=a)
+            act[aid] = a
+
+            if bad:
+                m = sim.mechs.get(aid)
+                if m is not None:
+                    key = f"bad_actions_{m.team}"
+                    self._episode_stats[key] = float(self._episode_stats.get(key, 0.0) + 1.0)
 
         # Apply target selection + EWAR toggles immediately (affects this sim step).
         for aid in self.agents:
@@ -1039,7 +1085,7 @@ class EchelonEnv:
 
         for aid in self.agents:
             m = sim.mechs[aid]
-            r = float(r_team[m.team]) if m.alive else 0.0
+            r = float(r_team[m.team]) if (m.alive or m.died) else 0.0
             if m.died:
                 r -= W_DEATH
             rewards[aid] = float(r)
@@ -1163,6 +1209,10 @@ class EchelonEnv:
                 }
                 for mid, m in sim.mechs.items()
             },
+            "smoke_clouds": [
+                {"pos": [float(c.pos[0]), float(c.pos[1]), float(c.pos[2])], "radius": float(c.radius)}
+                for c in sim.smoke_clouds if c.alive
+            ],
             "events": events,
         }
 
@@ -1181,9 +1231,15 @@ class EchelonEnv:
                 world_data["spawn_clear"] = int(self._spawn_clear)
             if getattr(self.world, "meta", None):
                 world_data["meta"] = self.world.meta
-            idx_zyx = np.argwhere(self.world.solid)
+            
+            # Export all non-air voxels
+            idx_zyx = np.argwhere(self.world.voxels > 0)
             if idx_zyx.size:
-                world_data["walls"] = idx_zyx[:, [2, 1, 0]].tolist()
+                # Include type [x, y, z, type]
+                walls = []
+                for z, y, x in idx_zyx:
+                    walls.append([int(x), int(y), int(z), int(self.world.voxels[z, y, x])])
+                world_data["walls"] = walls
             else:
                 world_data["walls"] = []
 

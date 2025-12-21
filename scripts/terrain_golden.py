@@ -96,7 +96,12 @@ def generate_hashes(seed: int, world_cfg: WorldConfig, *, packs_per_team: int) -
             penalty_cost=world_cfg.connectivity_penalty_cost,
             carve_width=world_cfg.connectivity_carve_width,
         )
-        validator.validate_and_fix(world.solid, spawn_corners=spawn_corners, spawn_clear=spawn_clear, meta=world.meta)
+        world.voxels = validator.validate_and_fix(
+            world.voxels,
+            spawn_corners=spawn_corners,
+            spawn_clear=spawn_clear,
+            meta=world.meta,
+        )
 
     recipe = build_recipe(
         generator_id="legacy_voxel_archetypes",

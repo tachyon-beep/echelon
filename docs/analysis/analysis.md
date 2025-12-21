@@ -14,8 +14,8 @@ This document serves as a synthesis of technical analysis and the established pr
 
 ### Actions & observations
 - **Action layout**: base 9-d control + target selection + ECM/ECCM toggles + observation-controls + optional pack comm tail.
-- **Observation layout**: fixed top‑K contact table (5 slots), pack-local comm board, ego-centric local occupancy map, and self/objective scalars.
-- **Partial observability**: radar-range visibility + LOS checks; pack-scoped paint provides indirect visibility/locks (now EWAR-gated).
+- **Observation layout**: fixed top‑K contact table (5 slots), pack-local comm board, ego-centric local occupancy map, global downsampled “satellite” terrain telemetry, and self/objective scalars.
+- **Partial observability**: radar-range visibility + LOS checks (including smoke); pack-scoped paint provides indirect visibility/locks (now EWAR-gated).
 
 ### Mechs & mechanics
 - **Classes**: light/medium/heavy with distinct size/speed/yaw/heat caps.
@@ -32,14 +32,14 @@ This document serves as a synthesis of technical analysis and the established pr
 - **AMS**: medium/heavy point-defense chance to intercept incoming homing missiles.
 
 ### Terrain / voxels
-- **World**: boolean `solid[z,y,x]` voxel grid; archetype generator (`citadel`, `urban_grid`, `highway`) + scatter.
+- **World**: typed `voxels[z,y,x]` (`AIR/SOLID/LAVA/WATER`) with a backward-compatible `world.solid` mask; archetype generator (`citadel`, `urban_grid`, `highway`) + scatter + hazards.
 - **Variants**: map reorientation transforms + randomized spawn corners.
 - **Fightability**: spawn clears + capture-zone clearing + macro corridor carving + connectivity validator “dig A*” safety net.
 
 ### Training & ops
 - **Trainer**: PPO + LSTM (`scripts/train_ppo.py`) vs heuristic or arena league opponents.
 - **Arena**: Glicko‑2 league for self-play population management (`echelon/arena/*`).
-- **Metrics**: `metrics.jsonl` now includes per-episode outcome stats (kills/assists/damage/knockdowns/etc.).
+- **Metrics**: `metrics.jsonl` includes per-episode outcome stats + run provenance (git/env signature/dims) and counters for non-finite obs/actions.
 
 ### Visualization
 - **Replay recording**: env can serialize world + frames + events.
@@ -63,6 +63,12 @@ This document serves as a synthesis of technical analysis and the established pr
 | Macro corridor carving + spawn jitter | `echelon/gen/corridors.py`, `echelon/env/env.py`, terrain scripts | Medium | Low–Med | Changes terrain distribution + hashes; should remain safe with validator as backstop. |
 | Richer replay events + mech state | `echelon/env/env.py`, `echelon/sim/sim.py` | Low–Med | Low | Mostly additive fields; viewer updated to consume them. |
 | Episode stats logged to training metrics | `echelon/env/env.py`, `scripts/train_ppo.py` | Low | Low | Additive logging; minimal behavioral impact. |
+| Typed voxel materials + hazards | `echelon/sim/world.py`, `echelon/sim/sim.py`, `echelon/env/env.py`, `viewer.html` | Medium | Medium | Broad refactor of terrain representation; SOLID remains the only collision/nav blocker, hazards add damage/LOS nuance. |
+| Back-compat `world.solid` proxy | `echelon/sim/world.py` | Low | Low | Preserves legacy boolean-mask reads/writes (`world.solid[...] = ...`) on top of typed voxels. |
+| Smoke-aware LOS | `echelon/sim/sim.py` | Low–Med | Low–Med | Adds a new “soft occluder” that blocks targeting/locks without changing terrain. |
+| Satellite terrain telemetry in obs | `echelon/env/env.py` | Low–Med | Med | Changes obs dimensionality and information structure; breaks old checkpoints and may shift learned priors. |
+| NaN/Inf guards for actions/obs | `echelon/env/env.py` | Low | Low | Sanitizes only when non-finite values occur; increments per-team counters for debugging. |
+| Deterministic eval seeds + eval replay saving | `scripts/train_ppo.py` | Low | Low | Evaluation-only; enables `--eval-seeds` and `--save-eval-replay` plus provenance stamped into `metrics.jsonl` and saved replays. |
 
 **Compatibility note:** action/obs dimensions changed. Existing `.pt` checkpoints trained on the old shapes will not load; retraining is expected.
 

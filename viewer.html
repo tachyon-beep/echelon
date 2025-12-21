@@ -265,7 +265,10 @@
 	            if (!replayData || !replayData.frames || replayData.frames.length === 0) return;
 
 	            // Clean up old scene
-	            if (wallMesh) scene.remove(wallMesh);
+	            if (window.worldMeshes) {
+                    window.worldMeshes.forEach(m => scene.remove(m));
+                    window.worldMeshes = [];
+                }
 	            if (captureZoneMesh) scene.remove(captureZoneMesh);
 	            Object.values(mechMeshes).forEach(m => scene.remove(m));
 	            mechMeshes = {};
@@ -321,19 +324,39 @@
 
                 if (replayData.world.walls) {
                     const geometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
-                    const material = new THREE.MeshLambertMaterial({ color: 0x555555 });
-                wallMesh = new THREE.InstancedMesh(geometry, material, replayData.world.walls.length);
-                
-                const matrix = new THREE.Matrix4();
-                replayData.world.walls.forEach((w, i) => {
-                    // w is [x, y, z]
-                    matrix.setPosition(w[0] + 0.5, w[1] + 0.5, w[2] + 0.5);
-                    wallMesh.setMatrixAt(i, matrix);
-                });
-                wallMesh.instanceMatrix.needsUpdate = true;
-                wallMesh.frustumCulled = false;
-                scene.add(wallMesh);
-            }
+                    // We'll use multiple instanced meshes for different types if needed,
+                    // or just a single one with colors. InstancedMesh supports colors!
+                    
+                    const materials = {
+                        1: new THREE.MeshLambertMaterial({ color: 0x555555 }), // SOLID
+                        2: new THREE.MeshLambertMaterial({ color: 0xff4400, emissive: 0x441100 }), // LAVA
+                        3: new THREE.MeshLambertMaterial({ color: 0x0044ff, transparent: true, opacity: 0.8 }) // WATER
+                    };
+                    
+                    // Group walls by type for efficient instancing
+                    const byType = {};
+                    replayData.world.walls.forEach(w => {
+                        // w is [x, y, z, type] or just [x, y, z] (legacy)
+                        const type = w[3] || 1;
+                        if (!byType[type]) byType[type] = [];
+                        byType[type].push(w);
+                    });
+                    
+                    Object.entries(byType).forEach(([type, walls]) => {
+                        const iMesh = new THREE.InstancedMesh(geometry, materials[type] || materials[1], walls.length);
+                        const matrix = new THREE.Matrix4();
+                        walls.forEach((w, i) => {
+                            matrix.setPosition(w[0] + 0.5, w[1] + 0.5, w[2] + 0.5);
+                            iMesh.setMatrixAt(i, matrix);
+                        });
+                        iMesh.instanceMatrix.needsUpdate = true;
+                        iMesh.frustumCulled = false;
+                        scene.add(iMesh);
+                        // Store for cleanup
+                        if (!window.worldMeshes) window.worldMeshes = [];
+                        window.worldMeshes.push(iMesh);
+                    });
+                }
             }
 
             // Metadata / stats
@@ -610,6 +633,25 @@
                 }
             }
 
+            // Update Smoke Clouds
+            const frameSmoke = frame.smoke_clouds || [];
+            if (!window.smokeMeshes) window.smokeMeshes = [];
+            // Reuse meshes? For now just clear and rebuild or hide
+            window.smokeMeshes.forEach(m => { m.visible = false; });
+            frameSmoke.forEach((c, i) => {
+                let mesh = window.smokeMeshes[i];
+                if (!mesh) {
+                    const geo = new THREE.SphereGeometry(1, 16, 16);
+                    const mat = new THREE.MeshBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.4 });
+                    mesh = new THREE.Mesh(geo, mat);
+                    scene.add(mesh);
+                    window.smokeMeshes[i] = mesh;
+                }
+                mesh.visible = true;
+                mesh.position.set(c.pos[0], c.pos[1], c.pos[2]);
+                mesh.scale.set(c.radius, c.radius, c.radius);
+            });
+
             // Events (Lasers/Missiles)
             const recentEvents = frame.events || [];
             
@@ -635,10 +677,17 @@
                 else if (ev.type === 'laser_hit') {
                     if (origin && target) {
                         let color = 0x00ff00; // Green
-                        if (ev.is_painted) color = 0x00ffff; // Cyan
+                        if (weapon === 'flamer') color = 0xff6600; // Orange for flamer
+                        else if (ev.is_painted) color = 0x00ffff; // Cyan
                         if (ev.is_crit) color = 0xff0000; // Red (Override)
                         drawBeam(origin, new THREE.Vector3(...target.pos), color, 2);
                     }
+                }
+                else if (ev.type === 'smoke_cloud') {
+                    if (pos) drawExplosion(pos, ev.radius, 0xcccccc);
+                }
+                else if (ev.type === 'smoke_launch') {
+                    if (origin) drawFlash(origin, 0xcccccc, 1);
                 }
                 else if (ev.type === 'projectile_hit') {
                     // Tracers for impacts

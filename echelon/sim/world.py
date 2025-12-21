@@ -8,31 +8,105 @@ import numpy as np
 from ..config import WorldConfig
 
 
+class _SolidMask:
+    def __init__(self, world: VoxelWorld) -> None:
+        self._world = world
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return self._world.voxels.shape
+
+    @property
+    def dtype(self) -> type[np.bool_]:
+        return np.bool_
+
+    @property
+    def ndim(self) -> int:
+        return int(self._world.voxels.ndim)
+
+    @property
+    def size(self) -> int:
+        return int(self._world.voxels.size)
+
+    def __array__(self, dtype: Any | None = None) -> np.ndarray:
+        out = self._world.voxels == self._world.SOLID
+        if dtype is None:
+            return out
+        return out.astype(dtype, copy=False)
+
+    def __getitem__(self, key: Any) -> Any:
+        return self._world.voxels[key] == self._world.SOLID
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if np.isscalar(value):
+            self._world.voxels[key] = self._world.SOLID if bool(value) else self._world.AIR
+            return
+
+        arr = np.asarray(value)
+        if arr.dtype == np.bool_ or arr.dtype == bool:
+            self._world.voxels[key] = np.where(arr, self._world.SOLID, self._world.AIR).astype(
+                np.uint8, copy=False
+            )
+            return
+
+        self._world.voxels[key] = arr.astype(np.uint8, copy=False)
+
+    def copy(self) -> np.ndarray:
+        return np.asarray(self).copy()
+
+
 @dataclass
 class VoxelWorld:
-    solid: np.ndarray  # bool[sz, sy, sx] (z-major)
+    # Voxel types
+    AIR = 0
+    SOLID = 1
+    LAVA = 2
+    WATER = 3
+
+    voxels: np.ndarray  # uint8[sz, sy, sx] (z-major)
     voxel_size_m: float = 5.0
     meta: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def solid(self) -> Any:
+        # Backward-compatible "solid mask" view.
+        # Historically, callers treated `world.solid` as a mutable boolean ndarray.
+        # Now that terrain is typed (uint8 voxels), we provide a lightweight proxy
+        # that supports numpy reads and in-place boolean writes.
+        return _SolidMask(self)
+
+    @solid.setter
+    def solid(self, value: Any) -> None:
+        arr = np.asarray(value)
+        if arr.shape != self.voxels.shape:
+            raise ValueError(f"solid has shape {arr.shape}, expected {self.voxels.shape}")
+        if arr.dtype == np.bool_ or arr.dtype == bool:
+            self.voxels[:] = np.where(arr, self.SOLID, self.AIR).astype(np.uint8, copy=False)
+            return
+        self.voxels[:] = arr.astype(np.uint8, copy=False)
+
+    @property
     def size_z(self) -> int:
-        return int(self.solid.shape[0])
+        return int(self.voxels.shape[0])
 
     @property
     def size_y(self) -> int:
-        return int(self.solid.shape[1])
+        return int(self.voxels.shape[1])
 
     @property
     def size_x(self) -> int:
-        return int(self.solid.shape[2])
+        return int(self.voxels.shape[2])
 
     def in_bounds(self, ix: int, iy: int, iz: int) -> bool:
         return 0 <= ix < self.size_x and 0 <= iy < self.size_y and 0 <= iz < self.size_z
 
-    def is_solid_index(self, ix: int, iy: int, iz: int) -> bool:
+    def get_voxel(self, ix: int, iy: int, iz: int) -> int:
         if not self.in_bounds(ix, iy, iz):
-            return True
-        return bool(self.solid[iz, iy, ix])
+            return self.SOLID
+        return int(self.voxels[iz, iy, ix])
+
+    def is_solid_index(self, ix: int, iy: int, iz: int) -> bool:
+        return self.get_voxel(ix, iy, iz) == self.SOLID
 
     def set_box_solid(
         self,
@@ -42,7 +116,7 @@ class VoxelWorld:
         max_ix_excl: int,
         max_iy_excl: int,
         max_iz_excl: int,
-        value: bool,
+        value: bool | int,
     ) -> None:
         min_ix = max(min_ix, 0)
         min_iy = max(min_iy, 0)
@@ -52,9 +126,12 @@ class VoxelWorld:
         max_iz_excl = min(max_iz_excl, self.size_z)
         if min_ix >= max_ix_excl or min_iy >= max_iy_excl or min_iz >= max_iz_excl:
             return
-        self.solid[min_iz:max_iz_excl, min_iy:max_iy_excl, min_ix:max_ix_excl] = value
+        
+        val = int(value) if isinstance(value, (int, np.integer)) else (self.SOLID if value else self.AIR)
+        self.voxels[min_iz:max_iz_excl, min_iy:max_iy_excl, min_ix:max_ix_excl] = val
 
     def aabb_collides(self, aabb_min: np.ndarray, aabb_max: np.ndarray) -> bool:
+        # Only SOLID voxels (walls) cause physics collisions.
         # Treat out-of-bounds as solid.
         if np.any(aabb_min < 0) or aabb_max[0] > self.size_x or aabb_max[1] > self.size_y or aabb_max[2] > self.size_z:
             return True
@@ -72,13 +149,13 @@ class VoxelWorld:
         max_iy = min(max_iy, self.size_y)
         max_iz = min(max_iz, self.size_z)
 
-        region = self.solid[min_iz:max_iz, min_iy:max_iy, min_ix:max_ix]
-        return bool(np.any(region))
+        region = self.voxels[min_iz:max_iz, min_iy:max_iy, min_ix:max_ix]
+        return bool(np.any(region == self.SOLID))
 
     @classmethod
     def generate(cls, config: WorldConfig, rng: np.random.Generator) -> VoxelWorld:
-        solid = np.zeros((config.size_z, config.size_y, config.size_x), dtype=bool)
-        world = cls(solid=solid, voxel_size_m=config.voxel_size_m)
+        voxels = np.zeros((config.size_z, config.size_y, config.size_x), dtype=np.uint8)
+        world = cls(voxels=voxels, voxel_size_m=config.voxel_size_m)
 
         # Helper to clear a path
         def carve_line(x0, y0, x1, y1, width_vox):
@@ -268,9 +345,13 @@ class VoxelWorld:
         if archetype == 0:
             road_width = 8.0
             carve_line(0, 0, cx, cy, road_width)
+            road_width = 8.0
             carve_line(config.size_x, 0, cx, cy, road_width)
             carve_line(0, config.size_y, cx, cy, road_width)
             carve_line(config.size_x, config.size_y, cx, cy, road_width)
+            
+            # Add a lava pit in the very center objective
+            world.set_box_solid(cx-4, cy-4, 0, cx+4, cy+4, 1, VoxelWorld.LAVA)
         elif archetype == 1:
             # Re-carve grid streets
             if config.size_x < 60:
@@ -284,7 +365,11 @@ class VoxelWorld:
             # Horizontal streets
             for y in range(block_size, config.size_y, step):
                 carve_line(0, y, config.size_x, y, float(street_width))
-                
+            
+            # Add some water 'fountains' or canals
+            for x in range(0, config.size_x, step * 3):
+                world.set_box_solid(x + block_size + 1, 0, 0, x + block_size + 1 + street_width - 2, config.size_y, 1, VoxelWorld.WATER)
+
         elif archetype == 2:
             road_width = float(world.meta.get("highway_road_width", 12.0))
             diag = int(world.meta.get("highway_diagonal", 0))
@@ -292,5 +377,11 @@ class VoxelWorld:
                 carve_line(0, 0, config.size_x, config.size_y, road_width)
             else:
                 carve_line(0, config.size_y, config.size_x, 0, road_width)
+            
+            # Add lava patches along the highway
+            for _ in range(5):
+                lx = rng.integers(0, config.size_x - 10)
+                ly = rng.integers(0, config.size_y - 10)
+                world.set_box_solid(lx, ly, 0, lx+6, ly+6, 1, VoxelWorld.LAVA)
 
         return world

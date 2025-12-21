@@ -108,7 +108,12 @@ def main() -> None:
             penalty_cost=world_cfg.connectivity_penalty_cost,
             carve_width=world_cfg.connectivity_carve_width,
         )
-        validator.validate_and_fix(repro_world.solid, spawn_corners=spawn_corners, spawn_clear=spawn_clear, meta=repro_world.meta)
+        repro_world.voxels = validator.validate_and_fix(
+            repro_world.voxels,
+            spawn_corners=spawn_corners,
+            spawn_clear=spawn_clear,
+            meta=repro_world.meta,
+        )
 
     repro_recipe = build_recipe(
         generator_id=generator_id,

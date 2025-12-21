@@ -173,7 +173,12 @@ def main() -> None:
             rng=rng_variants,
         )
 
-        validator.validate_and_fix(world.solid, spawn_corners=spawn_corners, spawn_clear=spawn_clear, meta=world.meta)
+        world.voxels = validator.validate_and_fix(
+            world.voxels,
+            spawn_corners=spawn_corners,
+            spawn_clear=spawn_clear,
+            meta=world.meta,
+        )
 
         carved = int(np.count_nonzero(np.logical_and(solids_before, np.logical_not(world.solid))))
         total_vox = int(world.solid.size)

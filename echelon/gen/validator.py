@@ -72,14 +72,14 @@ class ConnectivityValidator:
 
     def validate_and_fix(
         self,
-        solids: np.ndarray,
+        voxels: np.ndarray,
         *,
         spawn_corners: dict[str, str],
         spawn_clear: int,
         meta: dict[str, Any],
     ) -> np.ndarray:
-        if solids.shape != (self.size_z, self.size_y, self.size_x):
-            raise ValueError(f"solids has shape {solids.shape}, expected {(self.size_z, self.size_y, self.size_x)}")
+        if voxels.shape != (self.size_z, self.size_y, self.size_x):
+            raise ValueError(f"voxels has shape {voxels.shape}, expected {(self.size_z, self.size_y, self.size_x)}")
 
         fixups: list[str] = meta.setdefault("fixups", [])
         stats: dict[str, Any] = meta.setdefault("stats", {})
@@ -103,17 +103,19 @@ class ConnectivityValidator:
         red = _corner_anchor(red_corner, spawn_clear, self.size_y, self.size_x)
         objective = capture_zone_anchor(meta, size_x=self.size_x, size_y=self.size_y)
 
-        solids = self._ensure_two_paths(solids, blue, objective, label="blue_to_objective", fixups=fixups, paths_stats=paths_stats)
-        solids = self._ensure_two_paths(solids, red, objective, label="red_to_objective", fixups=fixups, paths_stats=paths_stats)
-        return solids
+        voxels = self._ensure_two_paths(voxels, blue, objective, label="blue_to_objective", fixups=fixups, paths_stats=paths_stats)
+        voxels = self._ensure_two_paths(voxels, red, objective, label="red_to_objective", fixups=fixups, paths_stats=paths_stats)
+        return voxels
 
-    def _build_nav_grid(self, solids: np.ndarray) -> np.ndarray:
-        footprint = np.any(solids[: self.clearance_z, :, :], axis=0)
+    def _build_nav_grid(self, voxels: np.ndarray) -> np.ndarray:
+        # Treat SOLID (1) as blocked. Passable hazards (Lava/Water) are NOT blocked for nav here.
+        # This can be refined later if we want mechs to avoid Lava.
+        footprint = np.any(voxels[: self.clearance_z, :, :] == 1, axis=0)
         return _inflate_obstacles_8(footprint, self.obstacle_inflate_radius)
 
     def _ensure_one_path(
         self,
-        solids: np.ndarray,
+        voxels: np.ndarray,
         start: tuple[int, int],
         goal: tuple[int, int],
         *,
@@ -121,7 +123,7 @@ class ConnectivityValidator:
         fixups: list[str],
         paths_stats: dict[str, Any],
     ) -> np.ndarray:
-        nav = self._build_nav_grid(solids)
+        nav = self._build_nav_grid(voxels)
         res = self._astar_dig(nav, start, goal, penalty=None)
         paths_stats[label] = {
             "found": bool(res.found),
@@ -129,13 +131,13 @@ class ConnectivityValidator:
             "digs": int(res.digs_needed),
         }
         if res.found and res.digs_needed > 0:
-            solids = self._apply_carve(solids, res.path)
+            voxels = self._apply_carve(voxels, res.path)
             fixups.append(f"{label}:dig={res.digs_needed}")
-        return solids
+        return voxels
 
     def _ensure_two_paths(
         self,
-        solids: np.ndarray,
+        voxels: np.ndarray,
         start: tuple[int, int],
         goal: tuple[int, int],
         *,
@@ -143,17 +145,17 @@ class ConnectivityValidator:
         fixups: list[str],
         paths_stats: dict[str, Any],
     ) -> np.ndarray:
-        nav = self._build_nav_grid(solids)
+        nav = self._build_nav_grid(voxels)
 
         res1 = self._astar_dig(nav, start, goal, penalty=None)
         if not res1.found:
             fixups.append(f"{label}:path1:failed")
             paths_stats[label] = {"found": False}
-            return solids
+            return voxels
         if res1.digs_needed > 0:
-            solids = self._apply_carve(solids, res1.path)
+            voxels = self._apply_carve(voxels, res1.path)
             fixups.append(f"{label}:path1:dig={res1.digs_needed}")
-            nav = self._build_nav_grid(solids)
+            nav = self._build_nav_grid(voxels)
 
         penalty = self._penalty_grid(res1.path)
         res2 = self._astar_dig(nav, start, goal, penalty=penalty)
@@ -165,9 +167,9 @@ class ConnectivityValidator:
                 "digs_a": int(res1.digs_needed),
                 "found_b": False,
             }
-            return solids
+            return voxels
         if res2.digs_needed > 0:
-            solids = self._apply_carve(solids, res2.path)
+            voxels = self._apply_carve(voxels, res2.path)
             fixups.append(f"{label}:path2:dig={res2.digs_needed}")
             overlap = self._path_overlap_ratio(res1.path, res2.path)
             paths_stats[label] = {
@@ -178,7 +180,7 @@ class ConnectivityValidator:
                 "digs_a": int(res1.digs_needed),
                 "digs_b": int(res2.digs_needed),
             }
-            return solids
+            return voxels
 
         overlap = self._path_overlap_ratio(res1.path, res2.path)
         paths_stats[label] = {
@@ -189,7 +191,7 @@ class ConnectivityValidator:
             "digs_a": int(res1.digs_needed),
             "digs_b": int(res2.digs_needed),
         }
-        return solids
+        return voxels
 
     def _penalty_grid(self, path: list[tuple[int, int]]) -> np.ndarray:
         if self.penalty_radius <= 0 or self.penalty_cost <= 0.0 or not path:
@@ -270,14 +272,14 @@ class ConnectivityValidator:
         path.reverse()
         return PathResult(path, float(cost_so_far[(gy, gx)]), digs, True)
 
-    def _apply_carve(self, solids: np.ndarray, path: list[tuple[int, int]]) -> np.ndarray:
+    def _apply_carve(self, voxels: np.ndarray, path: list[tuple[int, int]]) -> np.ndarray:
         if not path:
-            return solids
+            return voxels
         radius = max(1, int(self.carve_width // 2))
         for y, x in path:
             y0 = max(0, y - radius)
             y1 = min(self.size_y, y + radius + 1)
             x0 = max(0, x - radius)
             x1 = min(self.size_x, x + radius + 1)
-            solids[:, y0:y1, x0:x1] = False
-        return solids
+            voxels[:, y0:y1, x0:x1] = 0 # AIR
+        return voxels
