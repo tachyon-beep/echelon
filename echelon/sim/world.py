@@ -64,6 +64,7 @@ class VoxelWorld:
     WATER = 3
     HOT_DEBRIS = 4
     KILLED_HULL = 5
+    DIRT = 6
 
     voxels: np.ndarray  # uint8[sz, sy, sx] (z-major)
     voxel_size_m: float = 5.0
@@ -132,6 +133,12 @@ class VoxelWorld:
         
         val = int(value) if isinstance(value, (int, np.integer)) else (self.SOLID if value else self.AIR)
         self.voxels[min_iz:max_iz_excl, min_iy:max_iy_excl, min_ix:max_ix_excl] = val
+
+    def ensure_ground_layer(self) -> None:
+        if self.size_z <= 0:
+            return
+        layer = self.voxels[0]
+        layer[layer == self.AIR] = self.DIRT
 
     def aabb_collides(self, aabb_min: np.ndarray, aabb_max: np.ndarray) -> bool:
         # Only SOLID voxels (walls) cause physics collisions.
@@ -389,9 +396,13 @@ class VoxelWorld:
                 carve_line(0, config.size_y, config.size_x, 0, road_width)
             
             # Add lava patches along the highway
+            patch_size = max(1, min(6, config.size_x, config.size_y))
+            max_lx = config.size_x - patch_size
+            max_ly = config.size_y - patch_size
             for _ in range(5):
-                lx = rng.integers(0, config.size_x - 10)
-                ly = rng.integers(0, config.size_y - 10)
-                world.set_box_solid(lx, ly, 0, lx+6, ly+6, 1, VoxelWorld.LAVA)
+                lx = int(rng.integers(0, max_lx + 1)) if max_lx > 0 else 0
+                ly = int(rng.integers(0, max_ly + 1)) if max_ly > 0 else 0
+                world.set_box_solid(lx, ly, 0, lx + patch_size, ly + patch_size, 1, VoxelWorld.LAVA)
 
+        world.ensure_ground_layer()
         return world

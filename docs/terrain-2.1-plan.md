@@ -14,6 +14,13 @@ The Echelon terrain system is shifting from a static 2.5D heightmap generator to
 3. **Determinism & Replayability:** A "Map Recipe" metadata structure completely decouples generation parameters from the random seed, ensuring debuggability.
 4. **Composition over Noise:** Maps are built via a structured pipeline (Skeleton → Biomes → Details), not generic Perlin noise.
 
+## 1.2 Complexity & Risk Assessment
+
+- **Complexity:** High (major subsystem). Touches generation, validation, replay metadata, and future movement/nav semantics.
+- **Engineering risk:** High. Terrain is global state: changes affect every episode, every replay, and training stability.
+- **Primary risks:** determinism drift (RNG coupling / unstable ordering), validator semantics diverging from sim movement, performance scaling (3D graphs), and replay/schema churn.
+- **Mitigations:** versioned generator interfaces + feature flags, recipe+hash provenance, golden seeds, property tests for connectivity, perf budgets/benchmarks, and staged rollout with a legacy fallback.
+
 ---
 
 ## 2. Generation Pipeline

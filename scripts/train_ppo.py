@@ -35,6 +35,12 @@ def stack_obs(obs: dict[str, np.ndarray], ids: list[str]) -> np.ndarray:
     return np.stack([obs[aid] for aid in ids], axis=0)
 
 
+def stack_obs_many(obs_list: list[dict[str, np.ndarray]], ids: list[str]) -> np.ndarray:
+    if not obs_list:
+        raise ValueError("obs_list must be non-empty")
+    return np.concatenate([stack_obs(obs, ids) for obs in obs_list], axis=0)
+
+
 def resolve_device(device_arg: str) -> torch.device:
     if device_arg == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -229,6 +235,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto", help="auto | cpu | cuda | cuda:0 ...")
+    parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=1,
+        help="Number of parallel environments for rollout collection (synchronous; increases batch/memory).",
+    )
     parser.add_argument("--packs-per-team", type=int, default=2, help="Number of 10-mech packs (1 Heavy, 5 Med, 3 Light, 1 Scout) per team")
     parser.add_argument("--size", type=int, default=100)
     parser.add_argument("--mode", type=str, default="full", choices=["full", "partial"])
@@ -236,6 +248,10 @@ def main() -> None:
     parser.add_argument("--decision-repeat", type=int, default=5)
     parser.add_argument("--episode-seconds", type=float, default=60.0)
     parser.add_argument("--comm-dim", type=int, default=8, help="Pack-local comm message size (0 disables)")
+    parser.add_argument("--disable-target-selection", action="store_true", help="Disable focus-target action fields")
+    parser.add_argument("--disable-ewar", action="store_true", help="Disable ECM/ECCM effects (actions ignored)")
+    parser.add_argument("--disable-obs-control", action="store_true", help="Disable observation-control action fields")
+    parser.add_argument("--disable-comm", action="store_true", help="Disable pack comms (actions ignored; obs zeroed)")
     parser.add_argument("--rollout-steps", type=int, default=512)
     parser.add_argument("--updates", type=int, default=200)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -383,19 +399,37 @@ def main() -> None:
             record_replay=False,
             seed=args.seed,
         )
+    # Feature toggles are safe to override even when resuming (no shape changes).
+    env_cfg = replace(
+        env_cfg,
+        enable_target_selection=not bool(args.disable_target_selection),
+        enable_ewar=not bool(args.disable_ewar),
+        enable_obs_control=not bool(args.disable_obs_control),
+        enable_comm=not bool(args.disable_comm),
+    )
 
-    env = EchelonEnv(env_cfg)
-    heuristic = HeuristicPolicy() if args.train_mode == "heuristic" else None
+    num_envs = int(args.num_envs)
+    if num_envs < 1:
+        raise ValueError("--num-envs must be >= 1")
+    if num_envs > 1 and args.train_mode != "heuristic":
+        raise ValueError("--num-envs > 1 currently supported only with --train-mode heuristic")
+
+    envs = [EchelonEnv(env_cfg) for _ in range(num_envs)]
+    env = envs[0]
+    heuristics = [HeuristicPolicy() for _ in range(num_envs)] if args.train_mode == "heuristic" else None
 
     # Run provenance (best-effort; safe to run outside git as well).
     repo_git = git_info(ROOT)
 
-    obs, _ = env.reset(seed=args.seed)
-    next_obs_dict = obs
+    env_episode_counts = [0 for _ in range(num_envs)]
+    next_obs_dicts: list[dict[str, np.ndarray]] = []
+    for i, env_i in enumerate(envs):
+        obs_i, _ = env_i.reset(seed=int(args.seed) + i * 1_000_000 + env_episode_counts[i])
+        next_obs_dicts.append(obs_i)
     blue_ids = env.blue_ids
     red_ids = env.red_ids
 
-    obs_dim = int(next(iter(obs.values())).shape[0])
+    obs_dim = int(next(iter(next_obs_dicts[0].values())).shape[0])
     action_dim = env.ACTION_DIM
 
     model = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
@@ -466,9 +500,10 @@ def main() -> None:
         for group in optimizer.param_groups:
             group["lr"] = args.lr
 
-    batch_size = len(blue_ids)
+    batch_size_per_env = len(blue_ids)
+    batch_size = batch_size_per_env * num_envs
     lstm_state = model.initial_state(batch_size=batch_size, device=device)
-    next_obs = torch.from_numpy(stack_obs(obs, blue_ids)).to(device)
+    next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
     next_done = torch.zeros(batch_size, device=device)
 
     if resume_ckpt is not None:
@@ -487,8 +522,8 @@ def main() -> None:
     episodic_returns: list[float] = []
     episodic_lengths: list[int] = []
     episodic_outcomes: list[str] = []
-    current_ep_return = 0.0
-    current_ep_len = 0
+    current_ep_returns = [0.0 for _ in range(num_envs)]
+    current_ep_lens = [0 for _ in range(num_envs)]
 
     metrics_f = (run_dir / "metrics.jsonl").open("a", encoding="utf-8")
     metrics_f.write(
@@ -621,15 +656,15 @@ def main() -> None:
             entropies_buf[step] = entropy
 
             action_np = action.cpu().numpy()
-            action_dict = {bid: action_np[i] for i, bid in enumerate(blue_ids)}
-            if args.train_mode == "heuristic":
-                assert heuristic is not None
-                for rid in red_ids:
-                    action_dict[rid] = heuristic.act(env, rid)
-            else:
+
+            if args.train_mode == "arena":
+                assert num_envs == 1
                 assert arena_opponent is not None
                 assert arena_lstm_state is not None
-                obs_r = torch.from_numpy(stack_obs(next_obs_dict, red_ids)).to(device)
+
+                action_dict = {bid: action_np[i] for i, bid in enumerate(blue_ids)}
+
+                obs_r = torch.from_numpy(stack_obs(next_obs_dicts[0], red_ids)).to(device)
                 with torch.no_grad():
                     act_r, _, _, _, arena_lstm_state = arena_opponent.get_action_and_value(
                         obs_r, arena_lstm_state, arena_done
@@ -638,64 +673,137 @@ def main() -> None:
                 for i, rid in enumerate(red_ids):
                     action_dict[rid] = act_r_np[i]
 
-            next_obs_dict, rewards, terminations, truncations, infos = env.step(action_dict)
+                next_obs_dict, rewards, terminations, truncations, infos = envs[0].step(action_dict)
+                next_obs_dicts[0] = next_obs_dict
 
-            blue_alive = env.sim.team_alive("blue")
-            red_alive = env.sim.team_alive("red")
-            ep_over = any(truncations.values()) or (not blue_alive) or (not red_alive)
+                blue_alive = envs[0].sim.team_alive("blue")
+                red_alive = envs[0].sim.team_alive("red")
+                ep_over = any(truncations.values()) or (not blue_alive) or (not red_alive)
 
-            r_b = torch.tensor([rewards[bid] for bid in blue_ids], dtype=torch.float32, device=device)
-            rewards_buf[step] = r_b
-            current_ep_return += float(r_b.sum().item())
-            current_ep_len += 1
+                r_b = torch.tensor([rewards[bid] for bid in blue_ids], dtype=torch.float32, device=device)
+                rewards_buf[step] = r_b
+                current_ep_returns[0] += float(r_b.sum().item())
+                current_ep_lens[0] += 1
 
-            next_done = torch.tensor(
-                [terminations[bid] or truncations[bid] for bid in blue_ids], dtype=torch.float32, device=device
-            )
-            if args.train_mode == "arena":
+                next_done = torch.tensor(
+                    [terminations[bid] or truncations[bid] for bid in blue_ids], dtype=torch.float32, device=device
+                )
                 arena_done = torch.tensor(
                     [terminations[rid] or truncations[rid] for rid in red_ids], dtype=torch.float32, device=device
                 )
 
-            if ep_over:
-                ep_ret = float(current_ep_return)
-                ep_len = int(current_ep_len)
-                episodic_returns.append(current_ep_return)
-                episodic_lengths.append(current_ep_len)
-                
-                outcome = env.last_outcome or {"winner": "unknown"}
-                episodic_outcomes.append(outcome.get("winner", "unknown"))
+                if ep_over:
+                    ep_ret = float(current_ep_returns[0])
+                    ep_len = int(current_ep_lens[0])
+                    episodic_returns.append(current_ep_returns[0])
+                    episodic_lengths.append(current_ep_lens[0])
 
-                metrics_f.write(
-                    json.dumps(
-                        {
-                            "type": "episode",
-                            "time": time.time(),
-                            "episode": int(episodes) + 1,
-                            "return": float(ep_ret),
-                            "len": int(ep_len),
-                            "winner": str(outcome.get("winner", "unknown")),
-                            "reason": outcome.get("reason"),
-                            "hp": outcome.get("hp"),
-                            "zone_score": outcome.get("zone_score"),
-                            "stats": outcome.get("stats"),
-                        }
+                    outcome = envs[0].last_outcome or {"winner": "unknown"}
+                    episodic_outcomes.append(outcome.get("winner", "unknown"))
+
+                    metrics_f.write(
+                        json.dumps(
+                            {
+                                "type": "episode",
+                                "time": time.time(),
+                                "episode": int(episodes) + 1,
+                                "return": float(ep_ret),
+                                "len": int(ep_len),
+                                "winner": str(outcome.get("winner", "unknown")),
+                                "reason": outcome.get("reason"),
+                                "hp": outcome.get("hp"),
+                                "zone_score": outcome.get("zone_score"),
+                                "stats": outcome.get("stats"),
+                            }
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
 
-                current_ep_return = 0.0
-                current_ep_len = 0
-                episodes += 1
-                next_obs_dict, _ = env.reset(seed=args.seed + episodes)
-                # Ensure LSTM resets at the start of the next step (episode boundary).
-                next_done = torch.ones(batch_size, device=device)
-                if args.train_mode == "arena":
+                    current_ep_returns[0] = 0.0
+                    current_ep_lens[0] = 0
+                    episodes += 1
+                    env_episode_counts[0] += 1
+                    next_obs_dicts[0], _ = envs[0].reset(
+                        seed=int(args.seed) + env_episode_counts[0]
+                    )
+                    # Ensure LSTM resets at the start of the next step (episode boundary).
+                    next_done = torch.ones(batch_size, device=device)
                     if args.arena_refresh_episodes > 0 and episodes % int(args.arena_refresh_episodes) == 0:
                         _arena_refresh_pool()
                     _arena_sample_opponent(reset_hidden=True)
 
-            next_obs = torch.from_numpy(stack_obs(next_obs_dict, blue_ids)).to(device)
+            else:
+                assert heuristics is not None
+
+                rewards_flat = np.zeros(batch_size, dtype=np.float32)
+                done_flat = np.zeros(batch_size, dtype=np.float32)
+
+                for env_idx, env_i in enumerate(envs):
+                    off = env_idx * batch_size_per_env
+                    act_slice = action_np[off : off + batch_size_per_env]
+                    action_dict = {bid: act_slice[i] for i, bid in enumerate(blue_ids)}
+                    heuristic = heuristics[env_idx]
+                    for rid in red_ids:
+                        action_dict[rid] = heuristic.act(env_i, rid)
+
+                    next_obs_i, rewards_i, terminations_i, truncations_i, infos_i = env_i.step(action_dict)
+                    next_obs_dicts[env_idx] = next_obs_i
+
+                    blue_alive = env_i.sim.team_alive("blue")
+                    red_alive = env_i.sim.team_alive("red")
+                    ep_over = any(truncations_i.values()) or (not blue_alive) or (not red_alive)
+
+                    r_i = np.asarray([rewards_i[bid] for bid in blue_ids], dtype=np.float32)
+                    rewards_flat[off : off + batch_size_per_env] = r_i
+                    current_ep_returns[env_idx] += float(r_i.sum())
+                    current_ep_lens[env_idx] += 1
+
+                    done_i = np.asarray(
+                        [terminations_i[bid] or truncations_i[bid] for bid in blue_ids], dtype=np.float32
+                    )
+                    done_flat[off : off + batch_size_per_env] = done_i
+
+                    if ep_over:
+                        ep_ret = float(current_ep_returns[env_idx])
+                        ep_len = int(current_ep_lens[env_idx])
+                        episodic_returns.append(current_ep_returns[env_idx])
+                        episodic_lengths.append(current_ep_lens[env_idx])
+
+                        outcome = env_i.last_outcome or {"winner": "unknown"}
+                        episodic_outcomes.append(outcome.get("winner", "unknown"))
+
+                        metrics_f.write(
+                            json.dumps(
+                                {
+                                    "type": "episode",
+                                    "time": time.time(),
+                                    "episode": int(episodes) + 1,
+                                    "return": float(ep_ret),
+                                    "len": int(ep_len),
+                                    "winner": str(outcome.get("winner", "unknown")),
+                                    "reason": outcome.get("reason"),
+                                    "hp": outcome.get("hp"),
+                                    "zone_score": outcome.get("zone_score"),
+                                    "stats": outcome.get("stats"),
+                                }
+                            )
+                            + "\n"
+                        )
+
+                        current_ep_returns[env_idx] = 0.0
+                        current_ep_lens[env_idx] = 0
+                        episodes += 1
+                        env_episode_counts[env_idx] += 1
+                        next_obs_dicts[env_idx], _ = env_i.reset(
+                            seed=int(args.seed) + env_idx * 1_000_000 + env_episode_counts[env_idx]
+                        )
+                        # Ensure LSTM resets for this env at the start of the next step.
+                        done_flat[off : off + batch_size_per_env] = 1.0
+
+                rewards_buf[step] = torch.from_numpy(rewards_flat).to(device)
+                next_done = torch.from_numpy(done_flat).to(device)
+
+            next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
 
         with torch.no_grad():
             next_value, _ = model.get_value(next_obs, lstm_state, next_done)

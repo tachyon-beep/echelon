@@ -176,5 +176,10 @@ class EnvConfig:
     # Each mech can emit a message vector as part of its action, and receives the
     # last messages from packmates in its observation (1 decision-tick delay).
     comm_dim: int = 8  # 0 disables
+    # Feature toggles (useful for ablations/curriculum without changing shapes).
+    enable_target_selection: bool = True
+    enable_ewar: bool = True
+    enable_obs_control: bool = True
+    enable_comm: bool = True
     record_replay: bool = False
     seed: int | None = None

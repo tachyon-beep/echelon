@@ -351,7 +351,8 @@ class Sim:
                 cell_min_y = float(iy)
                 cell_max_y = float(iy + 1)
                 for ix in range(min_ix, max_ix):
-                    if self.world.voxels[iz, iy, ix] != VoxelWorld.AIR:
+                    vox = int(self.world.voxels[iz, iy, ix])
+                    if vox not in (VoxelWorld.AIR, VoxelWorld.DIRT):
                         continue
 
                     cell_min_x = float(ix)

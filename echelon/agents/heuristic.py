@@ -7,6 +7,7 @@ import numpy as np
 from ..actions import ActionIndex
 from ..constants import PACK_SIZE
 from ..env.env import EchelonEnv
+from ..gen.objective import capture_zone_params
 from ..sim.los import has_los
 
 
@@ -53,6 +54,16 @@ class HeuristicPolicy:
         mech = sim.mechs[mech_id]
         if not mech.alive:
             return np.zeros(env.ACTION_DIM, dtype=np.float32)
+
+        zone_center: np.ndarray | None = None
+        zone_radius = 0.0
+        try:
+            cx, cy, zr = capture_zone_params(world.meta, size_x=world.size_x, size_y=world.size_y)
+            zone_center = np.array([cx, cy, float(mech.pos[2])], dtype=np.float32)
+            zone_radius = float(zr)
+        except Exception:
+            zone_center = None
+            zone_radius = 0.0
 
         # Initialize state
         if mech_id not in self.states:
@@ -128,6 +139,10 @@ class HeuristicPolicy:
             return np.zeros(env.ACTION_DIM, dtype=np.float32)
 
         dist, target, delta = best
+
+        heavy_objective = mech.spec.name == "heavy" and zone_center is not None
+        # Ensure heavy units stay relevant by contesting the objective.
+        move_target = zone_center if heavy_objective else target.pos
         
         # Cohesion Logic: Find squad center
         squad_pos = np.zeros(3, dtype=np.float32)
@@ -136,22 +151,23 @@ class HeuristicPolicy:
             if m.alive and m.team == mech.team:
                 squad_pos += m.pos
                 squad_count += 1
-        
-        move_target = target.pos # Default: Move to enemy
-        
-        if squad_count > 1:
+
+        if (not heavy_objective) and squad_count > 1:
             centroid = squad_pos / squad_count
             dist_to_squad = float(np.linalg.norm(centroid - mech.pos))
-            
-            # If far from squad and safe-ish, move to squad first
+
+            # If far from squad and safe-ish, move to squad first.
             if dist_to_squad > 15.0 and dist > 20.0:
-                # Blend 70% to squad, 30% to enemy
+                # Blend 70% to squad, 30% to enemy.
                 move_target = centroid * 0.7 + target.pos * 0.3
         
         # Re-calculate delta based on move_target
         move_delta = move_target - mech.pos
-        
-        desired_yaw = math.atan2(float(move_delta[1]), float(move_delta[0]))
+
+        # Aim at the enemy, even when moving toward the objective.
+        aim_target = target.pos
+        aim_delta = aim_target - mech.pos
+        desired_yaw = math.atan2(float(aim_delta[1]), float(aim_delta[0]))
         yaw_err = _wrap_pi(desired_yaw - float(mech.yaw))
         yaw_rate = float(np.clip(yaw_err / (math.pi / 3), -1.0, 1.0))
 
@@ -168,7 +184,12 @@ class HeuristicPolicy:
         forward_throttle = float(np.clip(np.dot(dir_xy, forward), -1.0, 1.0))
         strafe_throttle = float(np.clip(np.dot(dir_xy, right), -1.0, 1.0))
 
-        if dist < self.desired_range:
+        in_zone = False
+        if zone_center is not None and zone_radius > 0.0:
+            in_zone = float(np.linalg.norm(mech.pos[:2] - zone_center[:2])) <= zone_radius
+
+        # Back off if we're too close, except for heavies holding the zone.
+        if dist < self.desired_range and not (heavy_objective and in_zone):
             forward_throttle = -0.3
             strafe_throttle = float(np.clip(strafe_throttle * 1.0, -1.0, 1.0))
         else:

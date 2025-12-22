@@ -324,7 +324,9 @@
                 scene.add(captureZoneMesh);
 
                 if (replayData.world.walls) {
-                    const geometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+                    const solidGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+                    const tileHeight = VOXEL_SIZE * 0.12;
+                    const tileGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, tileHeight);
                     // We'll use multiple instanced meshes for different types if needed,
                     // or just a single one with colors. InstancedMesh supports colors!
                     
@@ -333,7 +335,8 @@
                         2: new THREE.MeshLambertMaterial({ color: 0xff4400, emissive: 0x441100 }), // LAVA
                         3: new THREE.MeshLambertMaterial({ color: 0x0044ff, transparent: true, opacity: 0.8 }), // WATER
                         4: new THREE.MeshLambertMaterial({ color: 0x555555, emissive: 0xff2200, transparent: true, opacity: 0.7 }), // HOT_DEBRIS
-                        5: new THREE.MeshLambertMaterial({ color: 0x333333, roughness: 0.8 }) // KILLED_HULL
+                        5: new THREE.MeshLambertMaterial({ color: 0x333333, roughness: 0.8 }), // KILLED_HULL
+                        6: new THREE.MeshLambertMaterial({ color: 0x6b4f2a, roughness: 1.0 }) // DIRT
                     };
                     
                     // Group walls by type for efficient instancing
@@ -346,10 +349,24 @@
                     });
                     
                     Object.entries(byType).forEach(([type, walls]) => {
-                        const iMesh = new THREE.InstancedMesh(geometry, materials[type] || materials[1], walls.length);
+                        const typeNum = Number(type);
+                        const isTile = (typeNum === 2 || typeNum === 3 || typeNum === 6);
+                        const geom = isTile ? tileGeometry : solidGeometry;
+                        const iMesh = new THREE.InstancedMesh(geom, materials[type] || materials[1], walls.length);
                         const matrix = new THREE.Matrix4();
                         walls.forEach((w, i) => {
-                            matrix.setPosition(w[0] + 0.5, w[1] + 0.5, w[2] + 0.5);
+                            const x = w[0] + 0.5;
+                            const y = w[1] + 0.5;
+                            const z = w[2];
+                            let zCenter = z + 0.5;
+                            if (typeNum === 6) {
+                                // Dirt is a thin "floor" tile sitting just below z=0.
+                                zCenter = z - (tileHeight * 0.5) - 0.001;
+                            } else if (typeNum === 2 || typeNum === 3) {
+                                // Water/lava are thin surface patches on top of the ground.
+                                zCenter = z + (tileHeight * 0.5) + 0.001;
+                            }
+                            matrix.setPosition(x, y, zCenter);
                             iMesh.setMatrixAt(i, matrix);
                         });
                         iMesh.instanceMatrix.needsUpdate = true;

@@ -324,6 +324,11 @@ class EchelonEnv:
                 meta=world.meta,
             )
 
+        # The simulation has an implicit ground plane at z=0 (below is solid), but for rendering we
+        # want a contiguous "dirt" layer on the first voxel layer (z=0), with hazards (water/lava)
+        # embedded as patches.
+        world.ensure_ground_layer()
+
         world.meta["recipe"] = build_recipe(
             generator_id="legacy_voxel_archetypes",
             generator_version="1",
@@ -923,43 +928,64 @@ class EchelonEnv:
                 m.eccm_on = False
                 continue
 
-            # Target selection is an argmax over the last-observed contact slots.
-            prefs = a[self.TARGET_START : self.TARGET_START + self.TARGET_DIM]
-            focus_id: str | None = None
-            if prefs.size:
-                i = int(np.argmax(prefs))
-                if float(prefs[i]) > 0.0:
-                    slots = self._last_contact_slots.get(aid) or []
-                    if i < len(slots):
-                        cand = slots[i]
-                        if cand is not None:
-                            tgt = sim.mechs.get(cand)
-                            if tgt is not None and tgt.alive and tgt.team != m.team:
-                                focus_id = str(cand)
-            m.focus_target_id = focus_id
+            if bool(getattr(self.config, "enable_target_selection", True)):
+                # Target selection is an argmax over the last-observed contact slots.
+                prefs = a[self.TARGET_START : self.TARGET_START + self.TARGET_DIM]
+                focus_id: str | None = None
+                if prefs.size:
+                    i = int(np.argmax(prefs))
+                    if float(prefs[i]) > 0.0:
+                        slots = self._last_contact_slots.get(aid) or []
+                        if i < len(slots):
+                            cand = slots[i]
+                            if cand is not None:
+                                tgt = sim.mechs.get(cand)
+                                if tgt is not None and tgt.alive and tgt.team != m.team:
+                                    focus_id = str(cand)
+                m.focus_target_id = focus_id
+            else:
+                m.focus_target_id = None
 
-            # Scout-only ECM/ECCM (mutually exclusive; ECCM wins).
-            ecm_cmd = float(a[self.EWAR_START + 0]) > 0.0
-            eccm_cmd = float(a[self.EWAR_START + 1]) > 0.0
-            if m.spec.name == "scout":
-                if eccm_cmd:
-                    m.eccm_on = True
-                    m.ecm_on = False
+            if bool(getattr(self.config, "enable_ewar", True)):
+                # Scout-only ECM/ECCM (mutually exclusive; ECCM wins).
+                ecm_cmd = float(a[self.EWAR_START + 0]) > 0.0
+                eccm_cmd = float(a[self.EWAR_START + 1]) > 0.0
+                if m.spec.name == "scout":
+                    if eccm_cmd:
+                        m.eccm_on = True
+                        m.ecm_on = False
+                    else:
+                        m.ecm_on = bool(ecm_cmd)
+                        m.eccm_on = False
                 else:
-                    m.ecm_on = bool(ecm_cmd)
+                    m.ecm_on = False
                     m.eccm_on = False
             else:
                 m.ecm_on = False
                 m.eccm_on = False
 
         # Update per-mech observation controls from the chosen action (applies to returned obs).
-        for aid in self.agents:
-            a = act[aid]
-            sort_pref = a[self.OBS_CTRL_START : self.OBS_CTRL_START + self.OBS_SORT_DIM]
-            self._contact_sort_mode[aid] = int(np.argmax(sort_pref))
-            self._contact_filter_hostile[aid] = bool(float(a[self.OBS_CTRL_START + self.OBS_SORT_DIM]) > 0.0)
+        if bool(getattr(self.config, "enable_obs_control", True)):
+            for aid in self.agents:
+                a = act[aid]
+                sort_pref = a[self.OBS_CTRL_START : self.OBS_CTRL_START + self.OBS_SORT_DIM]
+                self._contact_sort_mode[aid] = int(np.argmax(sort_pref))
+                self._contact_filter_hostile[aid] = bool(float(a[self.OBS_CTRL_START + self.OBS_SORT_DIM]) > 0.0)
 
-        # Baselines for first-principles rewards.
+        # Baselines for rewards/shaping.
+        dt_act = float(self.config.dt_sim * self.config.decision_repeat)
+        zone_cx, zone_cy, zone_r = capture_zone_params(sim.world.meta, size_x=sim.world.size_x, size_y=sim.world.size_y)
+        max_xy = float(max(sim.world.size_x, sim.world.size_y))
+
+        dist_to_zone_before: dict[str, float] = {}
+        hp_before_by_agent: dict[str, float] = {}
+        for aid in self.agents:
+            m = sim.mechs[aid]
+            if not m.alive:
+                continue
+            dist_to_zone_before[aid] = float(math.hypot(float(m.pos[0] - zone_cx), float(m.pos[1] - zone_cy)))
+            hp_before_by_agent[aid] = max(0.0, float(m.hp))
+
         hp_before = self.team_hp()
 
         events = sim.step(act, num_substeps=self.config.decision_repeat)
@@ -1039,28 +1065,28 @@ class EchelonEnv:
 
         # Update comm buffers after the sim step (dead mechs do not broadcast).
         if self.comm_dim > 0:
-            for aid in self.agents:
-                m = sim.mechs[aid]
-                if not m.alive:
+            if not bool(getattr(self.config, "enable_comm", True)):
+                for aid in self.agents:
                     self._comm_last[aid].fill(0.0)
-                    continue
-                msg = act[aid][self.COMM_START : self.COMM_START + self.comm_dim]
-                self._comm_last[aid] = np.clip(msg, -1.0, 1.0).astype(np.float32, copy=False)
+            else:
+                for aid in self.agents:
+                    m = sim.mechs[aid]
+                    if not m.alive:
+                        self._comm_last[aid].fill(0.0)
+                        continue
+                    msg = act[aid][self.COMM_START : self.COMM_START + self.comm_dim]
+                    self._comm_last[aid] = np.clip(msg, -1.0, 1.0).astype(np.float32, copy=False)
 
         rewards: dict[str, float] = {}
         terminations: dict[str, bool] = {}
         truncations: dict[str, bool] = {}
         infos: dict[str, dict] = {}
 
-        # Reward is derived from first principles (in order):
-        # 1) King-of-the-hill territory control (capture zone).
-        # 2) Self-preservation (avoid losing team HP).
-        # 3) Attrition (remove enemy HP).
-        # 4) Efficiency (avoid shutdown due to heat).
-        dt_act = float(self.config.dt_sim * self.config.decision_repeat)
-        zone_cx, zone_cy, zone_r = capture_zone_params(
-            sim.world.meta, size_x=sim.world.size_x, size_y=sim.world.size_y
-        )
+        # Reward encodes desired behaviors:
+        # 1) Move toward the objective (dense shaping).
+        # 2) Keep yourself alive (own HP loss + death + shutdown).
+        # 3) Kill the other guys (damage + kills, plus team attrition).
+        # 4) Win the battle (terminal bonus).
         denom = max(1, max(len(self.blue_ids), len(self.red_ids)))
         max_blue_hp = max(1.0, float(self._max_team_hp.get("blue", 0.0)))
         max_red_hp = max(1.0, float(self._max_team_hp.get("red", 0.0)))
@@ -1068,6 +1094,7 @@ class EchelonEnv:
         in_zone_counts: dict[str, int] = {"blue": 0, "red": 0}
         shutdown_counts: dict[str, int] = {"blue": 0, "red": 0}
         in_zone_by_agent: dict[str, bool] = {}
+        dist_to_zone_after: dict[str, float] = {}
 
         for aid in self.agents:
             m = sim.mechs[aid]
@@ -1079,6 +1106,7 @@ class EchelonEnv:
             in_zone = False
             if alive:
                 dist = float(math.hypot(float(m.pos[0] - zone_cx), float(m.pos[1] - zone_cy)))
+                dist_to_zone_after[aid] = dist
                 in_zone = dist < zone_r
                 if in_zone:
                     in_zone_counts[m.team] += 1
@@ -1101,29 +1129,65 @@ class EchelonEnv:
         blue_hp_loss_norm = float(blue_hp_loss / max_blue_hp)
         red_hp_loss_norm = float(red_hp_loss / max_red_hp)
 
-        # Tunable weights (kept intentionally small/simple).
-        W_ZONE = 0.05
-        W_SELF = 0.70
-        W_KILL = 0.50
-        W_SHUTDOWN = 0.05
-        W_DEATH = 0.10
+        # Tunable weights (intentionally simple, but more informative than pure team deltas).
+        # Team terms encourage cooperation and support roles; individual terms improve credit assignment.
+        W_TEAM_ZONE = 0.05
+        W_TEAM_SELF = 0.10
+        W_TEAM_KILL = 0.10
+        W_TEAM_SHUTDOWN = 0.02
+
+        W_APPROACH = 0.25
+        W_HP_SELF = 0.30
+        W_DAMAGE_SELF = 0.30
+        W_KILL_SELF = 0.50
+        W_SHUTDOWN_SELF = 0.03
+        W_DEATH = 0.50
+
+        DAMAGE_SCALE = 100.0
 
         r_team = {
-            "blue": (W_ZONE * control)
-            - (W_SELF * blue_hp_loss_norm)
-            + (W_KILL * red_hp_loss_norm)
-            - (W_SHUTDOWN * (shutdown_counts["blue"] / denom)),
-            "red": (-W_ZONE * control)
-            - (W_SELF * red_hp_loss_norm)
-            + (W_KILL * blue_hp_loss_norm)
-            - (W_SHUTDOWN * (shutdown_counts["red"] / denom)),
+            "blue": (W_TEAM_ZONE * control)
+            - (W_TEAM_SELF * blue_hp_loss_norm)
+            + (W_TEAM_KILL * red_hp_loss_norm)
+            - (W_TEAM_SHUTDOWN * (shutdown_counts["blue"] / denom)),
+            "red": (-W_TEAM_ZONE * control)
+            - (W_TEAM_SELF * red_hp_loss_norm)
+            + (W_TEAM_KILL * blue_hp_loss_norm)
+            - (W_TEAM_SHUTDOWN * (shutdown_counts["red"] / denom)),
         }
 
         for aid in self.agents:
             m = sim.mechs[aid]
-            r = float(r_team[m.team]) if (m.alive or m.died) else 0.0
+
+            # Dead agents get 0 after the death step; `m.died` is only true on the death transition.
+            if not (m.alive or m.died):
+                rewards[aid] = 0.0
+                continue
+
+            r = float(r_team[m.team])
+
+            # (1) Move toward objective: potential-style shaping on distance to zone center.
+            d0 = dist_to_zone_before.get(aid)
+            d1 = dist_to_zone_after.get(aid)
+            if d0 is not None and d1 is not None and max_xy > 0.0:
+                phi0 = -float(d0 / max_xy)
+                phi1 = -float(d1 / max_xy)
+                r += W_APPROACH * (phi1 - phi0)
+
+            # (2) Keep yourself alive: penalize own HP loss and shutdown, plus a large death penalty.
+            hp0 = hp_before_by_agent.get(aid, max(0.0, float(m.hp)))
+            hp1 = max(0.0, float(m.hp)) if m.alive else 0.0
+            hp_loss_norm = float(max(0.0, hp0 - hp1) / max(1.0, float(m.spec.hp)))
+            r -= W_HP_SELF * hp_loss_norm
+            if m.shutdown:
+                r -= W_SHUTDOWN_SELF
             if m.died:
                 r -= W_DEATH
+
+            # (3) Kill the other guys: reward damage dealt + discrete kill credit.
+            r += W_DAMAGE_SELF * float(np.clip(float(m.dealt_damage) / DAMAGE_SCALE, 0.0, 2.0))
+            r += W_KILL_SELF * float(max(0, int(m.kills)))
+
             rewards[aid] = float(r)
 
         # Episode end conditions (King of the Hill is the primary win condition).
