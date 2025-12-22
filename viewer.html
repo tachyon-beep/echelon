@@ -81,6 +81,7 @@
         let floaters = []; // [{mesh, vel, life}]
         let navGroup = new THREE.Group();
         let pathGroup = new THREE.Group();
+        let ewarMeshes = {}; // {id: mesh}
 
         // Config
         const VOXEL_SIZE = 1.0; // Visual scale
@@ -294,6 +295,8 @@
 	            paintHelpers = {};
 	            floaters.forEach(f => scene.remove(f.mesh));
 	            floaters = [];
+                Object.values(ewarMeshes).forEach(m => scene.remove(m));
+                ewarMeshes = {};
                 navGroup.clear();
                 pathGroup.clear();
 
@@ -746,6 +749,30 @@
                     
                     // Show painted status
                     // (Handled by events/laser color)
+                }
+
+                // Update EWAR Bubbles
+                if (state.class === 'scout' && (state.ecm_on || state.eccm_on)) {
+                    let bubble = ewarMeshes[id];
+                    if (!bubble) {
+                        const geo = new THREE.SphereGeometry(3.6, 32, 32); // Visual scale for 18vox radius
+                        const mat = new THREE.MeshBasicMaterial({
+                            transparent: true,
+                            opacity: 0.15,
+                            side: THREE.BackSide // See inside from outside
+                        });
+                        bubble = new THREE.Mesh(geo, mat);
+                        scene.add(bubble);
+                        ewarMeshes[id] = bubble;
+                    }
+                    bubble.visible = state.alive;
+                    bubble.position.set(state.pos[0], state.pos[1], state.pos[2]);
+                    bubble.material.color.setHex(state.ecm_on ? 0xff00ff : 0x00ffff);
+                    // Pulsing effect
+                    const s = 1.0 + Math.sin(performance.now() * 0.005) * 0.05;
+                    bubble.scale.set(s, s, s);
+                } else if (ewarMeshes[id]) {
+                    ewarMeshes[id].visible = false;
                 }
 
                 // Update Status Bars

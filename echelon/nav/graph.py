@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 
+import numpy as np
 
 from ..sim.world import VoxelWorld
 
@@ -37,24 +38,25 @@ class NavGraph:
         
         # 1. Identify Nodes (Walkable Surfaces)
         sx, sy, sz = world.size_x, world.size_y, world.size_z
-        solid = (world.voxels == VoxelWorld.SOLID) | (world.voxels == VoxelWorld.KILLED_HULL)
+        
+        # Build a comprehensive collision mask based on MATERIAL_PROPS
+        collides_mask = np.zeros_like(world.voxels, dtype=bool)
+        for v_id, props in world.MATERIAL_PROPS.items():
+            if props.get("collides", False):
+                collides_mask |= (world.voxels == v_id)
         
         # Obstacle Inflation (Footprint check)
-        # A cell is blocked if it is solid OR if it's too close to a solid (mech width).
         def _is_blocked_xy(x: int, y: int, z_floor: int) -> bool:
-            # Stand on z_floor, check clearance from z_floor+1 to z_floor+clearance
-            # Check footprint: square of radius mech_radius
             for dy in range(-mech_radius, mech_radius + 1):
                 for dx in range(-mech_radius, mech_radius + 1):
                     nx, ny = x + dx, y + dy
                     if not (0 <= nx < sx and 0 <= ny < sy):
-                        return True # OOB is blocked
+                        return True
                     
-                    # Check vertical headroom
                     for k in range(1, clearance_z + 1):
                         iz = z_floor + k
                         if iz >= sz: break
-                        if solid[iz, ny, nx]:
+                        if collides_mask[iz, ny, nx]:
                             return True
             return False
 
@@ -62,13 +64,12 @@ class NavGraph:
         for y in range(sy):
             for x in range(sx):
                 # Check bedrock layer
-                is_clear = not _is_blocked_xy(x, y, -1)
-                if is_clear:
+                if not _is_blocked_xy(x, y, -1):
                     graph._add_node((-1, y, x), world.voxel_size_m)
                     
                 # Check voxel layers
                 for z in range(sz - 1):
-                    if not solid[z, y, x]:
+                    if not collides_mask[z, y, x]:
                         continue
                     if not _is_blocked_xy(x, y, z):
                         graph._add_node((z, y, x), world.voxel_size_m)

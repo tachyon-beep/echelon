@@ -40,6 +40,7 @@ class MechState:
     painter_cooldown: float = 0.0
     painted_remaining: float = 0.0
     last_painter_id: str | None = None
+    noise_level: float = 0.0 # Acoustic footprint
     alive: bool = True
 
     # Per-decision-step scratch.

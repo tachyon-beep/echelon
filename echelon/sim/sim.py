@@ -1247,9 +1247,15 @@ class Sim:
                 if mech.fallen_time > 0.0: 
                     self._apply_movement(mech, zero_action)
                     self._integrate(mech)
+                    mech.noise_level = 0.0
                     continue
                 a = actions.get(mech.mech_id, zero_action)
                 self._apply_rotation(mech, a)
                 self._apply_movement(mech, a)
                 self._integrate(mech)
+                
+                # Acoustic Noise: speed * mass_factor
+                speed = float(np.linalg.norm(mech.vel))
+                mass_factor = {"scout": 1.0, "light": 1.5, "medium": 2.5, "heavy": 4.0}.get(mech.spec.name, 1.0)
+                mech.noise_level = float(speed * mass_factor)
         return events

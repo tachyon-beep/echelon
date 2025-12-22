@@ -11,7 +11,7 @@ def test_nav_build_flat_ground():
     # DIRT is non-colliding, so the "floor" is the bedrock at z=-1 (world z=0.0).
     # The DIRT layer at z=0 is just "fog" we stand in.
     
-    graph = NavGraph.build(world)
+    graph = NavGraph.build(world, mech_radius=0)
     
     # Expect 100 nodes (one per column)
     assert len(graph.nodes) == 100
@@ -40,7 +40,7 @@ def test_nav_step_up():
     # Delta z = 1.
     world.set_box_solid(1, 1, 0, 2, 2, 1, True) 
     
-    graph = NavGraph.build(world)
+    graph = NavGraph.build(world, mech_radius=0)
     
     center = (0, 1, 1) # On top of voxel 0
     side = (-1, 1, 0) # On top of bedrock
@@ -64,7 +64,7 @@ def test_planner_simple_path():
     world = VoxelWorld(voxels=voxels, voxel_size_m=1.0)
     world.ensure_ground_layer()
     
-    graph = NavGraph.build(world)
+    graph = NavGraph.build(world, mech_radius=0)
     planner = Planner(graph)
     
     start = (-1, 0, 0)
@@ -113,7 +113,7 @@ def test_planner_obstacle():
     # So placing a block at z=1 (leaving z=0 as dirt) should block the path at ground level.
     world.set_box_solid(5, 0, 1, 6, 3, 5, True) 
     
-    graph = NavGraph.build(world)
+    graph = NavGraph.build(world, mech_radius=0)
     planner = Planner(graph)
     
     start = (-1, 1, 0)

@@ -32,6 +32,10 @@ from ..sim.sim import Sim
 from ..sim.world import VoxelWorld
 
 
+def _wrap_pi(angle: float) -> float:
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+
 def default_mech_classes() -> dict[str, MechClassConfig]:
     return {
         "scout": MechClassConfig(
@@ -655,6 +659,34 @@ class EchelonEnv:
             sensor_quality, jam_level, _eccm_level = self._ewar_levels(viewer)
             radar_range = float(base_radar_range) * float(sensor_quality)
 
+            # Acoustic Sensing: Total intensity from 4 relative quadrants
+            # Quad 0: FL, 1: FR, 2: RL, 3: RR
+            acoustic_intensities = np.zeros(4, dtype=np.float32)
+            for other_id in self.possible_agents:
+                if other_id == aid: continue
+                other = sim.mechs[other_id]
+                if not other.alive or other.noise_level <= 0: continue
+                
+                delta = other.pos - viewer.pos
+                dist = float(np.linalg.norm(delta))
+                
+                # Inverse square law (clamped)
+                intensity = other.noise_level / (1.0 + dist**2)
+                
+                # Attenuation by terrain
+                if not _cached_los(aid, other_id, viewer.pos, other.pos):
+                    intensity *= 0.20 # 80% loss through walls
+                
+                # Determine relative quadrant
+                angle = _wrap_pi(math.atan2(delta[1], delta[0]) - viewer.yaw)
+                if angle >= 0: # Left side
+                    if angle < math.pi / 2: q = 0 # Front-Left
+                    else: q = 2 # Rear-Left
+                else: # Right side
+                    if angle > -math.pi / 2: q = 1 # Front-Right
+                    else: q = 3 # Rear-Right
+                acoustic_intensities[q] += float(intensity)
+
             # Top-K contact table (fixed size).
             contacts: dict[str, list[tuple[float, str, bool]]] = {"friendly": [], "hostile": [], "neutral": []}
             for other_id in self.possible_agents:
@@ -677,7 +709,11 @@ class EchelonEnv:
                     visible = True
                 else:
                     painted_visible = painted_by_pack and (sensor_quality >= float(PAINT_LOCK_MIN_QUALITY))
-                    if painted_visible or dist <= radar_range:
+                    
+                    # Thermal Bloom: High-heat mechs leaked through terrain
+                    heat_bloom = (other.heat / max(1.0, other.spec.heat_cap)) > 0.80
+                    
+                    if painted_visible or dist <= radar_range or (heat_bloom and other.team != viewer.team):
                         visible = True
                     else:
                         visible = _cached_los(aid, other_id, viewer.pos, other.pos)
@@ -820,6 +856,8 @@ class EchelonEnv:
             my_score_norm = float(np.clip(my_score / win_scale, 0.0, 1.0))
             enemy_score_norm = float(np.clip(enemy_score / win_scale, 0.0, 1.0))
 
+            parts.append(acoustic_intensities)
+
             parts.append(
                 np.asarray(
                     [
@@ -869,11 +907,12 @@ class EchelonEnv:
     def _obs_dim(self) -> int:
         comm_dim = PACK_SIZE * int(max(0, int(getattr(self.config, "comm_dim", 0))))
         # self features =
+        #   acoustic_quadrants(4) +
         #   targeted, under_fire, painted, shutdown, crit_heat,
         #   incoming_missile, sensor_quality, jam_level, ecm_on, eccm_on, suppressed, ams_cd,
         #   self_vel(3), cooldowns(4), in_zone, vec_to_zone(3), zone_radius,
-        #   my_control, my_score, enemy_score, time_frac, obs_sort_onehot(3), hostile_only = 32
-        self_dim = 32
+        #   my_control, my_score, enemy_score, time_frac, obs_sort_onehot(3), hostile_only = 36
+        self_dim = 36
         telemetry_dim = 16 * 16
         return self.CONTACT_SLOTS * self.CONTACT_DIM + comm_dim + int(self.LOCAL_MAP_DIM) + telemetry_dim + self_dim
 

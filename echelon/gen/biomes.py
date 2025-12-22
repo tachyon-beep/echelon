@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Protocol
+from typing import Protocol, Dict, List, Tuple, Optional
 
 import numpy as np
 
@@ -65,9 +65,7 @@ def fill_urban_residential(
         world.set_box_solid(x, y, 0, x+w, y+h, height, True)
         
         if w > 4 and h > 4:
-            # Clear center (courtyard)
             world.set_box_solid(x+2, y+2, 0, x+w-2, y+h-2, height, False)
-            # Add some glass window patches
             world.set_box_solid(x+2, y+2, 0, x+w-2, y+h-2, 1, VoxelWorld.GLASS)
             
         filled += w * h * 0.75 # Approx
@@ -152,7 +150,6 @@ def fill_forest_park(
         ts = _safe_integers(rng, 1, 3) 
         th = _safe_integers(rng, 3, 8)
         world.set_box_solid(tx, ty, 0, tx+ts, ty+ts, th, True)
-        # Foliage Canopy
         if th >= 4:
             world.set_box_solid(tx - 1, ty - 1, 3, tx + ts + 1, ty + ts + 1, 5, VoxelWorld.FOLIAGE)
         
@@ -224,7 +221,6 @@ def fill_sunken_canal(
 ) -> None:
     """
     Industrial logistics. Low-level water canal with high-level bridges.
-    Signature: Wide water trench and overhead planks.
     """
     is_horiz = rng.random() > 0.5
     cx, cy = (min_x + max_x) // 2, (min_y + max_y) // 2
@@ -236,7 +232,7 @@ def fill_sunken_canal(
         for _ in range(_safe_integers(rng, 10, 20)):
             bx = _safe_integers(rng, min_x, max_x - 4)
             by = _safe_integers(rng, min_y, max_y - 4)
-            if abs(by - cy) < cw//2 + 2: continue # Avoid placing inside canal
+            if abs(by - cy) < cw//2 + 2: continue 
             bh = _safe_integers(rng, 4, 10)
             world.set_box_solid(bx, by, 0, bx + 4, by + 4, bh, True)
         for _ in range(_safe_integers(rng, 2, 4)):
@@ -266,32 +262,119 @@ def fill_geo_front(
     """
     ceiling_z = _safe_integers(rng, 10, world.size_z - 2)
     world.set_box_solid(min_x, min_y, 0, max_x, max_y, ceiling_z, True)
-    
     mid_y = (min_y + max_y) // 2
     mid_x = (min_x + max_x) // 2
     _carve_worm(world, min_x, mid_y, 2, max_x, mid_y, 2, radius=3)
     _carve_worm(world, mid_x, min_y, 2, mid_x, max_y, 2, radius=3)
-    
     for _ in range(_safe_integers(rng, 5, 10)):
         x0, y0 = _safe_integers(rng, min_x, max_x), _safe_integers(rng, min_y, max_y)
         x1, y1 = _safe_integers(rng, min_x, max_x), _safe_integers(rng, min_y, max_y)
         z0 = _safe_integers(rng, 1, ceiling_z - 3)
         z1 = _safe_integers(rng, 1, ceiling_z - 3)
         _carve_worm(world, x0, y0, z0, x1, y1, z1, radius=2)
-        
     for _ in range(_safe_integers(rng, 3, 6)):
         lx, ly = _safe_integers(rng, min_x, max_x - 4), _safe_integers(rng, min_y, max_y - 4)
         world.set_box_solid(lx, ly, 0, lx + 4, ly + 4, 1, VoxelWorld.LAVA)
+
+
+def fill_glass_desert(
+    world: VoxelWorld, min_x: int, min_y: int, max_x: int, max_y: int, rng: np.random.Generator
+) -> None:
+    """
+    Crystalline structures made of translucent GLASS.
+    Signature: Tall crystalline pillars and low glass walls.
+    """
+    area = (max_x - min_x) * (max_y - min_y)
+    num_crystals = _safe_integers(rng, 10, 20)
+    for _ in range(num_crystals):
+        res = _random_box(rng, min_x, min_y, max_x, max_y, (2, 5), (2, 5))
+        if res:
+            x, y, w, h = res
+            z = _safe_integers(rng, 5, 12)
+            world.set_box_solid(x, y, 0, x+w, y+h, z, VoxelWorld.GLASS)
+            
+    num_walls = _safe_integers(rng, 5, 10)
+    for _ in range(num_walls):
+        res = _random_box(rng, min_x, min_y, max_x, max_y, (1, 8), (1, 8))
+        if res:
+            x, y, w, h = res
+            world.set_box_solid(x, y, 0, x+w, y+h, 1, VoxelWorld.GLASS)
+
+
+def fill_command_outpost(
+    world: VoxelWorld, min_x: int, min_y: int, max_x: int, max_y: int, rng: np.random.Generator
+) -> None:
+    """
+    Heavily fortified bunkers made of REINFORCED voxels.
+    """
+    cx, cy = (min_x + max_x) // 2, (min_y + max_y) // 2
+    # Central Bunker
+    bw, bh, bz = 12, 12, 6
+    world.set_box_solid(cx - bw//2, cy - bh//2, 0, cx + bw//2, cy + bh//2, bz, VoxelWorld.REINFORCED)
+    # Interior rooms (SOLID, destructible)
+    world.set_box_solid(cx - bw//2 + 2, cy - bh//2 + 2, 0, cx + bw//2 - 2, cy + bh//2 - 2, bz - 1, VoxelWorld.SOLID)
+    # Entrance (AIR)
+    world.set_box_solid(cx - bw//2, cy - 2, 0, cx - bw//2 + 3, cy + 2, 3, VoxelWorld.AIR)
+    
+    # Perimeter fences (REINFORCED low walls)
+    margin = 8
+    world.set_box_solid(cx - bw//2 - margin, cy - bh//2 - margin, 0, cx + bw//2 + margin, cy + bh//2 + margin, 1, VoxelWorld.REINFORCED)
+    world.set_box_solid(cx - bw//2 - margin + 1, cy - bh//2 - margin + 1, 0, cx + bw//2 + margin - 1, cy + bh//2 + margin - 1, 1, VoxelWorld.AIR)
+
+
+def fill_dense_jungle(
+    world: VoxelWorld, min_x: int, min_y: int, max_x: int, max_y: int, rng: np.random.Generator
+) -> None:
+    """
+    Complete LOS blockage via heavy FOLIAGE canopies.
+    """
+    area = (max_x - min_x) * (max_y - min_y)
+    # High density of thin trees
+    num_trees = int(area * 0.15)
+    for _ in range(num_trees):
+        tx = _safe_integers(rng, min_x, max_x)
+        ty = _safe_integers(rng, min_y, max_y)
+        th = _safe_integers(rng, 4, 8)
+        world.set_box_solid(tx, ty, 0, tx + 1, ty + 1, th, VoxelWorld.SOLID)
+        # Large broad canopies
+        world.set_box_solid(tx - 2, ty - 2, 3, tx + 3, ty + 3, 6, VoxelWorld.FOLIAGE)
+
+
+def fill_mining_pit(
+    world: VoxelWorld, min_x: int, min_y: int, max_x: int, max_y: int, rng: np.random.Generator
+) -> None:
+    """
+    Circular terraced excavation using the Staircase logic.
+    """
+    cx, cy = (min_x + max_x) // 2, (min_y + max_y) // 2
+    max_r = min(max_x - min_x, max_y - min_y) // 2 - 2
+    
+    # Fill whole quadrant with solid first
+    world.set_box_solid(min_x, min_y, 0, max_x, max_y, 10, VoxelWorld.SOLID)
+    
+    # Carve terraces
+    for r in range(max_r, 4, -4):
+        z = 10 - (max_r - r) // 2
+        # Carve ring
+        for angle in range(0, 360, 5):
+            rad = math.radians(angle)
+            px = int(cx + r * math.cos(rad))
+            py = int(cy + r * math.sin(rad))
+            world.set_box_solid(px - 2, py - 2, z, px + 3, py + 3, 10, VoxelWorld.AIR)
+            
+    # Central pit floor
+    world.set_box_solid(cx - 4, cy - 4, 0, cx + 5, cy + 5, 10, VoxelWorld.AIR)
+    
+    # Switchback ramp
+    _build_stairs(world, cx + max_r, cy, 10, cx, cy, 0, width=4)
 
 
 def _build_stairs(world: VoxelWorld, x0: int, y0: int, z0: int, x1: int, y1: int, z1: int, width: int) -> None:
     """Builds a solid ramp of voxels with AIR headroom."""
     dist = math.sqrt((x1-x0)**2 + (y1-y0)**2)
     if dist < 1e-6: return
-    
     steps = max(1, int(dist * 1.5))
     clearance = int(world.meta.get("validator", {}).get("clearance_z", 4))
-    
     half_w = width / 2.0
     for i in range(steps + 1):
         t = i / steps
@@ -325,6 +408,10 @@ CATALOG: dict[str, BiomeBrush] = {
     "arcology_spire": fill_arcology_spire,
     "sunken_canal": fill_sunken_canal,
     "geo_front": fill_geo_front,
+    "glass_desert": fill_glass_desert,
+    "command_outpost": fill_command_outpost,
+    "dense_jungle": fill_dense_jungle,
+    "mining_pit": fill_mining_pit,
 }
 
 def get_biome_brush(name: str) -> BiomeBrush:
