@@ -1,10 +1,8 @@
-import pytest
 import torch
 import torch.nn as nn
 import numpy as np
 from echelon import EchelonEnv, EnvConfig
 from echelon.config import WorldConfig
-from echelon.actions import ActionIndex
 
 class SimpleActor(nn.Module):
     def __init__(self, obs_dim, action_dim):

@@ -1,6 +1,5 @@
-import unittest
 import numpy as np
-from hypothesis import given, strategies as st
+from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, rule, initialize
 from echelon.sim.sim import Sim, MechState
 from echelon.sim.world import VoxelWorld

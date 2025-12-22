@@ -947,6 +947,17 @@ class Sim:
                     })
                     events.extend(self._handle_death(m, proj.shooter_id))
         
+        # Damage Voxels in radius
+        r = proj.splash_rad
+        min_ix, min_iy, min_iz = np.floor(pos - r).astype(int)
+        max_ix, max_iy, max_iz = np.ceil(pos + r).astype(int)
+        for iz in range(max(0, min_iz), min(self.world.size_z, max_iz)):
+            for iy in range(max(0, min_iy), min(self.world.size_y, max_iy)):
+                for ix in range(max(0, min_ix), min(self.world.size_x, max_ix)):
+                    v_pos = np.array([ix + 0.5, iy + 0.5, iz + 0.5], dtype=np.float32)
+                    if np.linalg.norm(v_pos - pos) <= r:
+                        self.world.damage_voxel(ix, iy, iz, proj.damage * proj.splash_scale)
+
         events.append({
             "type": "explosion",
             "weapon": proj.weapon,
@@ -1059,6 +1070,7 @@ class Sim:
             
             impact = False
             impact_pos = next_pos
+            impact_voxel = None
             direct_hit_mech = None
             step_len2 = float(np.dot(step, step))
 
@@ -1092,6 +1104,7 @@ class Sim:
                     impact = True
                     p.alive = False
                     if hit.blocked_voxel is not None:
+                        impact_voxel = hit.blocked_voxel
                         impact_pos = self._impact_pos_before_voxel(p.pos, best_pos, hit.blocked_voxel)
                 else:
                     impact = True
@@ -1104,9 +1117,13 @@ class Sim:
                     impact = True
                     p.alive = False
                     if hit.blocked and hit.blocked_voxel is not None:
+                        impact_voxel = hit.blocked_voxel
                         impact_pos = self._impact_pos_before_voxel(p.pos, next_pos, hit.blocked_voxel)
             
             if impact:
+                if impact_voxel:
+                    self.world.damage_voxel(impact_voxel[0], impact_voxel[1], impact_voxel[2], p.damage)
+
                 if direct_hit_mech:
                     m = direct_hit_mech
                     fake_origin = m.pos - p.vel

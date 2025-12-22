@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Callable, Protocol, Dict, List, Tuple, Optional
+from typing import Protocol
 
 import numpy as np
 
@@ -65,7 +65,10 @@ def fill_urban_residential(
         world.set_box_solid(x, y, 0, x+w, y+h, height, True)
         
         if w > 4 and h > 4:
+            # Clear center (courtyard)
             world.set_box_solid(x+2, y+2, 0, x+w-2, y+h-2, height, False)
+            # Add some glass window patches
+            world.set_box_solid(x+2, y+2, 0, x+w-2, y+h-2, 1, VoxelWorld.GLASS)
             
         filled += w * h * 0.75 # Approx
 
@@ -149,6 +152,9 @@ def fill_forest_park(
         ts = _safe_integers(rng, 1, 3) 
         th = _safe_integers(rng, 3, 8)
         world.set_box_solid(tx, ty, 0, tx+ts, ty+ts, th, True)
+        # Foliage Canopy
+        if th >= 4:
+            world.set_box_solid(tx - 1, ty - 1, 3, tx + ts + 1, ty + ts + 1, 5, VoxelWorld.FOLIAGE)
         
     num_rocks = int(area * 0.01)
     for _ in range(num_rocks):

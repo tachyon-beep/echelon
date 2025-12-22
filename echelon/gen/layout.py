@@ -5,7 +5,6 @@ import numpy as np
 from ..sim.world import VoxelWorld
 from ..config import WorldConfig
 from .biomes import CATALOG as BIOME_CATALOG, get_biome_brush
-from .corridors import carve_macro_corridors
 
 def generate_layout(config: WorldConfig, rng: np.random.Generator) -> VoxelWorld:
     """

@@ -1,6 +1,5 @@
 import pytest
 import torch
-import numpy as np
 from echelon import EchelonEnv, EnvConfig
 from echelon.config import WorldConfig
 from echelon.rl.model import ActorCriticLSTM

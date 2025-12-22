@@ -1015,7 +1015,7 @@ class EchelonEnv:
                     continue
                 
                 # Goal: Capture Zone Center
-                goal_pos = (float(zone_cx), float(goal_yx[0] if 'goal_yx' in locals() else zone_cy), 0.0)
+                goal_pos = (float(zone_cx), float(zone_cy), 0.0)
                 
                 # Periodically update path (every 10 decision steps)
                 if aid not in self._cached_paths or (self.step_count % 10 == 0):

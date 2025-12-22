@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from echelon.config import WorldConfig
 from echelon.sim.world import VoxelWorld
 from echelon.gen.layout import generate_layout

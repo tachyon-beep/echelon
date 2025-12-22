@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
-import numpy as np
 
 from ..sim.world import VoxelWorld
 

@@ -1,9 +1,7 @@
 import time
 import numpy as np
-import pytest
 from echelon import EchelonEnv, EnvConfig
 from echelon.config import WorldConfig
-from echelon.actions import ACTION_DIM
 
 def test_benchmark_sps():
     """

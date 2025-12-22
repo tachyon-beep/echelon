@@ -4,7 +4,6 @@ from hypothesis import given, settings, strategies as st
 from echelon.config import WorldConfig
 from echelon.sim.world import VoxelWorld
 from echelon.gen.layout import generate_layout
-from echelon.gen.biomes import CATALOG
 
 @settings(deadline=500, max_examples=20)
 @given(

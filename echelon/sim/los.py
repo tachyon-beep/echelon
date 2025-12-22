@@ -108,7 +108,10 @@ def raycast_voxels(
             continue
         if (not include_end) and current == end_voxel:
             continue
-        if world.is_solid_index(x, y, z):
+        
+        # Check if this voxel type blocks LOS
+        v_id = world.get_voxel(x, y, z)
+        if world.MATERIAL_PROPS.get(v_id, {}).get("blocks_los", False):
             return RaycastHit(blocked=True, blocked_voxel=current)
 
     # If we somehow failed to reach the end, treat as blocked for safety.
