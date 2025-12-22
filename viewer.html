@@ -40,6 +40,8 @@
             <button id="playPause">Play</button>
             <input type="range" id="timeSlider" min="0" max="100" step="0.1" value="0">
             <span id="timeDisplay">0.0s</span>
+            <button id="navToggle">Nav</button>
+            <button id="pathToggle">Path</button>
             <div id="stats"></div>
         </div>
         <div id="infoPanel" style="margin-top: 10px; border-top: 1px solid #555; padding-top: 5px; font-size: 0.9em; display: none;">
@@ -77,6 +79,8 @@
         let paintHelpers = {}; // {id: wireframeBox}
         let statusBars = {}; // {id: {hp: mesh, stab: mesh, heat: mesh, group: Object3D}}
         let floaters = []; // [{mesh, vel, life}]
+        let navGroup = new THREE.Group();
+        let pathGroup = new THREE.Group();
 
         // Config
         const VOXEL_SIZE = 1.0; // Visual scale
@@ -134,6 +138,9 @@
             scene.add(gridHelper);
             window.gridHelper = gridHelper;
 
+            scene.add(navGroup);
+            scene.add(pathGroup);
+
             // WebSocket connection
             connectWebSocket();
 
@@ -146,6 +153,8 @@
             document.getElementById('loadServerBtn').addEventListener('click', loadServerReplay);
 
             document.getElementById('playPause').addEventListener('click', togglePlay);
+            document.getElementById('navToggle').addEventListener('click', toggleNav);
+            document.getElementById('pathToggle').addEventListener('click', togglePath);
             document.getElementById('timeSlider').addEventListener('input', (e) => {
                 currentTime = parseFloat(e.target.value);
                 updateScene(currentTime);
@@ -191,8 +200,10 @@
             selectedMechId = found;
             const panel = document.getElementById('infoPanel');
             panel.style.display = found ? 'block' : 'none';
-            if (!found) {
-                // Clear selection visual?
+            
+            // Auto-refresh path if visible
+            if (pathGroup.visible && found) {
+                requestPath(found);
             }
         }
 
@@ -283,6 +294,8 @@
 	            paintHelpers = {};
 	            floaters.forEach(f => scene.remove(f.mesh));
 	            floaters = [];
+                navGroup.clear();
+                pathGroup.clear();
 
 	            // Parse World
 	            if (replayData.world) {
@@ -550,13 +563,144 @@
             return group;
         }
 
-        function togglePlay() {
-            isPlaying = !isPlaying;
-            document.getElementById('playPause').innerText = isPlaying ? "Pause" : "Play";
+                function togglePlay() {
+                    isPlaying = !isPlaying;
+                    document.getElementById('playPause').innerText = isPlaying ? "Pause" : "Play";
+                }
+        
+                function toggleNav() {
+                    if (!replayData || !replayData.world) return;
+                    if (navGroup.children.length > 0 && navGroup.visible) {
+                        navGroup.visible = false;
+                        return;
+                    }
+                    if (navGroup.children.length > 0) {
+                        navGroup.visible = true;
+                        return;
+                    }
+        
+                    // Fetch from server
+                    fetch('/nav/build', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(replayData.world)
+                    })
+                    .then(r => r.json())
+                    .then(data => {
+                        renderNavGraph(data);
+                        navGroup.visible = true;
+                    })
+                    .catch(err => console.error("Nav build failed:", err));
+                }
+        
+                function renderNavGraph(data) {
+                    navGroup.clear();
+                    const nodes = data.nodes;
+                    const nodeMat = new THREE.PointsMaterial({ color: 0x00ffff, size: 0.2 });
+                    const points = [];
+                    const posMap = {};
+        
+                    nodes.forEach(n => {
+                        const p = new THREE.Vector3(...n.pos);
+                        points.push(p);
+                        posMap[n.id.join(',')] = p;
+                    });
+        
+                    const pointsGeo = new THREE.BufferGeometry().setFromPoints(points);
+                    const pointsMesh = new THREE.Points(pointsGeo, nodeMat);
+                    navGroup.add(pointsMesh);
+        
+                    // Edges
+                    const lineMat = new THREE.LineBasicMaterial({ color: 0x008888, transparent: true, opacity: 0.3 });
+                    const linePoints = [];
+                    nodes.forEach(n => {
+                        const p1 = posMap[n.id.join(',')];
+                        n.edges.forEach(eid => {
+                            const p2 = posMap[eid.join(',')];
+                            if (p2) {
+                                linePoints.push(p1, p2);
+                            }
+                        });
+                    });
+                    const lineGeo = new THREE.BufferGeometry().setFromPoints(linePoints);
+                    const lines = new THREE.LineSegments(lineGeo, lineMat);
+                    navGroup.add(lines);
+                }
+        
+                function togglePath() {
+            if (!replayData || !replayData.world) return;
+            if (pathGroup.visible) {
+                pathGroup.visible = false;
+                return;
+            }
+            if (selectedMechId) {
+                requestPath(selectedMechId);
+            } else {
+                alert("Select a mech first (click on one)");
+            }
         }
 
-	        function updateScene(time) {
-	            if (!replayData) return;
+        function requestPath(mechId) {
+            const frame = getFrameAt(currentTime);
+            const mech = frame.mechs[mechId];
+            if (!mech) return;
+
+            const goalPos = frame.objective.zone_center.concat([0]); // [x,y,0]
+
+            fetch('/nav/path', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    world: replayData.world,
+                    start_pos: mech.pos,
+                    goal_pos: goalPos
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.found) {
+                    renderPath(data.path);
+                    pathGroup.visible = true;
+                } else {
+                    console.warn("Path not found:", data.error);
+                    pathGroup.clear();
+                }
+            })
+            .catch(err => console.error("Path request failed:", err));
+        }
+
+        function renderPath(waypoints) {
+            pathGroup.clear();
+            const points = waypoints.map(p => new THREE.Vector3(...p));
+            // Offset path slightly up so it's visible over the floor
+            points.forEach(p => p.z += 0.5);
+
+            const lineMat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 3 });
+            const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+            const line = new THREE.Line(lineGeo, lineMat);
+            pathGroup.add(line);
+
+            // Waypoint markers
+            const dotMat = new THREE.PointsMaterial({ color: 0xffff00, size: 0.3 });
+            const dotGeo = new THREE.BufferGeometry().setFromPoints(points);
+            const dots = new THREE.Points(dotGeo, dotMat);
+            pathGroup.add(dots);
+        }
+
+        function getFrameAt(time) {
+            const frames = replayData.frames;
+            let frame = frames[0];
+            for (let i = 0; i < frames.length - 1; i++) {
+                if (time >= frames[i].t && time < frames[i+1].t) {
+                    frame = frames[i];
+                    break;
+                }
+            }
+            if (time >= frames[frames.length - 1].t) frame = frames[frames.length - 1];
+            return frame;
+        }
+
+        function updateScene(time) {	            if (!replayData) return;
             
             // Find frame
             // Simple linear search is fine for short replays

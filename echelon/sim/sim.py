@@ -276,19 +276,41 @@ class Sim:
     def _integrate(self, mech: MechState) -> None:
         pos = mech.pos.astype(np.float32, copy=True)
         vel = mech.vel.astype(np.float32, copy=False)
+        hs = mech.half_size
 
-        # Axis-by-axis collision resolution (cheap, stable).
+        # Axis-by-axis collision resolution (cheap, stable) with Step-Up support.
+        # Step-up logic: if blocked horizontally, try to 'lift' the mech by up to 1 voxel.
+        step_up_max = 1.1 # slightly more than 1 voxel to be safe
+
+        def _try_move(target_pos: np.ndarray) -> bool:
+            if not self._collides_any(mech, target_pos):
+                return True
+            
+            # If blocked, try stepping up
+            # Only if we are roughly on the ground (vel[2] is small or negative)
+            if abs(vel[2]) < 1.0:
+                up_trial = target_pos.copy()
+                up_trial[2] += step_up_max
+                if not self._collides_any(mech, up_trial):
+                    # We can step up! 
+                    # But we need to check if there's a floor underneath the NEW position
+                    # to avoid 'teleporting' through a thin wall into air.
+                    # For v0 sim, we just allow it if the destination is clear.
+                    target_pos[2] = up_trial[2]
+                    return True
+            return False
+
         trial = pos.copy()
         trial[0] = pos[0] + vel[0] * self.dt
-        if not self._collides_any(mech, trial):
-            pos[0] = trial[0]
+        if _try_move(trial):
+            pos[:] = trial
         else:
             mech.vel[0] = 0.0
 
         trial = pos.copy()
         trial[1] = pos[1] + vel[1] * self.dt
-        if not self._collides_any(mech, trial):
-            pos[1] = trial[1]
+        if _try_move(trial):
+            pos[:] = trial
         else:
             mech.vel[1] = 0.0
 
@@ -300,7 +322,6 @@ class Sim:
             mech.vel[2] = 0.0
 
         # Clamp to world boundaries.
-        hs = mech.half_size
         pos[0] = float(np.clip(pos[0], hs[0], float(self.world.size_x) - hs[0]))
         pos[1] = float(np.clip(pos[1], hs[1], float(self.world.size_y) - hs[1]))
         pos[2] = float(max(hs[2], pos[2])) # Ground floor

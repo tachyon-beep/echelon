@@ -181,5 +181,6 @@ class EnvConfig:
     enable_ewar: bool = True
     enable_obs_control: bool = True
     enable_comm: bool = True
+    nav_mode: str = "off" # "off" | "assist" | "planner"
     record_replay: bool = False
     seed: int | None = None

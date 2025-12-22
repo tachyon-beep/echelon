@@ -41,6 +41,7 @@ def main() -> None:
     parser.add_argument("--mode", type=str, default="full", choices=["full", "partial"])
     parser.add_argument("--comm-dim", type=int, default=8, help="Pack-local comm message size (0 disables)")
     parser.add_argument("--record", action="store_true", help="Record replay frames to JSON")
+    parser.add_argument("--nav-assist", action="store_true", help="Enable Nav-Assist (guided steering)")
     parser.add_argument("--out", type=str, default="runs/smoke", help="Output directory for replays")
     args = parser.parse_args()
 
@@ -49,6 +50,7 @@ def main() -> None:
         num_packs=args.packs_per_team,
         observation_mode=args.mode,
         comm_dim=args.comm_dim,
+        nav_mode="assist" if args.nav_assist else "off",
         record_replay=args.record,
         seed=args.seed,
         max_episode_seconds=30.0,

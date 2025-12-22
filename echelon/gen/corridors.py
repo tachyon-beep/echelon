@@ -28,6 +28,8 @@ def _carve_line(world: VoxelWorld, x0: float, y0: float, x1: float, y1: float, *
     dist = float(math.hypot(x1 - x0, y1 - y0))
     steps = max(1, int(dist * 1.5))
     half_w = float(width_vox) * 0.5
+    # Standing room: assume default 4 voxels if not known
+    clearance_z = int(world.meta.get("validator", {}).get("clearance_z", 4))
     for i in range(steps + 1):
         t = float(i) / float(steps)
         px = x0 + (x1 - x0) * t
@@ -36,7 +38,8 @@ def _carve_line(world: VoxelWorld, x0: float, y0: float, x1: float, y1: float, *
         max_x = int(math.floor(px + half_w)) + 1
         min_y = int(math.floor(py - half_w))
         max_y = int(math.floor(py + half_w)) + 1
-        world.set_box_solid(min_x, min_y, 0, max_x, max_y, world.size_z, False)
+        # Clear only standing room
+        world.voxels[0 : clearance_z + 1, min_y:max_y, min_x:max_x] = 0 # AIR
 
 
 def carve_macro_corridors(

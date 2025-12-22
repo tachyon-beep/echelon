@@ -4,16 +4,19 @@ import asyncio
 import heapq
 import json
 import logging
-import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from echelon.nav.graph import NavGraph
+from echelon.sim.world import VoxelWorld
 
 # --- Configuration ---
 
@@ -112,7 +115,7 @@ class ConnectionManager:
         for connection in targets:
             try:
                 await asyncio.wait_for(connection.send_text(message), timeout=settings.ECHELON_WS_SEND_TIMEOUT_S)
-            except (WebSocketDisconnect, asyncio.TimeoutError, Exception) as e:
+            except (WebSocketDisconnect, asyncio.TimeoutError, Exception):
                 # logger.warning(f"Failed to send to client: {e}")
                 dead_sockets.append(connection)
 
@@ -237,8 +240,98 @@ app = FastAPI(lifespan=lifespan, title="Echelon Replay Server")
 
 # --- Endpoints ---
 
+@app.post("/nav/build")
+async def build_nav_graph(world_data: Dict[str, Any]):
+    """Computes a NavGraph for the provided world data."""
+    try:
+        # Reconstruct world from dict
+        sx, sy, sz = world_data["size"]
+        
+        # Safety Capping
+        if sx > 256 or sy > 256 or sz > 64:
+            raise HTTPException(status_code=400, detail="World size too large for nav build")
+            
+        voxels = np.zeros((sz, sy, sx), dtype=np.uint8)
+        
+        # Fill voxels from walls list [[x,y,z,type], ...] or [[x,y,z], ...]
+        for w in world_data.get("walls", []):
+            if len(w) >= 3:
+                x, y, z = w[:3]
+                t = w[3] if len(w) >= 4 else 1 # default SOLID
+                if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz:
+                    voxels[z, y, x] = t
+        
+        world = VoxelWorld(voxels=voxels, voxel_size_m=world_data.get("voxel_size_m", 5.0))
+        
+        # Build graph
+        clearance = world_data.get("meta", {}).get("validator", {}).get("clearance_z", 4)
+        graph = await asyncio.to_thread(NavGraph.build, world, clearance_z=clearance)
+        
+        return graph.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to build NavGraph: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class PathRequest(BaseModel):
+    world: Dict[str, Any]
+    start_pos: List[float] # [x, y, z]
+    goal_pos: List[float] # [x, y, z]
+
+@app.post("/nav/path")
+async def plan_path(req: PathRequest):
+    """Computes an A* path through the nav graph."""
+    try:
+        # Build graph (reuse build logic or cache? For now just build on fly)
+        sx, sy, sz = req.world["size"]
+        if sx > 256 or sy > 256 or sz > 64:
+            raise HTTPException(status_code=400, detail="World size too large")
+            
+        voxels = np.zeros((sz, sy, sx), dtype=np.uint8)
+        for w in req.world.get("walls", []):
+            if len(w) >= 3:
+                x, y, z = w[:3]
+                t = w[3] if len(w) >= 4 else 1
+                if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz:
+                    voxels[z, y, x] = t
+        world = VoxelWorld(voxels=voxels, voxel_size_m=req.world.get("voxel_size_m", 5.0))
+        clearance = req.world.get("meta", {}).get("validator", {}).get("clearance_z", 4)
+        graph = await asyncio.to_thread(NavGraph.build, world, clearance_z=clearance)
+        
+        from echelon.nav.planner import Planner
+        planner = Planner(graph)
+        
+        start_node = graph.get_nearest_node(tuple(req.start_pos)) # type: ignore
+        goal_node = graph.get_nearest_node(tuple(req.goal_pos)) # type: ignore
+        
+        if not start_node or not goal_node:
+            return {"found": False, "error": "Start or goal position not on nav graph"}
+            
+        path_ids, stats = planner.find_path(start_node, goal_node)
+        
+        # Convert path IDs to world positions
+        path_pos = [list(graph.nodes[nid].pos) for nid in path_ids]
+        
+        return {
+            "found": stats.found,
+            "path": path_pos,
+            "node_ids": [list(nid) for nid in path_ids],
+            "stats": {
+                "length": stats.length,
+                "cost": stats.cost,
+                "visited": stats.visited_count
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to plan path: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/", response_class=HTMLResponse)
 async def get_viewer():
+    """Serves the viewer.html. Access via http://localhost:8090/ instead of file://"""
     html_path = Path(__file__).parent / "viewer.html"
     if html_path.exists():
         return HTMLResponse(html_path.read_text(encoding="utf-8"))

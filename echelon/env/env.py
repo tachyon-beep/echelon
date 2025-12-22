@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 
-from ..actions import ACTION_DIM as ACTION_DIM_CONST
+from ..actions import ACTION_DIM as ACTION_DIM_CONST, ActionIndex
 from ..constants import PACK_SIZE
 from ..config import (
     AMS_COOLDOWN_S,
@@ -25,6 +25,8 @@ from ..gen.objective import capture_zone_params, clear_capture_zone, sample_capt
 from ..gen.recipe import build_recipe
 from ..gen.transforms import apply_transform_voxels, list_transforms, opposite_corner, transform_corner
 from ..gen.validator import ConnectivityValidator
+from ..nav.graph import NavGraph, NodeID
+from ..nav.planner import Planner
 from ..sim.mech import MechState
 from ..sim.sim import Sim
 from ..sim.world import VoxelWorld
@@ -198,6 +200,11 @@ class EchelonEnv:
         self._prev_legged: dict[str, bool] = {}
         self._prev_shutdown: dict[str, bool] = {}
 
+        # Navigation Graph (Built once per reset)
+        self.nav_graph: NavGraph | None = None
+        self._cached_paths: dict[str, list[NodeID]] = {}
+        self._path_update_tick: dict[str, int] = {}
+
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         if seed is not None:
             self.rng = np.random.default_rng(seed)
@@ -242,6 +249,9 @@ class EchelonEnv:
         self._prev_fallen = {}
         self._prev_legged = {}
         self._prev_shutdown = {}
+        
+        self._cached_paths = {}
+        self._path_update_tick = {}
 
         seq = np.random.SeedSequence(episode_seed)
         rng_world, rng_sim, rng_variants = (np.random.default_rng(s) for s in seq.spawn(3))
@@ -328,6 +338,14 @@ class EchelonEnv:
         # want a contiguous "dirt" layer on the first voxel layer (z=0), with hazards (water/lava)
         # embedded as patches.
         world.ensure_ground_layer()
+
+        # Build Navigation Graph
+        # Use mech_radius=1 for safety (conservative for heavy mechs)
+        self.nav_graph = NavGraph.build(
+            world, 
+            clearance_z=self.config.world.connectivity_clearance_z,
+            mech_radius=self.config.world.connectivity_obstacle_inflate_radius
+        )
 
         world.meta["recipe"] = build_recipe(
             generator_id="legacy_voxel_archetypes",
@@ -987,6 +1005,59 @@ class EchelonEnv:
             hp_before_by_agent[aid] = max(0.0, float(m.hp))
 
         hp_before = self.team_hp()
+
+        # Nav-Assist: Post-process actions using NavGraph
+        if self.config.nav_mode == "assist" and self.nav_graph:
+            planner = Planner(self.nav_graph)
+            for aid in self.agents:
+                m = sim.mechs[aid]
+                if not m.alive or m.shutdown:
+                    continue
+                
+                # Goal: Capture Zone Center
+                goal_pos = (float(zone_cx), float(goal_yx[0] if 'goal_yx' in locals() else zone_cy), 0.0)
+                
+                # Periodically update path (every 10 decision steps)
+                if aid not in self._cached_paths or (self.step_count % 10 == 0):
+                    start_node = self.nav_graph.get_nearest_node(tuple(m.pos)) # type: ignore
+                    goal_node = self.nav_graph.get_nearest_node(goal_pos)
+                    if start_node and goal_node:
+                        path, pstats = planner.find_path(start_node, goal_node)
+                        if pstats.found:
+                            self._cached_paths[aid] = path
+                
+                # If we have a path, nudge the RL action towards it
+                path = self._cached_paths.get(aid)
+                if path and len(path) > 1:
+                    # Find a waypoint ~10m ahead on the path
+                    lookahead = 2
+                    target_node_id = path[min(lookahead, len(path)-1)]
+                    target_node = self.nav_graph.nodes[target_node_id]
+                    
+                    # Vector to waypoint (XY plane)
+                    dx = target_node.pos[0] - m.pos[0]
+                    dy = target_node.pos[1] - m.pos[1]
+                    dist = math.hypot(dx, dy)
+                    
+                    if dist > 1.0:
+                        # Normalize desired direction
+                        dir_x, dir_y = dx / dist, dy / dist
+                        
+                        # Project into mech's local frame
+                        c, s = math.cos(m.yaw), math.sin(m.yaw)
+                        # local_fwd = world_x * cos + world_y * sin
+                        # local_side = -world_x * sin + world_y * cos
+                        fwd_desired = dir_x * c + dir_y * s
+                        side_desired = -dir_x * s + dir_y * c
+                        
+                        # Apply a nudge (30% influence)
+                        alpha = 0.3
+                        a = act[aid]
+                        a[ActionIndex.FORWARD] = (1.0 - alpha) * a[ActionIndex.FORWARD] + alpha * fwd_desired
+                        a[ActionIndex.STRAFE] = (1.0 - alpha) * a[ActionIndex.STRAFE] + alpha * side_desired
+                        
+                        # Re-clip to be safe
+                        np.clip(a, -1.0, 1.0, out=a)
 
         events = sim.step(act, num_substeps=self.config.decision_repeat)
 
