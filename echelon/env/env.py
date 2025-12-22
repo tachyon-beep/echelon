@@ -686,6 +686,9 @@ class EchelonEnv:
                     if angle > -math.pi / 2: q = 1 # Front-Right
                     else: q = 3 # Rear-Right
                 acoustic_intensities[q] += float(intensity)
+            
+            # Normalize acoustic intensities (Log scaling to keep in [0, 1] range roughly)
+            acoustic_intensities = np.log1p(acoustic_intensities) / 5.0 # 5.0 is approx ln(150)
 
             # Top-K contact table (fixed size).
             contacts: dict[str, list[tuple[float, str, bool]]] = {"friendly": [], "hostile": [], "neutral": []}

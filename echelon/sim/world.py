@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -29,13 +29,13 @@ class _SolidMask:
         return int(self._world.voxels.size)
 
     def __array__(self, dtype: Any | None = None) -> np.ndarray:
-        out = (self._world.voxels == self._world.SOLID) | (self._world.voxels == self._world.KILLED_HULL)
+        out = self._world.collides_lut()[self._world.voxels]
         if dtype is None:
             return out
         return out.astype(dtype, copy=False)
 
     def __getitem__(self, key: Any) -> Any:
-        return (self._world.voxels[key] == self._world.SOLID) | (self._world.voxels[key] == self._world.KILLED_HULL)
+        return self._world.collides_lut()[self._world.voxels[key]]
 
     def __setitem__(self, key: Any, value: Any) -> None:
         if np.isscalar(value):
@@ -82,10 +82,23 @@ class VoxelWorld:
         FOLIAGE: {"hp": 1, "collides": False, "blocks_los": True},
     }
 
+    _COLLIDES_LUT: ClassVar[np.ndarray | None] = None
+
     voxels: np.ndarray  # uint8[sz, sy, sx] (z-major)
     voxel_hp: np.ndarray | None = None # float32[sz, sy, sx]
     voxel_size_m: float = 5.0
     meta: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def collides_lut(cls) -> np.ndarray:
+        lut = cls.__dict__.get("_COLLIDES_LUT")
+        if lut is None:
+            lut = np.zeros(256, dtype=np.bool_)
+            for v_id, props in cls.MATERIAL_PROPS.items():
+                if props.get("collides", False):
+                    lut[int(v_id)] = True
+            cls._COLLIDES_LUT = lut
+        return lut
 
     def __post_init__(self) -> None:
         if self.voxel_hp is None:

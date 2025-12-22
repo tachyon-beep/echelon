@@ -137,7 +137,7 @@ class ConnectivityValidator:
             # If voxels has DIRT at 0, NavGraph works.
             # If voxels has AIR at 0, NavGraph works (floor is -1).
             
-            graph = NavGraph.build(tmp_world, clearance_z=self.clearance_z)
+            graph = NavGraph.build(tmp_world, clearance_z=self.clearance_z, mech_radius=self.obstacle_inflate_radius)
             planner = Planner(graph)
             
             # 2. Find Nodes
@@ -162,7 +162,8 @@ class ConnectivityValidator:
             # 3. If fail, use 2D digger
             # We find a path on the 2D projected grid (where obstacles are high cost)
             nav_2d = self._build_nav_grid(voxels)
-            res = self._astar_dig(nav_2d, start_yx, goal_yx, penalty=None)
+            forbidden = self._forbidden_footprint()
+            res = self._astar_dig(nav_2d, start_yx, goal_yx, penalty=None, forbidden=forbidden)
             
             if res.found:
                 # Use Staircase Digger: Create explicit ramps along the 2D path
@@ -230,6 +231,17 @@ class ConnectivityValidator:
         shared = sum((p in sa) for p in b)
         return float(shared / max(1, len(b)))
 
+    def _forbidden_footprint(self) -> np.ndarray:
+        r = max(0, int(self.obstacle_inflate_radius))
+        forbidden = np.zeros((self.size_y, self.size_x), dtype=bool)
+        if r <= 0:
+            return forbidden
+        forbidden[:r, :] = True
+        forbidden[-r:, :] = True
+        forbidden[:, :r] = True
+        forbidden[:, -r:] = True
+        return forbidden
+
     def _astar_dig(
         self,
         blocked: np.ndarray,
@@ -237,6 +249,7 @@ class ConnectivityValidator:
         goal: tuple[int, int],
         *,
         penalty: np.ndarray | None,
+        forbidden: np.ndarray | None,
     ) -> PathResult:
         sy, sx = start
         gy, gx = goal
@@ -244,6 +257,11 @@ class ConnectivityValidator:
             return PathResult([], float("inf"), 0, False)
         if not (0 <= gy < self.size_y and 0 <= gx < self.size_x):
             return PathResult([], float("inf"), 0, False)
+        if forbidden is not None:
+            if forbidden.shape != (self.size_y, self.size_x):
+                raise ValueError(f"forbidden has shape {forbidden.shape}, expected {(self.size_y, self.size_x)}")
+            if forbidden[sy, sx] or forbidden[gy, gx]:
+                return PathResult([], float("inf"), 0, False)
 
         def h(y: int, x: int) -> float:
             return float(abs(y - gy) + abs(x - gx))
@@ -263,6 +281,8 @@ class ConnectivityValidator:
             base_cost = cost_so_far[(cy, cx)]
             for ny, nx in ((cy + 1, cx), (cy - 1, cx), (cy, cx + 1), (cy, cx - 1)):
                 if not (0 <= ny < self.size_y and 0 <= nx < self.size_x):
+                    continue
+                if forbidden is not None and forbidden[ny, nx]:
                     continue
                 step = 1.0 + (self.wall_cost if blocked[ny, nx] else 0.0)
                 if penalty is not None:

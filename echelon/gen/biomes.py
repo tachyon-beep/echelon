@@ -399,6 +399,86 @@ def _carve_worm(world: VoxelWorld, x0: int, y0: int, z0: int, x1: int, y1: int, 
         world.set_box_solid(ix - radius, iy - radius, iz - radius, ix + radius + 1, iy + radius + 1, iz + radius + 1, False)
 
 
+def fill_volcanic_ridge(
+    world: VoxelWorld, min_x: int, min_y: int, max_x: int, max_y: int, rng: np.random.Generator
+) -> None:
+    """
+    Elevated ridge with lava rivers.
+    """
+    is_horiz = rng.random() > 0.5
+    cx, cy = (min_x + max_x) // 2, (min_y + max_y) // 2
+    
+    # 1. The Ridge (Raised Solid spine)
+    if is_horiz:
+        world.set_box_solid(min_x, cy - 4, 0, max_x, cy + 4, 4, VoxelWorld.SOLID)
+        # 2. Lava rivers flowing off the ridge
+        for _ in range(_safe_integers(rng, 2, 4)):
+            lx = _safe_integers(rng, min_x, max_x - 3)
+            world.set_box_solid(lx, cy - 6, 0, lx + 3, cy + 6, 1, VoxelWorld.LAVA)
+    else:
+        world.set_box_solid(cx - 4, min_y, 0, cx + 4, max_y, 4, VoxelWorld.SOLID)
+        for _ in range(_safe_integers(rng, 2, 4)):
+            ly = _safe_integers(rng, min_y, max_y - 3)
+            world.set_box_solid(cx - 6, ly, 0, cx + 6, ly + 3, 1, VoxelWorld.LAVA)
+
+
+def fill_hydroponic_lab(
+    world: VoxelWorld, min_x: int, min_y: int, max_x: int, max_y: int, rng: np.random.Generator
+) -> None:
+    """
+    Glass-enclosed greenhouses with foliage.
+    """
+    for _ in range(_safe_integers(rng, 2, 4)):
+        res = _random_box(rng, min_x, min_y, max_x, max_y, (10, 15), (10, 15))
+        if res:
+            hx, hy, hw, hh = res
+            hz = _safe_integers(rng, 5, 8)
+            # Walls (REINFORCED corners, GLASS panels)
+            world.set_box_solid(hx, hy, 0, hx+hw, hy+hh, hz, VoxelWorld.GLASS)
+            world.set_box_solid(hx, hy, 0, hx+1, hy+1, hz, VoxelWorld.REINFORCED)
+            world.set_box_solid(hx+hw-1, hy, 0, hx+hw, hy+1, hz, VoxelWorld.REINFORCED)
+            # Foliage rows inside
+            for row in range(hy + 2, hy + hh - 2, 3):
+                world.set_box_solid(hx + 2, row, 0, hx + hw - 2, row + 1, 2, VoxelWorld.FOLIAGE)
+
+
+def fill_server_farm(
+    world: VoxelWorld, min_x: int, min_y: int, max_x: int, max_y: int, rng: np.random.Generator
+) -> None:
+    """
+    Dense grid of reinforced racks and glass data lines.
+    """
+    step = 5
+    for y in range(min_y + 1, max_y - step, step):
+        for x in range(min_x + 1, max_x - step, step):
+            if rng.random() > 0.3:
+                world.set_box_solid(x, y, 0, x+2, y+2, _safe_integers(rng, 6, 12), VoxelWorld.REINFORCED)
+                # Glass conduit overhead
+                if rng.random() > 0.5:
+                    world.set_box_solid(x, y, 4, x+step, y+1, 5, VoxelWorld.GLASS)
+
+
+def fill_orbital_relay(
+    world: VoxelWorld, min_x: int, min_y: int, max_x: int, max_y: int, rng: np.random.Generator
+) -> None:
+    """
+    Massive reinforced dishes and high-altitude planks.
+    """
+    cx, cy = (min_x + max_x) // 2, (min_y + max_y) // 2
+    # Dish base
+    r = _safe_integers(rng, 8, 12)
+    for angle in range(0, 360, 10):
+        rad = math.radians(angle)
+        px, py = int(cx + r * math.cos(rad)), int(cy + r * math.sin(rad))
+        world.set_box_solid(px-1, py-1, 0, px+2, py+2, _safe_integers(rng, 8, 15), VoxelWorld.REINFORCED)
+    
+    # High-altitude bridges
+    for _ in range(_safe_integers(rng, 2, 4)):
+        bx = _safe_integers(rng, min_x, max_x - 10)
+        bz = _safe_integers(rng, 10, 15)
+        world.set_box_solid(bx, cy - 1, bz, bx + 10, cy + 1, bz + 1, VoxelWorld.SOLID)
+
+
 CATALOG: dict[str, BiomeBrush] = {
     "urban_residential": fill_urban_residential,
     "industrial_refinery": fill_industrial_refinery,
@@ -412,6 +492,10 @@ CATALOG: dict[str, BiomeBrush] = {
     "command_outpost": fill_command_outpost,
     "dense_jungle": fill_dense_jungle,
     "mining_pit": fill_mining_pit,
+    "volcanic_ridge": fill_volcanic_ridge,
+    "hydroponic_lab": fill_hydroponic_lab,
+    "server_farm": fill_server_farm,
+    "orbital_relay": fill_orbital_relay,
 }
 
 def get_biome_brush(name: str) -> BiomeBrush:
