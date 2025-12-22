@@ -37,7 +37,7 @@ testpaths = ["tests"]
 norecursedirs = ["mutants", "scripts", ".venv", ".hypothesis", "runs", "__pycache__"]
 
 [tool.mutmut]
-paths_to_mutate = ["echelon/sim/sim.py"]
+paths_to_mutate = ["echelon/sim/sim.py", "echelon/gen/layout.py", "echelon/gen/biomes.py"]
 tests_dir = ["tests/unit"]
 copy_dirs = ["tests", "echelon"]
 runner = "PYTHONPATH=. pytest -x tests/unit"
