@@ -133,7 +133,8 @@ class NavGraph:
                     dz = nz - z
                     if abs(dz) <= step_height_max:
                         base_cost = world.voxel_size_m * dist_mult
-                        if dz > 0: base_cost *= 1.2
+                        if dz > 0:
+                            base_cost *= 1.2
                         node.edges.append(((nz, ny, nx), base_cost))
 
         return graph
@@ -167,7 +168,8 @@ class NavGraph:
                 ny, nx = iy + dy, ix + dx
                 
                 zs = self.nodes_by_col.get((ny, nx))
-                if not zs: continue
+                if not zs:
+                    continue
                 
                 for z in zs:
                     node = self.nodes[(z, ny, nx)]
