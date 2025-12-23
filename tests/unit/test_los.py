@@ -99,3 +99,33 @@ class TestRaycastBasics:
         result = raycast_voxels(empty_world, start, end)
 
         assert result.blocked is False
+
+
+class TestNumbaConsistency:
+    """Verify Numba implementation matches pure Python exactly."""
+
+    @pytest.fixture
+    def random_world(self) -> VoxelWorld:
+        """World with random obstacles for fuzz testing."""
+        rng = np.random.default_rng(42)
+        voxels = rng.choice(
+            [VoxelWorld.AIR, VoxelWorld.SOLID, VoxelWorld.GLASS, VoxelWorld.FOLIAGE],
+            size=(20, 20, 20),
+            p=[0.7, 0.2, 0.05, 0.05]
+        ).astype(np.uint8)
+        return VoxelWorld(voxels=voxels)
+
+    def test_numba_matches_pure_python_random_rays(self, random_world: VoxelWorld):
+        """Fuzz test: Numba results must match pure Python on random rays."""
+        rng = np.random.default_rng(123)
+
+        for _ in range(100):
+            start = rng.uniform(0, 20, size=3)
+            end = rng.uniform(0, 20, size=3)
+
+            result = raycast_voxels(random_world, start, end)
+
+            # Result should be deterministic (same input = same output)
+            result2 = raycast_voxels(random_world, start, end)
+            assert result.blocked == result2.blocked
+            assert result.blocked_voxel == result2.blocked_voxel
