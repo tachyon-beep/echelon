@@ -1,24 +1,26 @@
 # Bug Triage: Consolidated Review Findings
 
 **Generated:** 2025-12-23
+**Updated:** 2025-12-24
 **Sources:** batch1-4 DRL and PyTorch reviews
 
 ---
 
 ## Summary
 
-| Severity | Count | Description |
-|----------|-------|-------------|
-| **CRITICAL** | 6 | Crashes, security vulnerabilities, training corruption |
-| **HIGH** | 15 | Correctness bugs, major performance issues, learning blockers |
-| **MEDIUM** | 18 | Suboptimal behavior, moderate performance, code quality |
-| **LOW** | 12 | Nice-to-have improvements, minor optimizations |
+| Severity | Total | Fixed | Remaining |
+|----------|-------|-------|-----------|
+| **CRITICAL** | 6 | 0 | 6 |
+| **HIGH** | 15 | 4 | 11 |
+| **MEDIUM** | 18 | 2 | 16 |
+| **LOW** | 12 | 0 | 12 |
 
 ---
 
 ## CRITICAL (Fix Immediately)
 
 ### CRIT-1: Triple Tensor Conversion in Rollout Loop
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:873-882`
 - **Source:** Batch 1 DRL + PyTorch
 - **Description:** Same tensor conversions performed 3 times consecutively
@@ -39,6 +41,7 @@ next_obs = torch.from_numpy(stack_obs_many(...)).to(device)    # Line 882 TRIPLI
 ---
 
 ### CRIT-2: Missing LSTM State Detachment in Value Bootstrap
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:885`
 - **Source:** Batch 1 DRL
 - **Description:** LSTM state passed to value bootstrapping may retain computation graph
@@ -61,6 +64,7 @@ with torch.no_grad():
 ---
 
 ### CRIT-3: Unsafe Checkpoint Loading (Security Vulnerability)
+**Status:** OPEN
 - **Files:**
   - `echelon/arena/match.py:39`
   - `scripts/arena.py:52,102,125`
@@ -79,6 +83,7 @@ ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
 ---
 
 ### CRIT-4: Missing EWAR_DIM Class Attribute
+**Status:** OPEN
 - **File:** `echelon/env/env.py:1005`
 - **Source:** Batch 2 DRL + PyTorch
 - **Description:** Error message references undefined `self.EWAR_DIM`
@@ -96,6 +101,7 @@ raise ValueError(
 ---
 
 ### CRIT-5: Opponent Never Resampled During Training Rollouts
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:766-778,869-871`
 - **Source:** Batch 3 DRL
 - **Description:** In arena mode, opponent is sampled once at initialization and kept for entire rollout.
@@ -114,6 +120,7 @@ if ep_over and args.train_mode == "arena":
 ---
 
 ### CRIT-6: Double Rating Update Vulnerability
+**Status:** OPEN
 - **File:** `scripts/arena.py:170-175,194-195` and `scripts/train_ppo.py:1196-1201`
 - **Source:** Batch 3 DRL
 - **Description:** Both players in a match have ratings added to results dict, then `apply_rating_period` updates all. If opponents play each other in overlapping sessions, circular dependency occurs.
@@ -125,6 +132,7 @@ if ep_over and args.train_mode == "arena":
 ## HIGH PRIORITY
 
 ### HIGH-1: No Value Function Normalization
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:887-896,920`
 - **Source:** Batch 1 DRL
 - **Description:** Advantages are normalized but returns are not. Returns can grow unbounded with gamma=0.99.
@@ -139,6 +147,7 @@ v_loss = 0.5 * (returns - new_values).pow(2).mean()
 ---
 
 ### HIGH-2: Suboptimal Action Distribution (Fixed Log-Std)
+**Status:** OPEN
 - **File:** `echelon/rl/model.py:42,87-88`
 - **Source:** Batch 1 DRL
 - **Description:** Log-std is shared across all action dimensions (movement, weapons, target selection).
@@ -152,9 +161,10 @@ logstd = self.actor_logstd.expand_as(mean)
 ---
 
 ### HIGH-3: Tanh Squashing Epsilon Inconsistency
+**Status:** OPEN
 - **File:** `echelon/rl/model.py:9-11,99`
 - **Source:** Batch 1 DRL + PyTorch
-- **Description:** `_atanh` clamps to 0.999, but log correction uses 1e-6 epsilon. When actions saturate to ±1.0:
+- **Description:** `_atanh` clamps to 0.999, but log correction uses 1e-6 epsilon. When actions saturate to +/-1.0:
 ```python
 x = torch.clamp(x, -0.999, 0.999)  # _atanh
 logprob = ... - torch.log(1.0 - action.pow(2) + 1e-6).sum(-1)  # Different epsilon
@@ -165,6 +175,7 @@ logprob = ... - torch.log(1.0 - action.pow(2) + 1e-6).sum(-1)  # Different epsil
 ---
 
 ### HIGH-4: Entropy Bonus Applied to Pre-Squashing Distribution
+**Status:** OPEN
 - **File:** `echelon/rl/model.py:100`
 - **Source:** Batch 1 DRL
 - **Description:** Entropy computed on Gaussian, not the squashed distribution.
@@ -177,6 +188,7 @@ entropy = dist.entropy().sum(-1)  # dist is Normal, not TanhNormal
 ---
 
 ### HIGH-5: No Gym Space Definitions
+**Status:** OPEN
 - **File:** `echelon/env/env.py:112-210`
 - **Source:** Batch 2 DRL
 - **Description:** `EchelonEnv` lacks `observation_space` and `action_space` attributes (Gym API requirement).
@@ -186,6 +198,7 @@ entropy = dist.entropy().sum(-1)  # dist is Normal, not TanhNormal
 ---
 
 ### HIGH-6: Extremely Sparse Reward Signal
+**Status:** OPEN
 - **File:** `echelon/env/env.py:1244-1314`
 - **Source:** Batch 4 DRL
 - **Description:** Only two reward components: approach shaping (0.25) and zone control (0.10). No combat rewards.
@@ -195,6 +208,7 @@ entropy = dist.entropy().sum(-1)  # dist is Normal, not TanhNormal
 ---
 
 ### HIGH-7: Breadcrumb Shaping Stops Prematurely
+**Status:** OPEN
 - **File:** `echelon/env/env.py:1302-1308`
 - **Source:** Batch 2 DRL + Batch 4 DRL
 - **Description:** Approach reward stops when ANY teammate reaches zone.
@@ -208,6 +222,7 @@ if not team_reached_zone[m.team]:
 ---
 
 ### HIGH-8: Heuristic Baseline is Exploitable
+**Status:** OPEN
 - **File:** `echelon/agents/heuristic.py:29-313`
 - **Source:** Batch 4 DRL
 - **Description:** Multiple weaknesses:
@@ -216,11 +231,12 @@ if not team_reached_zone[m.team]:
   - No smoke usage
   - Naive handicap (random weapon suppression)
 - **Impact:** RL agents easily exploit by staying at range. No pressure to learn advanced tactics.
-- **Fix:** Implement skill levels (trivial→expert) with progressive capabilities.
+- **Fix:** Implement skill levels (trivial->expert) with progressive capabilities.
 
 ---
 
 ### HIGH-9: Model Caching Creates Expensive Env Instances
+**Status:** OPEN
 - **File:** `echelon/arena/match.py:42-46`
 - **Source:** Batch 3 PyTorch
 - **Description:** `load_policy()` creates full `EchelonEnv` just to infer obs dimensions.
@@ -234,33 +250,37 @@ obs, _ = env.reset(seed=int(env_cfg.seed or 0))  # Full terrain generation!
 ---
 
 ### HIGH-10: Unbounded Opponent Cache Memory
+**Status:** FIXED (2025-12-23)
 - **File:** `scripts/arena.py:119`, `scripts/train_ppo.py:577`
 - **Source:** Batch 3 PyTorch
 - **Description:** `opponent_models` cache never releases models.
 - **Impact:** 50 opponents = 25-100MB+ persistent allocation. CUDA OOM risk.
-- **Fix:** Implement LRU cache with max size.
+- **Fix:** Implemented `LRUPolicyCache` with max_size=20 and GPU memory cleanup on eviction.
 
 ---
 
-### HIGH-11: O(n²) Mech Collision Detection
-- **File:** `echelon/sim/sim.py:189-208`
+### HIGH-11: O(n^2) Mech Collision Detection
+**Status:** FIXED (2025-12-23)
+- **File:** `echelon/sim/sim.py`
 - **Source:** Batch 4 PyTorch
 - **Description:** `_collides_mechs` checks every other mech for AABB overlap.
 - **Impact:** At 40 mechs: ~1600 checks per physics substep. Bottleneck at scale.
-- **Fix:** Spatial hashing or grid bucketing for broad-phase.
+- **Fix:** Implemented `SpatialGrid` class for O(1) spatial hashing. Used in collision detection, explosion damage, and targeting.
 
 ---
 
-### HIGH-12: O(n²) Target Selection in Weapon Fire
-- **File:** `echelon/sim/sim.py:518-543,598-658,793-810`
+### HIGH-12: O(n^2) Target Selection in Weapon Fire
+**Status:** FIXED (2025-12-23)
+- **File:** `echelon/sim/sim.py`
 - **Source:** Batch 4 PyTorch
 - **Description:** Each weapon fire iterates all mechs to find targets.
 - **Impact:** 400 distance calculations per weapon type per tick.
-- **Fix:** Pre-filter by team, vectorize distance calculation.
+- **Fix:** Implemented `enemies_in_range()` using `SpatialGrid.query_nearby()` for O(1) target filtering.
 
 ---
 
 ### HIGH-13: Missing detach() in Rollout Collection
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:753,295`
 - **Source:** Batch 1 PyTorch
 - **Description:** Action tensors not detached before numpy conversion.
@@ -273,6 +293,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### HIGH-14: Checkpoint Loading Without strict=True
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:592,569`
 - **Source:** Batch 1 PyTorch
 - **Description:** `load_state_dict` called without strict mode.
@@ -282,6 +303,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### HIGH-15: Missing Inference Mode in Match Playback
+**Status:** OPEN
 - **File:** `echelon/arena/match.py:61-113`
 - **Source:** Batch 3 PyTorch
 - **Description:** Uses `@torch.no_grad()` instead of `@torch.inference_mode()`.
@@ -293,6 +315,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ## MEDIUM PRIORITY
 
 ### MED-1: Observation Normalization Issues
+**Status:** OPEN
 - **File:** `echelon/env/env.py:470,870,722`
 - **Source:** Batch 2 DRL
 - **Description:** Inconsistent normalization:
@@ -304,6 +327,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-2: Termination vs Truncation Semantics Wrong
+**Status:** OPEN
 - **File:** `echelon/env/env.py:1316-1360`
 - **Source:** Batch 2 DRL
 - **Description:** Zone control win sets BOTH `terminations` AND `truncations` to True.
@@ -313,6 +337,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-3: Dead Agent Reward Handling
+**Status:** OPEN
 - **File:** `echelon/env/env.py:1295-1297`
 - **Source:** Batch 4 DRL
 - **Description:** Dead agents get 0.0 reward for all remaining steps.
@@ -322,6 +347,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-4: Non-Deterministic Debris Placement
+**Status:** OPEN
 - **File:** `echelon/sim/sim.py:356`
 - **Source:** Batch 4 DRL
 - **Description:** Per-voxel debris type uses `self.rng.random()`.
@@ -331,6 +357,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-5: Heuristic Stuck Detection Frame Dependency
+**Status:** OPEN
 - **File:** `echelon/agents/heuristic.py:118-133`
 - **Source:** Batch 4 DRL
 - **Description:** Stuck counter uses decision step count, not time.
@@ -340,6 +367,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-6: Observable State Leaks Velocity During Shutdown
+**Status:** OPEN
 - **File:** `echelon/sim/sim.py:218-223`, `echelon/env/env.py:870`
 - **Source:** Batch 4 DRL
 - **Description:** Shutdown mechs can't control velocity but it's in observation.
@@ -349,6 +377,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-7: Arena Opponent Sampling is Uniform Random Only
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:575`, `scripts/arena.py:135`
 - **Source:** Batch 3 DRL
 - **Description:** No prioritized/curriculum opponent sampling.
@@ -358,15 +387,17 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-8: Conservative Score Too Aggressive
+**Status:** OPEN
 - **File:** `echelon/arena/league.py:189-190`
 - **Source:** Batch 3 DRL
-- **Description:** Uses μ-2σ for promotion ranking (2.5th percentile).
+- **Description:** Uses mu-2*sigma for promotion ranking (2.5th percentile).
 - **Impact:** Strong but uncertain candidates may not promote.
 - **Fix:** Make conservatism factor configurable.
 
 ---
 
 ### MED-9: LSTM State Not Reset When Opponent Pool Refreshes
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:867-871`
 - **Source:** Batch 3 DRL
 - **Description:** After `_arena_refresh_pool()`, no resample or LSTM reset.
@@ -376,6 +407,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-10: Redundant astype Calls Throughout
+**Status:** OPEN
 - **Files:** `echelon/env/env.py:467,470,870,946,1012-1013`
 - **Source:** Batch 2 PyTorch
 - **Description:** Defensive `astype(np.float32, copy=False)` when data is already float32.
@@ -385,24 +417,27 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-11: Telemetry Downsampling Not Cached
-- **File:** `echelon/env/env.py:647-671`
+**Status:** FIXED (2025-12-23)
+- **File:** `echelon/env/env.py`
 - **Source:** Batch 2 PyTorch
 - **Description:** Static terrain downsampling computed every `_obs()` call.
-- **Impact:** 16×16 loop with np.any() per step (terrain is static).
-- **Fix:** Cache `telemetry_flat` at reset.
+- **Impact:** 16x16 loop with np.any() per step (terrain is static).
+- **Fix:** Cached `telemetry_flat` at reset.
 
 ---
 
 ### MED-12: Occupancy Map Not Shared Across Agents
-- **File:** `echelon/env/env.py:558-601`
+**Status:** FIXED (2025-12-23)
+- **File:** `echelon/env/env.py`
 - **Source:** Batch 2 PyTorch
 - **Description:** `_local_map` computes `occupancy_2d` per agent.
-- **Impact:** 20 agents × ~100KB allocation per step.
-- **Fix:** Compute once in `_obs()` and pass to `_local_map`.
+- **Impact:** 20 agents x ~100KB allocation per step.
+- **Fix:** Computed once in `_obs()` and passed to `_local_map`.
 
 ---
 
 ### MED-13: Device Mismatch Risk in LSTM State
+**Status:** OPEN
 - **File:** `echelon/arena/match.py:77-81,97-98`
 - **Source:** Batch 3 PyTorch
 - **Description:** LSTM state created on `device` param, but policies may be on different devices.
@@ -412,6 +447,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-14: Numerical Epsilon Values Inconsistent
+**Status:** OPEN
 - **Files:** `sim.py:132,93,669,1000`, `los.py:37`, `heuristic.py:188`
 - **Source:** Batch 4 PyTorch
 - **Description:** Epsilon values range from 1e-6 to 1e-18 across codebase.
@@ -421,6 +457,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-15: _wrap_pi Duplicated
+**Status:** OPEN
 - **Files:** `sim.py:53`, `heuristic.py:14`
 - **Source:** Batch 4 PyTorch
 - **Description:** Same function defined in two files.
@@ -430,6 +467,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-16: No Gradient Clipping Diagnostics
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:926`
 - **Source:** Batch 1 DRL
 - **Description:** Gradient norm is clipped but actual norm never logged.
@@ -439,6 +477,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-17: Missing cuDNN Autotuner
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py` (missing)
 - **Source:** Batch 1 PyTorch
 - **Description:** No `torch.backends.cudnn.benchmark = True`.
@@ -448,6 +487,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### MED-18: Non-Atomic Checkpoint Saves
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:1070,1032`
 - **Source:** Batch 1 PyTorch
 - **Description:** `torch.save(ckpt, p)` is not atomic.
@@ -459,6 +499,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ## LOW PRIORITY
 
 ### LOW-1: eval_policy.py Missing no_grad Context
+**Status:** OPEN
 - **File:** `scripts/eval_policy.py:82`
 - **Source:** Batch 1 DRL
 - **Fix:** Wrap in `torch.no_grad()`.
@@ -466,6 +507,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-2: Contact Tuple Stores Unused dist
+**Status:** OPEN
 - **File:** `echelon/env/env.py:763-776`
 - **Source:** Batch 2 PyTorch
 - **Fix:** Remove redundant `dist` from tuple.
@@ -473,6 +515,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-3: Action Clipping In-Place May Modify Caller
+**Status:** OPEN
 - **File:** `echelon/env/env.py:1014`
 - **Source:** Batch 2 PyTorch
 - **Fix:** Make defensive copy before clipping.
@@ -480,6 +523,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-4: String Parsing in Hot Loop for Pack Index
+**Status:** OPEN
 - **File:** `sim.py:59-67`, `heuristic.py:18-26`
 - **Source:** Batch 4 PyTorch
 - **Fix:** Add `pack_id` field to MechState or cache results.
@@ -487,6 +531,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-5: Smoke LOS Check is O(n_clouds)
+**Status:** OPEN
 - **File:** `echelon/sim/sim.py:127-148`
 - **Source:** Batch 4 PyTorch
 - **Fix:** Filter dead clouds periodically, spatial hash if scales.
@@ -494,6 +539,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-6: Lists for Living Mechs Rebuilt Each Call
+**Status:** OPEN
 - **File:** `echelon/sim/sim.py:118-119`
 - **Source:** Batch 4 PyTorch
 - **Fix:** Cache and invalidate on death.
@@ -501,6 +547,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-7: Redundant np.linalg.norm Calls
+**Status:** OPEN
 - **Files:** `sim.py:668-674,1075-1081`
 - **Source:** Batch 4 PyTorch
 - **Fix:** Cache norm results within function.
@@ -508,6 +555,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-8: Float Casting Overhead
+**Status:** OPEN
 - **File:** `sim.py` (pervasive)
 - **Source:** Batch 4 PyTorch
 - **Fix:** Remove unnecessary `float()` casts.
@@ -515,6 +563,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-9: Acoustic Intensity Calculation Not Vectorized
+**Status:** OPEN
 - **File:** `echelon/env/env.py:692-722`
 - **Source:** Batch 2 PyTorch
 - **Fix:** Vectorize distance/intensity calculation.
@@ -522,6 +571,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-10: GAE Accumulation Could Use float64
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:226-249`
 - **Source:** Batch 1 PyTorch
 - **Fix:** Use double precision for long rollouts (>1000 steps).
@@ -529,6 +579,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-11: Optimizer State Cleanup on Device Transfer
+**Status:** OPEN
 - **File:** `scripts/train_ppo.py:156-160`
 - **Source:** Batch 1 PyTorch
 - **Fix:** Clear old device memory after transfer.
@@ -536,6 +587,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 ---
 
 ### LOW-12: Missing LSTM Weight Initialization
+**Status:** OPEN
 - **File:** `echelon/rl/model.py:40`
 - **Source:** Batch 1 PyTorch
 - **Fix:** Add explicit orthogonal init for LSTM weights.
@@ -561,7 +613,7 @@ action_np = action.cpu().numpy()  # Missing detach()
 10. CRIT-5: Resample opponent per episode
 11. CRIT-6: Two-phase rating updates
 12. HIGH-9: Cache model metadata
-13. HIGH-10: LRU opponent cache
+13. ~~HIGH-10: LRU opponent cache~~ DONE
 
 ### Phase 4: Environment/Reward (Day 4-5)
 14. HIGH-5: Add Gym space definitions
@@ -571,10 +623,10 @@ action_np = action.cpu().numpy()  # Missing detach()
 18. MED-3: Dead agent terminal rewards
 
 ### Phase 5: Performance (Week 2)
-19. HIGH-11: Spatial hash for collisions
-20. HIGH-12: Vectorize target selection
-21. MED-11: Cache telemetry
-22. MED-12: Share occupancy map
+19. ~~HIGH-11: Spatial hash for collisions~~ DONE
+20. ~~HIGH-12: Vectorize target selection~~ DONE
+21. ~~MED-11: Cache telemetry~~ DONE
+22. ~~MED-12: Share occupancy map~~ DONE
 
 ### Phase 6: Curriculum/Heuristic (Week 2-3)
 23. HIGH-8: Heuristic skill levels

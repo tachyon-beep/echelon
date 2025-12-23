@@ -1,78 +1,575 @@
+# Nav Graph Integration Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Integrate the existing NavGraph/Planner with the simulation so heuristic agents navigate intelligently and mechs don't walk into walls.
+
+**Architecture:** Cache the nav graph at env.reset(), wire it into HeuristicPolicy for waypoint-following, add optional nav-assist post-processing for movement actions to reduce "stuck" rates.
+
+**Tech Stack:** NumPy, existing `echelon/nav/` modules
+
 ---
-name: living-grid-nav-integration
-description: Integrated plan for Living Grid terrain and nav/planner
+
+## Task 1: Add NavGraph Caching to EchelonEnv
+
+**Files:**
+- Modify: `echelon/env/env.py`
+
+**Step 1: Add nav graph import and instance variable**
+
+In `echelon/env/env.py`, add import at top:
+
+```python
+from echelon.nav.graph import NavGraph
+from echelon.nav.planner import Planner
+```
+
+Add to `EchelonEnv.__init__()` after `self.world`:
+
+```python
+self.nav_graph: NavGraph | None = None
+self.nav_planner: Planner | None = None
+```
+
+**Step 2: Build nav graph in reset()**
+
+In `EchelonEnv.reset()`, after world generation and spawn clearing, add:
+
+```python
+# Build navigation graph
+self.nav_graph = NavGraph.build(
+    self.world,
+    clearance_z=4,  # Mech height ~20m = 4 voxels
+    mech_radius=1,  # Heavy mechs ~10m = 1 voxel radius
+)
+self.nav_planner = Planner(self.nav_graph)
+```
+
+**Step 3: Run existing tests**
+
+Run: `PYTHONPATH=. uv run pytest tests/unit/test_env*.py -v`
+Expected: All existing tests PASS (nav graph is additive)
+
+**Step 4: Commit**
+
+```bash
+git add echelon/env/env.py
+git commit -m "feat(nav): cache NavGraph in EchelonEnv.reset()"
+```
+
 ---
 
-# Plan
+## Task 2: Add Nav Graph Stats to Replay Metadata
 
-Deliver a versioned “Living Grid” 3D terrain pipeline and a navigation-graph/local-planner stack together, so every generated map is deterministically reproducible, provably traversable with the actual movement model, and playable without agents getting stuck or pathing into terrain.
+**Files:**
+- Modify: `echelon/env/env.py`
 
-## Requirements
+**Step 1: Add nav stats to world.meta**
 
-- Determinism: given the same seed + recipe, world voxels + validation fixups + nav graph are identical (hashable).
-- Playability: blue/red spawns can reach objective using the same traversal rules the sim uses.
-- Backward compatibility: legacy generator + current movement remain available via version/flags.
-- Performance: generation + nav build stay within a defined budget for default map sizes.
-- Debuggability: every replay can report generator version, recipe, fixups, and connectivity stats.
+In `EchelonEnv.reset()`, after building nav graph, add:
 
-## Complexity & Risk Assessment
+```python
+if self.world.meta is None:
+    self.world.meta = {}
+self.world.meta["nav"] = {
+    "node_count": len(self.nav_graph.nodes),
+    "edge_count": sum(len(n.edges) for n in self.nav_graph.nodes.values()),
+    "clearance_z": self.nav_graph.clearance_z,
+}
+```
 
-- **Living Grid pipeline (terrain + recipe + validation):** Complexity High; Risk High (core subsystem, determinism/connectivity/perf are brittle).
-- **Nav graph + local planner (stairs/ramps, multi-level):** Complexity High; Risk High (nav/physics mismatch, perf scaling, training/action-space implications).
-- **Combined package:** Very High complexity; High risk, but mitigable via strict versioning/flags, golden seeds + hash provenance, and a staged rollout starting with heuristic-only nav before touching RL behavior.
+**Step 2: Verify replay includes nav stats**
 
-## Scope
+Run: `PYTHONPATH=. uv run python scripts/smoke.py --episodes 1 --packs-per-team 1 --size 40 --mode full`
+Check output for nav stats in world metadata.
 
-- In: versioned terrain pipeline, recipe schema + reconstruction, 2.5D→3D connectivity validation, nav graph builder, local planner, optional nav-assist for movement.
-- Out: drones, full destructibility/falling/fluids, major RL action-space redesign (unless explicitly chosen later).
+**Step 3: Commit**
 
-## Files and Entry Points
+```bash
+git add echelon/env/env.py
+git commit -m "feat(nav): add nav graph stats to replay metadata"
+```
 
-- Terrain: `echelon/sim/world.py`, `echelon/gen/*`, `echelon/env/env.py`, `echelon/gen/validator.py`, `echelon/gen/recipe.py`, `echelon/gen/transforms.py`
-- Movement: `echelon/sim/sim.py`, `echelon/sim/mech.py`
-- New: `echelon/nav/*` (graph builder, planner, costs, caching)
-- Debug/tools: `scripts/terrain_audit.py`, `scripts/reproduce_from_replay.py`, optionally `viewer.html`
+---
 
-## Data Model / API Changes
+## Task 3: Create NavController for Waypoint Following
 
-- Add version/feature flags:
-  - `WorldConfig.generator_version` (e.g. `"v1_legacy"`, `"v2_living_grid"`)
-  - `EnvConfig.nav_mode` (e.g. `"off"`, `"assist"`, `"planner"` for heuristic)
-- Formalize traversal semantics used by both validator + nav:
-  - “walkable node” definition, step/ledge rules, per-class vertical traversal capability (jets vs stairs).
-- Extend `world.meta["recipe"]` and/or `build_recipe(...)` to include:
-  - generator id/version, transform, fixups, connectivity stats, and a nav-build signature/hash.
+**Files:**
+- Create: `echelon/nav/controller.py`
+- Create: `tests/unit/test_nav_controller.py`
 
-## Action Items
+**Step 1: Write failing test**
 
-- [ ] Audit + freeze current behavior: document current `VoxelWorld.generate`, current fixups (`ConnectivityValidator`), and current movement/collision constraints as the baseline contract.
-- [ ] Version the generator: wrap existing terrain as `v1_legacy` and introduce a `v2` pipeline interface that always emits a recipe + deterministic meta + voxel hash.
-- [ ] Recipe reconstruction: implement “build world from recipe” path and add a determinism harness (seed → recipe → voxels hash) with golden seeds.
-- [ ] Nav graph v0 (2.5D): add `echelon/nav/graph.py` that builds a traversability grid from current voxels (treat SOLID/SOLID_DEBRIS blocked; hazards as cost), and exposes spawn→objective path queries.
-- [ ] Local planner v0: implement A* over the nav graph + waypoint-following controller; wire it into `HeuristicPolicy` first (no RL changes yet).
-- [ ] Nav-assist (optional, minimal): add an env flag that post-processes movement intents to reduce “walk into wall” failures (e.g., waypoint projection / wall-slide), keeping the RL action space unchanged.
-- [ ] Unify validation with nav: use the nav graph as the source of truth for connectivity validation and fixups; make fixups write to `world.meta["fixups"]` deterministically.
-- [ ] Introduce multi-level primitives carefully: extend `v2` generator with a small set of 3D-safe features (ramps/stairs first), and extend nav graph to 3D nodes/edges that exactly match traversal semantics.
-- [ ] Align sim movement with traversal: either (a) extend movement/collision to support the same “step/ramp” transitions the nav allows, or (b) constrain generator primitives to what movement already supports; gate by `generator_version`.
-- [ ] Debug + observability: add `scripts/terrain_audit.py` outputs (voxel hash, recipe hash, fixups, path lengths/costs, nav node/edge counts) and optional viewer overlays for paths/waypoints.
-- [ ] Rollout plan: ship `v2` + nav behind flags; then flip defaults once determinism + connectivity + “stuck rate” targets are met.
+Create `tests/unit/test_nav_controller.py`:
 
-## Testing and Validation
+```python
+"""Tests for NavController waypoint following."""
+from __future__ import annotations
 
-- Determinism: golden seeds where `recipe.hashes.solid` and nav signature match across runs.
-- Connectivity: property-based “spawn↔objective reachable” for random seeds per generator version.
-- Movement regression: scenario tests for “planner can reach objective without collisions” in simplified maps.
-- Performance: `tests/performance` benchmarks for generation + nav build time at standard sizes.
+import numpy as np
+import pytest
 
-## Risks and Edge Cases
+from echelon.nav.controller import NavController, WaypointResult
 
-- Mismatch between nav “walkable” and sim AABB collision/vertical physics (most common source of “reachable in theory, stuck in practice”).
-- Determinism drift from RNG coupling or non-stable fixup ordering.
-- Nav build/pathfinding cost scaling with map size and 3D complexity; need caching and frequency limits.
-- Replay/schema churn and large metadata payloads if nav data is serialized naïvely.
 
-## Open Questions
+class TestNavController:
+    """Tests for NavController."""
 
-- Should RL remain continuous + nav-assist, or move to goal/waypoint actions (bigger training change)?
-- What vertical traversal should exist for each class (stairs for all vs jets for some vs no vertical for heavies)?
-- What are acceptable budgets (e.g., max generation+validation time at `100x100x20`, max per-step planner updates)?
+    def test_compute_steering_toward_waypoint(self):
+        """Controller should steer toward next waypoint."""
+        controller = NavController()
+
+        # Mech at origin, facing +X, waypoint at (10, 0)
+        mech_pos = np.array([0.0, 0.0, 0.0])
+        mech_yaw = 0.0  # Facing +X
+        waypoint = np.array([10.0, 0.0, 0.0])
+
+        result = controller.compute_steering(mech_pos, mech_yaw, waypoint)
+
+        assert result.forward > 0.5  # Should move forward
+        assert abs(result.yaw_rate) < 0.1  # Already facing target
+
+    def test_compute_steering_turn_required(self):
+        """Controller should turn when waypoint is to the side."""
+        controller = NavController()
+
+        # Mech at origin, facing +X, waypoint at (0, 10) (to the left)
+        mech_pos = np.array([0.0, 0.0, 0.0])
+        mech_yaw = 0.0  # Facing +X
+        waypoint = np.array([0.0, 10.0, 0.0])
+
+        result = controller.compute_steering(mech_pos, mech_yaw, waypoint)
+
+        assert result.yaw_rate > 0.3  # Should turn left (positive yaw)
+
+    def test_waypoint_reached_when_close(self):
+        """Controller should report waypoint reached when close."""
+        controller = NavController(arrival_threshold=2.0)
+
+        mech_pos = np.array([9.5, 0.0, 0.0])
+        waypoint = np.array([10.0, 0.0, 0.0])
+
+        result = controller.compute_steering(mech_pos, 0.0, waypoint)
+
+        assert result.reached is True
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `PYTHONPATH=. uv run pytest tests/unit/test_nav_controller.py -v`
+Expected: FAIL with ImportError
+
+**Step 3: Implement NavController**
+
+Create `echelon/nav/controller.py`:
+
+```python
+"""Waypoint-following controller for mech navigation."""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import numpy as np
+
+
+@dataclass
+class WaypointResult:
+    """Result of waypoint steering computation."""
+    forward: float  # [-1, 1] forward/backward
+    strafe: float   # [-1, 1] left/right
+    yaw_rate: float # [-1, 1] turn rate
+    reached: bool   # True if waypoint reached
+
+
+class NavController:
+    """
+    Simple waypoint-following controller.
+
+    Converts a target waypoint into movement commands.
+    """
+
+    def __init__(
+        self,
+        arrival_threshold: float = 3.0,
+        turn_gain: float = 2.0,
+        forward_gain: float = 1.0,
+    ):
+        self.arrival_threshold = arrival_threshold
+        self.turn_gain = turn_gain
+        self.forward_gain = forward_gain
+
+    def compute_steering(
+        self,
+        mech_pos: np.ndarray,
+        mech_yaw: float,
+        waypoint: np.ndarray,
+    ) -> WaypointResult:
+        """
+        Compute steering commands to reach waypoint.
+
+        Args:
+            mech_pos: Current mech position [x, y, z]
+            mech_yaw: Current mech heading in radians
+            waypoint: Target waypoint [x, y, z]
+
+        Returns:
+            WaypointResult with movement commands
+        """
+        # Vector to waypoint (2D, ignore Z)
+        dx = waypoint[0] - mech_pos[0]
+        dy = waypoint[1] - mech_pos[1]
+        dist = math.sqrt(dx * dx + dy * dy)
+
+        # Check arrival
+        if dist < self.arrival_threshold:
+            return WaypointResult(forward=0.0, strafe=0.0, yaw_rate=0.0, reached=True)
+
+        # Angle to waypoint
+        target_yaw = math.atan2(dy, dx)
+
+        # Angular error (wrapped to [-pi, pi])
+        yaw_error = target_yaw - mech_yaw
+        while yaw_error > math.pi:
+            yaw_error -= 2 * math.pi
+        while yaw_error < -math.pi:
+            yaw_error += 2 * math.pi
+
+        # Steering commands
+        yaw_rate = np.clip(yaw_error * self.turn_gain, -1.0, 1.0)
+
+        # Forward speed based on alignment (slow down when turning)
+        alignment = math.cos(yaw_error)
+        forward = np.clip(alignment * self.forward_gain, 0.0, 1.0)
+
+        # Strafe slightly to help with cornering
+        strafe = np.clip(math.sin(yaw_error) * 0.3, -1.0, 1.0)
+
+        return WaypointResult(
+            forward=float(forward),
+            strafe=float(strafe),
+            yaw_rate=float(yaw_rate),
+            reached=False,
+        )
+```
+
+**Step 4: Run tests**
+
+Run: `PYTHONPATH=. uv run pytest tests/unit/test_nav_controller.py -v`
+Expected: All tests PASS
+
+**Step 5: Commit**
+
+```bash
+git add echelon/nav/controller.py tests/unit/test_nav_controller.py
+git commit -m "feat(nav): add NavController for waypoint following"
+```
+
+---
+
+## Task 4: Integrate NavController with HeuristicPolicy
+
+**Files:**
+- Modify: `echelon/agents/heuristic.py`
+
+**Step 1: Add nav imports and path caching**
+
+At top of `echelon/agents/heuristic.py`, add:
+
+```python
+from echelon.nav.graph import NavGraph
+from echelon.nav.planner import Planner
+from echelon.nav.controller import NavController, WaypointResult
+```
+
+Add to `HeuristicPolicy.__init__()`:
+
+```python
+self.nav_controller = NavController(arrival_threshold=5.0)
+self._cached_paths: dict[str, list[tuple[int, int, int]]] = {}
+self._path_update_interval = 30  # Recompute every 30 decision steps
+self._step_counters: dict[str, int] = {}
+```
+
+**Step 2: Add path computation method**
+
+Add to `HeuristicPolicy`:
+
+```python
+def _get_nav_waypoint(
+    self,
+    mech: MechState,
+    goal_pos: np.ndarray,
+    nav_graph: NavGraph | None,
+    nav_planner: Planner | None,
+) -> np.ndarray | None:
+    """Get next waypoint from nav path, recomputing if needed."""
+    if nav_graph is None or nav_planner is None:
+        return None
+
+    mech_id = mech.id
+
+    # Update step counter
+    self._step_counters[mech_id] = self._step_counters.get(mech_id, 0) + 1
+
+    # Recompute path periodically or if no cached path
+    if (
+        mech_id not in self._cached_paths
+        or self._step_counters[mech_id] >= self._path_update_interval
+    ):
+        self._step_counters[mech_id] = 0
+
+        start_node = nav_graph.get_nearest_node((mech.pos[0], mech.pos[1], mech.pos[2]))
+        goal_node = nav_graph.get_nearest_node((goal_pos[0], goal_pos[1], goal_pos[2]))
+
+        if start_node is None or goal_node is None:
+            self._cached_paths[mech_id] = []
+            return None
+
+        path, stats = nav_planner.find_path(start_node, goal_node)
+        self._cached_paths[mech_id] = path
+
+    path = self._cached_paths.get(mech_id, [])
+    if not path:
+        return None
+
+    # Find next waypoint (skip nodes we've passed)
+    mech_pos_2d = np.array([mech.pos[0], mech.pos[1]])
+    for i, node_id in enumerate(path):
+        node = nav_graph.nodes[node_id]
+        node_pos_2d = np.array([node.pos[0], node.pos[1]])
+        dist = np.linalg.norm(node_pos_2d - mech_pos_2d)
+        if dist > 5.0:  # Found a waypoint ahead of us
+            return np.array([node.pos[0], node.pos[1], node.pos[2]])
+
+    # All waypoints passed, return goal
+    return goal_pos
+```
+
+**Step 3: Use nav waypoint in movement decision**
+
+In `HeuristicPolicy._decide_movement()` or equivalent, replace direct goal targeting with:
+
+```python
+# Get nav waypoint if available
+nav_waypoint = self._get_nav_waypoint(mech, goal_pos, nav_graph, nav_planner)
+if nav_waypoint is not None:
+    steering = self.nav_controller.compute_steering(mech.pos, mech.yaw, nav_waypoint)
+    action[0] = steering.forward
+    action[1] = steering.strafe
+    action[3] = steering.yaw_rate
+else:
+    # Fallback to direct targeting (existing logic)
+    ...
+```
+
+**Step 4: Update HeuristicPolicy.act() signature**
+
+Modify `HeuristicPolicy.act()` to accept optional nav parameters:
+
+```python
+def act(
+    self,
+    obs: dict[str, np.ndarray],
+    sim: Sim,
+    world: VoxelWorld,
+    nav_graph: NavGraph | None = None,
+    nav_planner: Planner | None = None,
+) -> dict[str, np.ndarray]:
+```
+
+**Step 5: Run tests**
+
+Run: `PYTHONPATH=. uv run pytest tests/ -v -x`
+Expected: Tests pass (may need to update test fixtures)
+
+**Step 6: Commit**
+
+```bash
+git add echelon/agents/heuristic.py
+git commit -m "feat(nav): integrate NavController with HeuristicPolicy"
+```
+
+---
+
+## Task 5: Wire Nav Graph to Heuristic in EchelonEnv
+
+**Files:**
+- Modify: `echelon/env/env.py`
+
+**Step 1: Pass nav graph to heuristic policy**
+
+In `EchelonEnv.step()`, where `HeuristicPolicy.act()` is called for opponent agents, update:
+
+```python
+red_actions = self.red_policy.act(
+    red_obs,
+    self.sim,
+    self.world,
+    nav_graph=self.nav_graph,
+    nav_planner=self.nav_planner,
+)
+```
+
+**Step 2: Run smoke test**
+
+Run: `PYTHONPATH=. uv run python scripts/smoke.py --episodes 1 --packs-per-team 1 --size 40 --mode full`
+Expected: Runs without errors, heuristic agents navigate
+
+**Step 3: Commit**
+
+```bash
+git add echelon/env/env.py
+git commit -m "feat(nav): wire NavGraph to HeuristicPolicy in env.step()"
+```
+
+---
+
+## Task 6: Add Nav Integration Tests
+
+**Files:**
+- Create: `tests/integration/test_nav_integration.py`
+
+**Step 1: Write integration test**
+
+Create `tests/integration/test_nav_integration.py`:
+
+```python
+"""Integration tests for nav graph with environment."""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from echelon.env.env import EchelonEnv
+from echelon.config import EnvConfig
+
+
+class TestNavIntegration:
+    """Test nav graph integration with EchelonEnv."""
+
+    @pytest.fixture
+    def env(self) -> EchelonEnv:
+        cfg = EnvConfig(
+            packs_per_team=1,
+            size_x=50,
+            size_y=50,
+            size_z=10,
+            seed=42,
+        )
+        return EchelonEnv(cfg)
+
+    def test_nav_graph_built_on_reset(self, env: EchelonEnv):
+        """Nav graph should be built during reset."""
+        env.reset(seed=42)
+
+        assert env.nav_graph is not None
+        assert env.nav_planner is not None
+        assert len(env.nav_graph.nodes) > 0
+
+    def test_nav_stats_in_metadata(self, env: EchelonEnv):
+        """Nav stats should appear in world metadata."""
+        env.reset(seed=42)
+
+        assert env.world is not None
+        assert env.world.meta is not None
+        assert "nav" in env.world.meta
+        assert env.world.meta["nav"]["node_count"] > 0
+
+    def test_spawns_reachable_via_nav(self, env: EchelonEnv):
+        """Both spawns should be able to reach center via nav graph."""
+        env.reset(seed=42)
+
+        assert env.nav_graph is not None
+        assert env.nav_planner is not None
+        assert env.sim is not None
+
+        # Get spawn positions
+        blue_mechs = [m for m in env.sim.mechs.values() if m.team == "blue"]
+        red_mechs = [m for m in env.sim.mechs.values() if m.team == "red"]
+
+        assert len(blue_mechs) > 0
+        assert len(red_mechs) > 0
+
+        # Center of map
+        center = np.array([
+            env.world.size_x * env.world.voxel_size_m / 2,
+            env.world.size_y * env.world.voxel_size_m / 2,
+            0.0,
+        ])
+
+        # Check blue can reach center
+        blue_pos = blue_mechs[0].pos
+        blue_node = env.nav_graph.get_nearest_node(tuple(blue_pos))
+        center_node = env.nav_graph.get_nearest_node(tuple(center))
+
+        if blue_node and center_node:
+            path, stats = env.nav_planner.find_path(blue_node, center_node)
+            assert stats.found, "Blue spawn should reach center"
+
+        # Check red can reach center
+        red_pos = red_mechs[0].pos
+        red_node = env.nav_graph.get_nearest_node(tuple(red_pos))
+
+        if red_node and center_node:
+            path, stats = env.nav_planner.find_path(red_node, center_node)
+            assert stats.found, "Red spawn should reach center"
+
+    def test_heuristic_uses_nav_graph(self, env: EchelonEnv):
+        """Heuristic policy should use nav graph when available."""
+        obs, _ = env.reset(seed=42)
+
+        # Run a few steps and check heuristic doesn't get stuck
+        stuck_count = 0
+        prev_positions: dict[str, np.ndarray] = {}
+
+        for _ in range(100):
+            # Random actions for blue team
+            actions = {}
+            for aid in env.blue_ids:
+                actions[aid] = np.zeros(env.ACTION_DIM, dtype=np.float32)
+                actions[aid][0] = 0.5  # Move forward
+
+            obs, rewards, terms, truncs, infos = env.step(actions)
+
+            # Check red mechs are moving (using heuristic with nav)
+            if env.sim is not None:
+                for m in env.sim.mechs.values():
+                    if m.team == "red" and m.hp > 0:
+                        pos = tuple(m.pos)
+                        if m.id in prev_positions:
+                            moved = np.linalg.norm(m.pos - prev_positions[m.id])
+                            if moved < 0.1:
+                                stuck_count += 1
+                        prev_positions[m.id] = m.pos.copy()
+
+        # Allow some stuck frames but not too many
+        assert stuck_count < 50, f"Too many stuck frames: {stuck_count}"
+```
+
+**Step 2: Run integration tests**
+
+Run: `PYTHONPATH=. uv run pytest tests/integration/test_nav_integration.py -v`
+Expected: All tests PASS
+
+**Step 3: Commit**
+
+```bash
+git add tests/integration/test_nav_integration.py
+git commit -m "test(nav): add nav graph integration tests"
+```
+
+---
+
+## Summary
+
+| Task | Description | Estimated Complexity |
+|------|-------------|---------------------|
+| 1 | Add NavGraph caching to EchelonEnv | Small |
+| 2 | Add nav stats to replay metadata | Trivial |
+| 3 | Create NavController for waypoint following | Medium |
+| 4 | Integrate NavController with HeuristicPolicy | Medium |
+| 5 | Wire nav graph to heuristic in env.step() | Small |
+| 6 | Add nav integration tests | Small |
+
+**Total: 6 tasks**
