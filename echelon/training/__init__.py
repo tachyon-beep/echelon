@@ -9,8 +9,10 @@ This package provides testable, maintainable components for PPO training:
 """
 
 from echelon.training.normalization import ReturnNormalizer, RunningMeanStd
+from echelon.training.rollout import RolloutBuffer
 
 __all__ = [
     "ReturnNormalizer",
+    "RolloutBuffer",
     "RunningMeanStd",
 ]
