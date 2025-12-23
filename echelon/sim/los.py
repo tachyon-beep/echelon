@@ -264,3 +264,66 @@ def raycast_voxels(
 
 def has_los(world: VoxelWorld, start_xyz: np.ndarray, end_xyz: np.ndarray) -> bool:
     return not raycast_voxels(world, start_xyz, end_xyz).blocked
+
+
+@numba.njit(parallel=True, cache=True)
+def _batch_raycast_numba(
+    voxels: np.ndarray,
+    blocks_los_lut: np.ndarray,
+    starts: np.ndarray,
+    ends: np.ndarray,
+) -> np.ndarray:
+    """
+    Batch raycast with parallel execution.
+
+    Args:
+        voxels: uint8[z, y, x] voxel grid
+        blocks_los_lut: bool[256] LUT for LOS blocking
+        starts: float64[N, 3] start positions (x, y, z)
+        ends: float64[N, 3] end positions (x, y, z)
+
+    Returns:
+        bool[N] - True if LOS is clear for each ray
+    """
+    n = starts.shape[0]
+    results = np.empty(n, dtype=np.bool_)
+
+    for i in numba.prange(n):
+        blocked, _, _, _ = _raycast_dda_numba(
+            voxels,
+            blocks_los_lut,
+            starts[i, 0], starts[i, 1], starts[i, 2],
+            ends[i, 0], ends[i, 1], ends[i, 2],
+            False,
+        )
+        results[i] = not blocked
+
+    return results
+
+
+def batch_has_los(
+    world: VoxelWorld,
+    starts: np.ndarray,
+    ends: np.ndarray,
+) -> np.ndarray:
+    """
+    Check line of sight for multiple rays in parallel.
+
+    Args:
+        world: The voxel world
+        starts: float32[N, 3] array of start positions (x, y, z)
+        ends: float32[N, 3] array of end positions (x, y, z)
+
+    Returns:
+        bool[N] array - True where LOS is clear
+    """
+    if starts.shape[0] == 0:
+        return np.zeros(0, dtype=np.bool_)
+
+    # Ensure correct dtype
+    starts_f = np.ascontiguousarray(starts, dtype=np.float64)
+    ends_f = np.ascontiguousarray(ends, dtype=np.float64)
+
+    blocks_los_lut = world.blocks_los_lut()
+
+    return _batch_raycast_numba(world.voxels, blocks_los_lut, starts_f, ends_f)

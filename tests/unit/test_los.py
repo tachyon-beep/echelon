@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from echelon.sim.world import VoxelWorld
-from echelon.sim.los import raycast_voxels, has_los, RaycastHit, _raycast_dda_pure, _raycast_dda_numba
+from echelon.sim.los import raycast_voxels, has_los, RaycastHit, _raycast_dda_pure, _raycast_dda_numba, batch_has_los
 
 
 @pytest.fixture
@@ -143,3 +143,68 @@ class TestNumbaConsistency:
 
             # Results must be identical
             assert result_pure == result_numba
+
+
+class TestBatchRaycast:
+    """Tests for batch raycasting API."""
+
+    def test_batch_has_los_empty_world(self, empty_world: VoxelWorld):
+        """Batch LOS in empty world should all be clear."""
+        starts = np.array([
+            [1.5, 1.5, 1.5],
+            [2.5, 2.5, 2.5],
+            [3.5, 3.5, 3.5],
+        ], dtype=np.float32)
+        ends = np.array([
+            [8.5, 8.5, 8.5],
+            [7.5, 7.5, 7.5],
+            [6.5, 6.5, 6.5],
+        ], dtype=np.float32)
+
+        results = batch_has_los(empty_world, starts, ends)
+
+        assert results.shape == (3,)
+        assert results.dtype == np.bool_
+        assert np.all(results)  # All clear
+
+    def test_batch_has_los_with_wall(self, wall_world: VoxelWorld):
+        """Batch LOS with wall blocking some rays."""
+        starts = np.array([
+            [2.5, 5.0, 5.0],  # Will hit wall
+            [2.5, 5.0, 5.0],  # Will hit wall
+            [6.5, 5.0, 5.0],  # After wall, clear to end
+        ], dtype=np.float32)
+        ends = np.array([
+            [8.5, 5.0, 5.0],  # Blocked
+            [4.0, 5.0, 5.0],  # Clear (before wall)
+            [9.5, 5.0, 5.0],  # Clear (both after wall)
+        ], dtype=np.float32)
+
+        results = batch_has_los(wall_world, starts, ends)
+
+        assert results[0] == False  # Blocked by wall
+        assert results[1] == True   # Before wall
+        assert results[2] == True   # After wall
+
+    def test_batch_has_los_matches_single(self, wall_world: VoxelWorld):
+        """Batch results must match individual has_los calls."""
+        rng = np.random.default_rng(456)
+        n_rays = 50
+
+        starts = rng.uniform(0, 10, size=(n_rays, 3)).astype(np.float32)
+        ends = rng.uniform(0, 10, size=(n_rays, 3)).astype(np.float32)
+
+        batch_results = batch_has_los(wall_world, starts, ends)
+
+        for i in range(n_rays):
+            single_result = has_los(wall_world, starts[i], ends[i])
+            assert batch_results[i] == single_result, f"Mismatch at ray {i}"
+
+    def test_batch_has_los_empty_input(self, empty_world: VoxelWorld):
+        """Empty batch should return empty array."""
+        starts = np.zeros((0, 3), dtype=np.float32)
+        ends = np.zeros((0, 3), dtype=np.float32)
+
+        results = batch_has_los(empty_world, starts, ends)
+
+        assert results.shape == (0,)
