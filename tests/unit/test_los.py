@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from echelon.sim.world import VoxelWorld
-from echelon.sim.los import raycast_voxels, has_los, RaycastHit
+from echelon.sim.los import raycast_voxels, has_los, RaycastHit, _raycast_dda_pure, _raycast_dda_numba
 
 
 @pytest.fixture
@@ -118,14 +118,28 @@ class TestNumbaConsistency:
     def test_numba_matches_pure_python_random_rays(self, random_world: VoxelWorld):
         """Fuzz test: Numba results must match pure Python on random rays."""
         rng = np.random.default_rng(123)
+        blocks_los_lut = random_world.blocks_los_lut()
 
         for _ in range(100):
             start = rng.uniform(0, 20, size=3)
             end = rng.uniform(0, 20, size=3)
 
-            result = raycast_voxels(random_world, start, end)
+            # Call both pure Python and Numba implementations directly
+            result_pure = _raycast_dda_pure(
+                random_world.voxels,
+                blocks_los_lut,
+                float(start[0]), float(start[1]), float(start[2]),
+                float(end[0]), float(end[1]), float(end[2]),
+                False,
+            )
 
-            # Result should be deterministic (same input = same output)
-            result2 = raycast_voxels(random_world, start, end)
-            assert result.blocked == result2.blocked
-            assert result.blocked_voxel == result2.blocked_voxel
+            result_numba = _raycast_dda_numba(
+                random_world.voxels,
+                blocks_los_lut,
+                float(start[0]), float(start[1]), float(start[2]),
+                float(end[0]), float(end[1]), float(end[2]),
+                False,
+            )
+
+            # Results must be identical
+            assert result_pure == result_numba
