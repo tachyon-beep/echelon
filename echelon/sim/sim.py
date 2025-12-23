@@ -56,6 +56,91 @@ def _wrap_pi(angle: float) -> float:
     return a
 
 
+class SpatialGrid:
+    """
+    Spatial hash grid for O(1) nearby mech queries (HIGH-11, HIGH-12).
+
+    Divides the world into cells of `cell_size` and maintains a mapping from
+    cell coordinates to lists of mech IDs. Enables efficient collision detection
+    and target selection by only checking mechs in nearby cells.
+    """
+
+    def __init__(self, size_x: int, size_y: int, cell_size: float = 10.0):
+        self.size_x = size_x
+        self.size_y = size_y
+        self.cell_size = cell_size
+        self.grid: dict[tuple[int, int], list[str]] = {}
+        self._mech_cells: dict[str, tuple[int, int]] = {}
+
+    def _cell_for_pos(self, pos: np.ndarray) -> tuple[int, int]:
+        cx = int(pos[0] / self.cell_size)
+        cy = int(pos[1] / self.cell_size)
+        return (cx, cy)
+
+    def clear(self) -> None:
+        self.grid.clear()
+        self._mech_cells.clear()
+
+    def insert(self, mech_id: str, pos: np.ndarray) -> None:
+        cell = self._cell_for_pos(pos)
+        self._mech_cells[mech_id] = cell
+        if cell not in self.grid:
+            self.grid[cell] = []
+        self.grid[cell].append(mech_id)
+
+    def update(self, mech_id: str, pos: np.ndarray) -> None:
+        """Update mech position in grid (only rebuilds if cell changed)."""
+        new_cell = self._cell_for_pos(pos)
+        old_cell = self._mech_cells.get(mech_id)
+        if old_cell == new_cell:
+            return
+        # Remove from old cell
+        if old_cell is not None and old_cell in self.grid:
+            try:
+                self.grid[old_cell].remove(mech_id)
+            except ValueError:
+                pass
+        # Add to new cell
+        self._mech_cells[mech_id] = new_cell
+        if new_cell not in self.grid:
+            self.grid[new_cell] = []
+        self.grid[new_cell].append(mech_id)
+
+    def query_nearby(self, pos: np.ndarray, radius: float) -> list[str]:
+        """Return mech IDs in cells overlapping the query circle."""
+        cx, cy = self._cell_for_pos(pos)
+        r_cells = int(math.ceil(radius / self.cell_size))
+        result: list[str] = []
+        for dx in range(-r_cells, r_cells + 1):
+            for dy in range(-r_cells, r_cells + 1):
+                cell = (cx + dx, cy + dy)
+                if cell in self.grid:
+                    result.extend(self.grid[cell])
+        return result
+
+    def query_cell_and_neighbors(self, pos: np.ndarray) -> list[str]:
+        """Return mech IDs in the cell containing pos and all 8 neighbors."""
+        cx, cy = self._cell_for_pos(pos)
+        result: list[str] = []
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                cell = (cx + dx, cy + dy)
+                if cell in self.grid:
+                    result.extend(self.grid[cell])
+        return result
+
+    def remove(self, mech_id: str) -> None:
+        """Remove a mech from the grid (call on death)."""
+        old_cell = self._mech_cells.pop(mech_id, None)
+        if old_cell is not None and old_cell in self.grid:
+            try:
+                self.grid[old_cell].remove(mech_id)
+            except ValueError:
+                pass
+            if not self.grid[old_cell]:
+                del self.grid[old_cell]
+
+
 def _pack_index(mech: MechState) -> int | None:
     _, sep, suffix = mech.mech_id.rpartition("_")
     if not sep:
@@ -107,6 +192,9 @@ class Sim:
         self.mechs: dict[str, MechState] = {}
         self.projectiles: list[Projectile] = []
         self.smoke_clouds: list[SmokeCloud] = []
+        # Spatial grid for O(1) nearby mech queries (HIGH-11, HIGH-12)
+        # Cell size ~10 voxels covers typical mech sizes + some margin
+        self._spatial_grid = SpatialGrid(world.size_x, world.size_y, cell_size=10.0)
 
     def reset(self, mechs: dict[str, MechState]) -> None:
         self.time_s = 0.0
@@ -114,6 +202,10 @@ class Sim:
         self.mechs = mechs
         self.projectiles = []
         self.smoke_clouds = []
+        # Rebuild spatial grid with initial mech positions
+        self._spatial_grid.clear()
+        for mech_id, mech in mechs.items():
+            self._spatial_grid.insert(mech_id, mech.pos)
 
     def living_mechs(self) -> list[MechState]:
         return [m for m in self.mechs.values() if m.alive]
@@ -121,13 +213,28 @@ class Sim:
     def team_alive(self, team: str) -> bool:
         return any(m.alive and m.team == team for m in self.mechs.values())
 
-    def has_los(self, start_xyz: np.ndarray, end_xyz: np.ndarray) -> bool:
-        # Check world voxels
-        if not has_los(self.world, start_xyz, end_xyz):
-            return False
-        
-        # Check smoke clouds
-        # A simple ray-sphere intersection check.
+    def enemies_in_range(self, shooter: MechState, max_range: float) -> list[MechState]:
+        """
+        Return enemy mechs within max_range of shooter (HIGH-12: uses spatial grid).
+
+        Uses spatial grid for O(1) cell lookup instead of O(n) full scan.
+        """
+        nearby_ids = self._spatial_grid.query_nearby(shooter.pos, max_range)
+        enemies: list[MechState] = []
+        for mech_id in nearby_ids:
+            target = self.mechs.get(mech_id)
+            if target is None or not target.alive or target.team == shooter.team:
+                continue
+            dist = float(np.linalg.norm(target.pos - shooter.pos))
+            if dist <= max_range:
+                enemies.append(target)
+        return enemies
+
+    def has_terrain_los(self, start_xyz: np.ndarray, end_xyz: np.ndarray) -> bool:
+        return has_los(self.world, start_xyz, end_xyz)
+
+    def has_smoke_los(self, start_xyz: np.ndarray, end_xyz: np.ndarray) -> bool:
+        # A simple ray-sphere intersection check for smoke clouds.
         p1 = start_xyz
         p2 = end_xyz
         d = p2 - p1
@@ -140,7 +247,6 @@ class Sim:
                 continue
             
             # Distance from point to line segment
-            # t = projection of (cloud.pos - p1) onto d
             v = cloud.pos - p1
             t = float(np.dot(v, d) / mag2)
             t = max(0.0, min(1.0, t))
@@ -148,8 +254,10 @@ class Sim:
             dist2 = float(np.dot(cloud.pos - closest, cloud.pos - closest))
             if dist2 <= cloud.radius * cloud.radius:
                 return False
-        
         return True
+
+    def has_los(self, start_xyz: np.ndarray, end_xyz: np.ndarray) -> bool:
+        return self.has_terrain_los(start_xyz, end_xyz) and self.has_smoke_los(start_xyz, end_xyz)
 
     def _ewar_levels(self, viewer: MechState) -> tuple[float, float]:
         # Returns (jam_level, eccm_level) in [0, 1], based on strongest nearby sources.
@@ -188,11 +296,15 @@ class Sim:
         return self.world.aabb_collides(aabb_min, aabb_max)
 
     def _collides_mechs(self, mech: MechState, pos: np.ndarray) -> bool:
+        """Check if mech at pos collides with any other mech (HIGH-11: uses spatial grid)."""
         hs = mech.half_size
         a_min = pos - hs
         a_max = pos + hs
-        for other in self.mechs.values():
-            if other.mech_id == mech.mech_id or not other.alive:
+        # Query only nearby mechs using spatial grid instead of all mechs
+        nearby_ids = self._spatial_grid.query_cell_and_neighbors(pos)
+        for other_id in nearby_ids:
+            other = self.mechs.get(other_id)
+            if other is None or other.mech_id == mech.mech_id or not other.alive:
                 continue
             o_hs = other.half_size
             b_min = other.pos - o_hs
@@ -327,6 +439,8 @@ class Sim:
         pos[2] = float(max(hs[2], pos[2])) # Ground floor
 
         mech.pos[:] = pos
+        # Update spatial grid for efficient collision/target queries (HIGH-11)
+        self._spatial_grid.update(mech.mech_id, pos)
 
     def _spawn_debris(self, mech: MechState) -> None:
         hs = mech.half_size
@@ -355,7 +469,7 @@ class Sim:
         # Roll once for the whole wreck or per-voxel? 
         # Whole wreck is cleaner tactically.
         is_solid_wreck = self.rng.random() < p_solid
-        voxel_type = VoxelWorld.KILLED_HULL if is_solid_wreck else VoxelWorld.HOT_DEBRIS
+        voxel_type = VoxelWorld.SOLID_DEBRIS if is_solid_wreck else VoxelWorld.DEBRIS_FIELD
 
         # Avoid embedding living mechs
         living_aabbs: list[tuple[np.ndarray, np.ndarray]] = []
@@ -422,11 +536,12 @@ class Sim:
         if target.hp <= 0.0 and target.alive:
             target.alive = False
             target.died = True
-            
+            self._spatial_grid.remove(target.mech_id)  # Clean up spatial grid
+
             shooter = self.mechs.get(shooter_id)
             if shooter:
                 shooter.kills += 1
-            
+
             events.append({"type": "kill", "shooter": shooter_id, "target": target.mech_id})
             self._spawn_debris(target)
         return events
@@ -462,8 +577,8 @@ class Sim:
             mech.hp -= dmg
             mech.took_damage += dmg
             events.extend(self._handle_death(mech, "lava"))
-        elif vox == VoxelWorld.HOT_DEBRIS:
-            # Hot debris is less lethal than lava but still hurts
+        elif vox == VoxelWorld.DEBRIS_FIELD:
+            # Debris field is less lethal than lava but still hurts.
             mech.heat = float(mech.heat + LAVA_HEAT_PER_S * 0.5 * self.dt)
             dmg = LAVA_DMG_PER_S * 0.25 * self.dt
             mech.hp -= dmg
@@ -475,8 +590,20 @@ class Sim:
         return events
 
     def _try_fire_laser(self, shooter: MechState, action: np.ndarray) -> list[dict]:
-        fire_laser = float(action[ActionIndex.FIRE_LASER]) > 0.0 and shooter.spec.name != "scout"
-        fire_flame = float(action[ActionIndex.FIRE_KINETIC]) > 0.0 if shooter.spec.name == "light" else False
+        if len(action) < ACTION_DIM:
+            return []
+        
+        # PRIMARY slot: Laser (Medium, Heavy)
+        # SECONDARY slot: Laser (Light)
+        fire_laser = False
+        fire_flame = False
+        
+        if shooter.spec.name in ("medium", "heavy"):
+            fire_laser = float(action[ActionIndex.PRIMARY]) > 0.0
+        elif shooter.spec.name == "light":
+            fire_laser = float(action[ActionIndex.SECONDARY]) > 0.0
+            # PRIMARY slot for light is FLAMER
+            fire_flame = float(action[ActionIndex.PRIMARY]) > 0.0
         
         if not (fire_laser or fire_flame) or shooter.shutdown or not shooter.alive:
             return []
@@ -513,15 +640,12 @@ class Sim:
                     if yaw_delta <= math.radians(spec.arc_deg * 0.5) and self.has_los(shooter.pos, focus.pos):
                         best = (dist, focus)
 
-            for target in self.mechs.values():
-                if not target.alive or target.team == shooter.team:
-                    continue
+            # HIGH-12: Use spatial grid to query only nearby enemies instead of all mechs
+            for target in self.enemies_in_range(shooter, spec.range_vox):
                 if best is not None and target is focus:
                     continue
                 delta = target.pos - shooter.pos
                 dist = float(np.linalg.norm(delta))
-                if dist > spec.range_vox:
-                    continue
                 # Simple yaw arc gate in XY.
                 yaw_delta = _angle_between_yaw(shooter.yaw, delta[:2])
                 if yaw_delta > math.radians(spec.arc_deg * 0.5):
@@ -587,10 +711,10 @@ class Sim:
     def _try_fire_missile(self, shooter: MechState, action: np.ndarray) -> list[dict]:
         if len(action) < ACTION_DIM:
             return []
-        fire = float(action[ActionIndex.FIRE_MISSILE]) > 0.0
-        # Only heavies have missiles
+        # SECONDARY slot: Missile (Heavy)
         if shooter.spec.name != "heavy":
             return []
+        fire = float(action[ActionIndex.SECONDARY]) > 0.0
         if not fire or shooter.shutdown or not shooter.alive:
             return []
         if shooter.missile_cooldown > 0.0:
@@ -623,16 +747,13 @@ class Sim:
                     if lt is not None:
                         best = (dist, focus, lt)
 
-        for target in self.mechs.values():
-            if not target.alive or target.team == shooter.team:
-                continue
+        # HIGH-12: Use spatial grid to query only nearby enemies instead of all mechs
+        for target in self.enemies_in_range(shooter, MISSILE.range_vox):
             if best is not None and target is focus:
                 continue
             delta = target.pos - shooter.pos
             dist = float(np.linalg.norm(delta))
-            if dist > MISSILE.range_vox:
-                continue
-            
+
             # Lock check: Needs LOS OR Painted
             yaw_delta = _angle_between_yaw(shooter.yaw, delta[:2])
             if yaw_delta > math.radians(MISSILE.arc_deg * 0.5):
@@ -690,10 +811,11 @@ class Sim:
         ]
 
     def _try_fire_smoke(self, shooter: MechState, action: np.ndarray) -> list[dict]:
-        if shooter.spec.name != "light":
+        if len(action) < ACTION_DIM:
             return []
         
-        fire = float(action[ActionIndex.FIRE_MISSILE]) > 0.0
+        # SPECIAL slot: Smoke (Universal)
+        fire = float(action[ActionIndex.SPECIAL]) > 0.0
         if not fire or shooter.shutdown or not shooter.alive:
             return []
         if shooter.missile_cooldown > 0.0:
@@ -749,10 +871,15 @@ class Sim:
     def _try_paint(self, shooter: MechState, action: np.ndarray) -> list[dict]:
         if len(action) < ACTION_DIM:
             return []
-        paint = float(action[ActionIndex.PAINT]) > 0.0
-        # Only scouts have painter
-        if shooter.spec.name != "scout":
-            return []
+        
+        paint = False
+        if shooter.spec.name == "scout":
+            # PRIMARY slot for Scout
+            paint = float(action[ActionIndex.PRIMARY]) > 0.0
+        elif shooter.spec.name in ("light", "medium"):
+            # TERTIARY slot for others
+            paint = float(action[ActionIndex.TERTIARY]) > 0.0
+        
         if not paint or shooter.shutdown or not shooter.alive:
             return []
         if shooter.painter_cooldown > 0.0:
@@ -773,16 +900,13 @@ class Sim:
                 if yaw_delta <= math.radians(PAINTER.arc_deg * 0.5) and self.has_los(shooter.pos, focus.pos):
                     best = (dist, focus)
 
-        for target in self.mechs.values():
-            if not target.alive or target.team == shooter.team:
-                continue
+        # HIGH-12: Use spatial grid to query only nearby enemies instead of all mechs
+        for target in self.enemies_in_range(shooter, PAINTER.range_vox):
             if best is not None and target is focus:
                 continue
             delta = target.pos - shooter.pos
             dist = float(np.linalg.norm(delta))
-            if dist > PAINTER.range_vox:
-                continue
-            
+
             yaw_delta = _angle_between_yaw(shooter.yaw, delta[:2])
             if yaw_delta > math.radians(PAINTER.arc_deg * 0.5):
                 continue
@@ -824,7 +948,8 @@ class Sim:
         if spec is None:
             return []
 
-        fire = float(action[ActionIndex.FIRE_KINETIC]) > 0.0
+        # TERTIARY slot: Gauss (Heavy), Autocannon (Medium)
+        fire = float(action[ActionIndex.TERTIARY]) > 0.0
         if not fire or shooter.shutdown or not shooter.alive or shooter.fallen_time > 0:
             return []
         if shooter.kinetic_cooldown > 0.0:
@@ -849,17 +974,17 @@ class Sim:
                     target_pos = focus.pos
                     best_dist = dist
         
-        for t in self.mechs.values():
-            if t.team != shooter.team and t.alive:
-                if focus is not None and t is focus:
-                    continue
-                delta = t.pos - shooter.pos
-                dist = np.linalg.norm(delta)
-                if dist < best_dist:
-                    yaw_err = _angle_between_yaw(shooter.yaw, delta[:2])
-                    if yaw_err < 0.1: # Tight cone
-                        target_pos = t.pos
-                        best_dist = dist
+        # HIGH-12: Use spatial grid to query only nearby enemies instead of all mechs
+        for t in self.enemies_in_range(shooter, spec.range_vox):
+            if focus is not None and t is focus:
+                continue
+            delta = t.pos - shooter.pos
+            dist = float(np.linalg.norm(delta))
+            if dist < best_dist:
+                yaw_err = _angle_between_yaw(shooter.yaw, delta[:2])
+                if yaw_err < 0.1:  # Tight cone
+                    target_pos = t.pos
+                    best_dist = dist
         
         start_pos = shooter.pos.copy() + np.array([0, 0, shooter.half_size[2]*0.8], dtype=np.float32)
         
@@ -910,14 +1035,17 @@ class Sim:
 
     def _explode(self, pos: np.ndarray, proj: Projectile, exclude_mech: MechState | None = None) -> list[dict]:
         events = []
-        for m in self.mechs.values():
-            if not m.alive:
+        # HIGH-12: Use spatial grid for splash damage radius check
+        nearby_ids = self._spatial_grid.query_nearby(pos, proj.splash_rad)
+        for mech_id in nearby_ids:
+            m = self.mechs.get(mech_id)
+            if m is None or not m.alive:
                 continue
             if exclude_mech and m is exclude_mech:
                 continue
-            
-            dist = np.linalg.norm(m.pos - pos)
-            
+
+            dist = float(np.linalg.norm(m.pos - pos))
+
             if dist <= proj.splash_rad:
                 # Terrain occlusion: splash damage should not pass through solid voxels.
                 if raycast_voxels(self.world, pos, m.pos).blocked:

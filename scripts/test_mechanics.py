@@ -53,9 +53,9 @@ def test_indirect_fire():
     
     sim.reset({"blue_0": heavy, "blue_1": painter, "red_0": enemy})
 
-    # Action to fire missile: [..., missile=1.0, ...]
+    # Action to fire missile: SECONDARY slot for heavy
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
-    fire_action[ActionIndex.FIRE_MISSILE] = 1.0 # Missile
+    fire_action[ActionIndex.SECONDARY] = 1.0 # Missile
 
     # 1. Try fire without LOS or Paint
     events = sim._try_fire_missile(heavy, fire_action)
@@ -93,7 +93,7 @@ def test_missile_arc_blocks_rear_shots():
     sim.reset({"blue_0": heavy, "blue_1": painter, "red_0": enemy})
 
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
-    fire_action[ActionIndex.FIRE_MISSILE] = 1.0  # Missile
+    fire_action[ActionIndex.SECONDARY] = 1.0  # Missile
 
     events = sim._try_fire_missile(heavy, fire_action)
     assert len(events) == 0, "Paint should not bypass missile firing arc"
@@ -117,7 +117,7 @@ def test_paint_lock_is_pack_scoped():
     sim.reset({"blue_0": heavy, "blue_10": painter_other_pack, "red_0": enemy})
 
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
-    fire_action[ActionIndex.FIRE_MISSILE] = 1.0  # Missile
+    fire_action[ActionIndex.SECONDARY] = 1.0  # Missile
 
     events = sim._try_fire_missile(heavy, fire_action)
     assert len(events) == 0, "Paint from a different pack should not grant indirect lock"
@@ -154,7 +154,7 @@ def test_autocannon_auto_pitch():
     sim.reset({"medium": medium, "enemy": enemy})
 
     action = np.zeros(ACTION_DIM, dtype=np.float32)
-    action[ActionIndex.FIRE_KINETIC] = 1.0  # Kinetic slot (AC for medium)
+    action[ActionIndex.TERTIARY] = 1.0  # Kinetic slot  # Kinetic slot (AC for medium)
     events = sim._try_fire_kinetic(medium, action)
     assert len(events) == 1
     assert len(sim.projectiles) == 1
@@ -212,7 +212,7 @@ def test_gauss_projectile_does_not_tunnel_through_wall():
     assert not has_los(world, heavy.pos, enemy.pos), "Wall should block LOS in this setup"
 
     action = np.zeros(ACTION_DIM, dtype=np.float32)
-    action[ActionIndex.FIRE_KINETIC] = 1.0  # Gauss for heavy
+    action[ActionIndex.TERTIARY] = 1.0  # Kinetic slot  # Gauss for heavy
     events = sim._try_fire_kinetic(heavy, action)
     assert len(events) == 1
     assert len(sim.projectiles) == 1

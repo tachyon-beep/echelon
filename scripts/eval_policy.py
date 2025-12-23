@@ -41,7 +41,7 @@ def main() -> None:
 
     device = resolve_device(args.device)
     print(f"device={device} cuda_available={torch.cuda.is_available()} torch={torch.__version__}")
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)  # TODO: migrate to weights_only=True after adding safe globals
     env_cfg_dict = dict(ckpt["env_cfg"])
     world = WorldConfig(**env_cfg_dict["world"])
     env_cfg = EnvConfig(

@@ -23,98 +23,97 @@ def raycast_voxels(
 ) -> RaycastHit:
     """
     Fast voxel traversal (3D DDA) from start to end.
-
-    Notes:
-    - The start voxel is not treated as a blocker; only intervening voxels.
-    - The end voxel is ignored by default, but can be included via include_end=True.
-    - Out-of-bounds is treated as blocked.
+    Optimized for speed in pure Python.
     """
-    start = np.asarray(start_xyz, dtype=np.float64)
-    end = np.asarray(end_xyz, dtype=np.float64)
-    direction = end - start
-    length = float(np.linalg.norm(direction))
+    # Use float64 for DDA to avoid precision drift
+    start_x, start_y, start_z = float(start_xyz[0]), float(start_xyz[1]), float(start_xyz[2])
+    end_x_f, end_y_f, end_z_f = float(end_xyz[0]), float(end_xyz[1]), float(end_xyz[2])
+    
+    dx = end_x_f - start_x
+    dy = end_y_f - start_y
+    dz = end_z_f - start_z
+    
+    length = math.sqrt(dx*dx + dy*dy + dz*dz)
     if length <= 1e-9:
         return RaycastHit(blocked=False, blocked_voxel=None)
 
-    direction /= length
+    # Unit direction
+    ux, uy, uz = dx/length, dy/length, dz/length
 
-    x = int(math.floor(start[0]))
-    y = int(math.floor(start[1]))
-    z = int(math.floor(start[2]))
-    end_x = int(math.floor(end[0]))
-    end_y = int(math.floor(end[1]))
-    end_z = int(math.floor(end[2]))
+    # Current voxel coordinates
+    x, y, z = int(math.floor(start_x)), int(math.floor(start_y)), int(math.floor(start_z))
+    end_x, end_y, end_z = int(math.floor(end_x_f)), int(math.floor(end_y_f)), int(math.floor(end_z_f))
 
-    step_x = 1 if direction[0] > 0 else (-1 if direction[0] < 0 else 0)
-    step_y = 1 if direction[1] > 0 else (-1 if direction[1] < 0 else 0)
-    step_z = 1 if direction[2] > 0 else (-1 if direction[2] < 0 else 0)
+    step_x = 1 if ux > 0 else (-1 if ux < 0 else 0)
+    step_y = 1 if uy > 0 else (-1 if uy < 0 else 0)
+    step_z = 1 if uz > 0 else (-1 if uz < 0 else 0)
 
-    inv_x = 1.0 / direction[0] if step_x != 0 else math.inf
-    inv_y = 1.0 / direction[1] if step_y != 0 else math.inf
-    inv_z = 1.0 / direction[2] if step_z != 0 else math.inf
-    t_delta_x = abs(inv_x)
-    t_delta_y = abs(inv_y)
-    t_delta_z = abs(inv_z)
+    t_delta_x = abs(1.0 / ux) if ux != 0 else 1e30
+    t_delta_y = abs(1.0 / uy) if uy != 0 else 1e30
+    t_delta_z = abs(1.0 / uz) if uz != 0 else 1e30
 
-    if step_x > 0:
-        next_boundary_x = (x + 1.0)
-        t_max_x = (next_boundary_x - start[0]) * abs(inv_x)
-    elif step_x < 0:
-        next_boundary_x = (x * 1.0)
-        t_max_x = (start[0] - next_boundary_x) * abs(inv_x)
-    else:
-        t_max_x = math.inf
+    if step_x > 0: t_max_x = (x + 1.0 - start_x) * t_delta_x
+    elif step_x < 0: t_max_x = (start_x - x) * t_delta_x
+    else: t_max_x = 1e30
 
-    if step_y > 0:
-        next_boundary_y = (y + 1.0)
-        t_max_y = (next_boundary_y - start[1]) * abs(inv_y)
-    elif step_y < 0:
-        next_boundary_y = (y * 1.0)
-        t_max_y = (start[1] - next_boundary_y) * abs(inv_y)
-    else:
-        t_max_y = math.inf
+    if step_y > 0: t_max_y = (y + 1.0 - start_y) * t_delta_y
+    elif step_y < 0: t_max_y = (start_y - y) * t_delta_y
+    else: t_max_y = 1e30
 
-    if step_z > 0:
-        next_boundary_z = (z + 1.0)
-        t_max_z = (next_boundary_z - start[2]) * abs(inv_z)
-    elif step_z < 0:
-        next_boundary_z = (z * 1.0)
-        t_max_z = (start[2] - next_boundary_z) * abs(inv_z)
-    else:
-        t_max_z = math.inf
+    if step_z > 0: t_max_z = (z + 1.0 - start_z) * t_delta_z
+    elif step_z < 0: t_max_z = (start_z - z) * t_delta_z
+    else: t_max_z = 1e30
 
-    start_voxel = (x, y, z)
-    end_voxel = (end_x, end_y, end_z)
+    # Cache world properties
+    voxels = world.voxels
+    sz, sy, sx = voxels.shape
+    # Use a pre-calculated blocks_los LUT for faster access
+    blocks_los_lut = world.blocks_los_lut()
 
-    # Bound the number of steps: segment length in voxels can't exceed this much.
-    max_steps = int(length * 4) + world.size_x + world.size_y + world.size_z + 8
+    # Pre-calculate termination voxel
+    # Loop limit to avoid infinite loops
+    max_steps = int(length * 2) + sx + sy + sz + 2
+    
     for _ in range(max_steps):
-        if (x, y, z) == end_voxel:
+        if x == end_x and y == end_y and z == end_z:
+            if not include_end:
+                return RaycastHit(blocked=False, blocked_voxel=None)
+            # Check end voxel if requested
+            if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz:
+                if blocks_los_lut[voxels[z, y, x]]:
+                    return RaycastHit(blocked=True, blocked_voxel=(x, y, z))
             return RaycastHit(blocked=False, blocked_voxel=None)
 
-        # Step to next voxel boundary.
-        if t_max_x <= t_max_y and t_max_x <= t_max_z:
-            x += step_x
-            t_max_x += t_delta_x
-        elif t_max_y <= t_max_z:
-            y += step_y
-            t_max_y += t_delta_y
+        if t_max_x < t_max_y:
+            if t_max_x < t_max_z:
+                x += step_x
+                t_max_x += t_delta_x
+            else:
+                z += step_z
+                t_max_z += t_delta_z
         else:
-            z += step_z
-            t_max_z += t_delta_z
+            if t_max_y < t_max_z:
+                y += step_y
+                t_max_y += t_delta_y
+            else:
+                z += step_z
+                t_max_z += t_delta_z
 
-        current = (x, y, z)
-        if current == start_voxel:
-            continue
-        if (not include_end) and current == end_voxel:
-            continue
-        
+        # Out of bounds check
+        if not (0 <= x < sx and 0 <= y < sy and 0 <= z < sz):
+            # If we reached the end voxel but it's out of bounds, we're done
+            if x == end_x and y == end_y and z == end_z:
+                return RaycastHit(blocked=False, blocked_voxel=None)
+            return RaycastHit(blocked=True, blocked_voxel=None)
+
+        # Ignore end voxel check if not requested
+        if (not include_end) and x == end_x and y == end_y and z == end_z:
+            return RaycastHit(blocked=False, blocked_voxel=None)
+
         # Check if this voxel type blocks LOS
-        v_id = world.get_voxel(x, y, z)
-        if world.MATERIAL_PROPS.get(v_id, {}).get("blocks_los", False):
-            return RaycastHit(blocked=True, blocked_voxel=current)
+        if blocks_los_lut[voxels[z, y, x]]:
+            return RaycastHit(blocked=True, blocked_voxel=(x, y, z))
 
-    # If we somehow failed to reach the end, treat as blocked for safety.
     return RaycastHit(blocked=True, blocked_voxel=None)
 
 

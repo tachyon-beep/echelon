@@ -30,6 +30,7 @@ class MechClassConfig:
     leg_hp: float
     heat_cap: float
     heat_dissipation: float
+    tonnage: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -141,8 +142,8 @@ SUPPRESS_DURATION_S = 1.2
 SUPPRESS_REGEN_SCALE = 0.25
 
 # Electronic warfare: ECM reduces sensor quality; ECCM restores it.
-ECM_RADIUS_VOX = 18.0
-ECCM_RADIUS_VOX = 18.0
+ECM_RADIUS_VOX = 50.0
+ECCM_RADIUS_VOX = 50.0
 ECM_WEIGHT = 0.85
 ECCM_WEIGHT = 0.65
 SENSOR_QUALITY_MIN = 0.25

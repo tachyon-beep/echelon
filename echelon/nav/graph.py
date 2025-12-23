@@ -40,25 +40,21 @@ class NavGraph:
         sx, sy, sz = world.size_x, world.size_y, world.size_z
         
         # Build a comprehensive collision mask based on MATERIAL_PROPS
-        collides_mask = np.zeros_like(world.voxels, dtype=bool)
-        for v_id, props in world.MATERIAL_PROPS.items():
-            if props.get("collides", False):
-                collides_mask |= (world.voxels == v_id)
+        collides_mask = world.collides_mask
         
-        # Obstacle Inflation (Footprint check)
         def _is_blocked_xy(x: int, y: int, z_floor: int) -> bool:
-            for dy in range(-mech_radius, mech_radius + 1):
-                for dx in range(-mech_radius, mech_radius + 1):
-                    nx, ny = x + dx, y + dy
-                    if not (0 <= nx < sx and 0 <= ny < sy):
-                        return True
-                    
-                    for k in range(1, clearance_z + 1):
-                        iz = z_floor + k
-                        if iz >= sz: break
-                        if collides_mask[iz, ny, nx]:
-                            return True
-            return False
+            # Bounds check for the whole footprint
+            if x - mech_radius < 0 or x + mech_radius >= sx or y - mech_radius < 0 or y + mech_radius >= sy:
+                return True
+            
+            # Check Z band
+            z_start = z_floor + 1
+            z_end = min(sz, z_start + clearance_z)
+            if z_start >= sz: return False
+            
+            # Slice check
+            region = collides_mask[z_start:z_end, y-mech_radius:y+mech_radius+1, x-mech_radius:x+mech_radius+1]
+            return np.any(region)
 
         # Iterate all columns
         for y in range(sy):
@@ -68,8 +64,9 @@ class NavGraph:
                     graph._add_node((-1, y, x), world.voxel_size_m)
                     
                 # Check voxel layers
+                column = collides_mask[:, y, x]
                 for z in range(sz - 1):
-                    if not collides_mask[z, y, x]:
+                    if not column[z]:
                         continue
                     if not _is_blocked_xy(x, y, z):
                         graph._add_node((z, y, x), world.voxel_size_m)

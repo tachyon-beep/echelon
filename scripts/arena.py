@@ -7,7 +7,6 @@ import random
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any
 
 import torch
 
@@ -17,8 +16,36 @@ if str(ROOT) not in sys.path:
 
 from echelon.arena.league import League
 from echelon.arena.glicko2 import GameResult
-from echelon.arena.match import load_policy, play_match
+from echelon.arena.match import load_policy, play_match, LoadedPolicy
 from echelon.config import EnvConfig
+
+
+class LRUPolicyCache:
+    """LRU cache for opponent policies to prevent OOM (HIGH-10)."""
+
+    def __init__(self, max_size: int = 10):
+        self.max_size = max(1, max_size)
+        self._cache: dict[str, LoadedPolicy] = {}
+        self._order: list[str] = []
+
+    def get(self, key: str) -> LoadedPolicy | None:
+        if key in self._cache:
+            self._order.remove(key)
+            self._order.append(key)
+            return self._cache[key]
+        return None
+
+    def put(self, key: str, policy: LoadedPolicy) -> None:
+        if key in self._cache:
+            self._order.remove(key)
+        elif len(self._cache) >= self.max_size:
+            # Evict least recently used with proper GPU memory cleanup
+            evict_key = self._order.pop(0)
+            evicted = self._cache.pop(evict_key)
+            evicted.model.cpu()  # Move to CPU to free GPU memory
+            del evicted
+        self._cache[key] = policy
+        self._order.append(key)
 
 
 def resolve_device(device_arg: str) -> torch.device:
@@ -115,15 +142,17 @@ def cmd_eval_candidate(args: argparse.Namespace) -> None:
     if not pool:
         raise SystemExit("no opponents available (need commanders/candidates in league)")
 
-    # Cache opponent policies by entry id.
-    opponent_models: dict[str, Any] = {}
+    # LRU cache for opponent policies to prevent OOM (HIGH-10)
+    opponent_cache = LRUPolicyCache(max_size=20)
 
-    def get_opponent(entry_id: str):
-        if entry_id in opponent_models:
-            return opponent_models[entry_id]
+    def get_opponent(entry_id: str) -> LoadedPolicy:
+        cached = opponent_cache.get(entry_id)
+        if cached is not None:
+            return cached
         entry = league.entries[entry_id]
-        opponent_models[entry_id] = load_policy(Path(entry.ckpt_path), device=device)
-        return opponent_models[entry_id]
+        policy = load_policy(Path(entry.ckpt_path), device=device)
+        opponent_cache.put(entry_id, policy)
+        return policy
 
     matches = int(args.matches)
     results: dict[str, list[GameResult]] = {}

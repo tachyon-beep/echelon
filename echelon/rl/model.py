@@ -6,8 +6,13 @@ import torch
 from torch import nn
 
 
+# Epsilon for numerical stability in tanh squashing (consistent throughout)
+TANH_EPS = 1e-6
+
+
 def _atanh(x: torch.Tensor) -> torch.Tensor:
-    x = torch.clamp(x, -0.999, 0.999)
+    # Clamp to avoid atanh(±1) = ±inf; use 1 - TANH_EPS for consistency
+    x = torch.clamp(x, -1.0 + TANH_EPS, 1.0 - TANH_EPS)
     return 0.5 * (torch.log1p(x) - torch.log1p(-x))
 
 
@@ -96,8 +101,14 @@ class ActorCriticLSTM(nn.Module):
             action = action.float()
             u = _atanh(action)
 
-        logprob = dist.log_prob(u).sum(-1) - torch.log(1.0 - action.pow(2) + 1e-6).sum(-1)
-        entropy = dist.entropy().sum(-1)
+        # Log-prob with Jacobian correction for tanh squashing
+        log_jacobian = torch.log(1.0 - action.pow(2) + TANH_EPS).sum(-1)
+        logprob = dist.log_prob(u).sum(-1) - log_jacobian
+
+        # Entropy with squashing correction: H(tanh(u)) = H(u) + E[log|det(J)|]
+        # Since log|det(J)| = log(1 - tanh(u)^2).sum(), and this is negative,
+        # the true entropy is less than Gaussian entropy.
+        entropy = dist.entropy().sum(-1) + log_jacobian
         value = self.critic(y).squeeze(-1)
         return action, logprob, entropy, value, next_state
 

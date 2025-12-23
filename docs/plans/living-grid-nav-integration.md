@@ -48,7 +48,7 @@ Deliver a versioned “Living Grid” 3D terrain pipeline and a navigation-graph
 - [ ] Audit + freeze current behavior: document current `VoxelWorld.generate`, current fixups (`ConnectivityValidator`), and current movement/collision constraints as the baseline contract.
 - [ ] Version the generator: wrap existing terrain as `v1_legacy` and introduce a `v2` pipeline interface that always emits a recipe + deterministic meta + voxel hash.
 - [ ] Recipe reconstruction: implement “build world from recipe” path and add a determinism harness (seed → recipe → voxels hash) with golden seeds.
-- [ ] Nav graph v0 (2.5D): add `echelon/nav/graph.py` that builds a traversability grid from current voxels (treat SOLID/KILLED_HULL blocked; hazards as cost), and exposes spawn→objective path queries.
+- [ ] Nav graph v0 (2.5D): add `echelon/nav/graph.py` that builds a traversability grid from current voxels (treat SOLID/SOLID_DEBRIS blocked; hazards as cost), and exposes spawn→objective path queries.
 - [ ] Local planner v0: implement A* over the nav graph + waypoint-following controller; wire it into `HeuristicPolicy` first (no RL changes yet).
 - [ ] Nav-assist (optional, minimal): add an env flag that post-processes movement intents to reduce “walk into wall” failures (e.g., waypoint projection / wall-slide), keeping the RL action space unchanged.
 - [ ] Unify validation with nav: use the nav graph as the source of truth for connectivity validation and fixups; make fixups write to `world.meta["fixups"]` deterministically.

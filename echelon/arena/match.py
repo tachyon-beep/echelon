@@ -36,14 +36,19 @@ def _env_cfg_from_checkpoint(ckpt: dict[str, Any]) -> EnvConfig:
 
 def load_policy(ckpt_path: Path, *, device: torch.device) -> LoadedPolicy:
     ckpt_path = ckpt_path.resolve()
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)  # TODO: migrate to weights_only=True after adding safe globals
     env_cfg = _env_cfg_from_checkpoint(ckpt)
 
-    # Build env to infer obs_dim.
-    env = EchelonEnv(env_cfg)
-    obs, _ = env.reset(seed=int(env_cfg.seed or 0))
-    obs_dim = int(next(iter(obs.values())).shape[0])
-    action_dim = int(env.ACTION_DIM)
+    # Use cached model dimensions if available (HIGH-9), otherwise fall back to env creation
+    if "obs_dim" in ckpt and "action_dim" in ckpt:
+        obs_dim = int(ckpt["obs_dim"])
+        action_dim = int(ckpt["action_dim"])
+    else:
+        # Legacy checkpoint without cached dimensions - build env to infer
+        env = EchelonEnv(env_cfg)
+        obs, _ = env.reset(seed=int(env_cfg.seed or 0))
+        obs_dim = int(next(iter(obs.values())).shape[0])
+        action_dim = int(env.ACTION_DIM)
 
     model = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
     model.load_state_dict(ckpt["model_state"])

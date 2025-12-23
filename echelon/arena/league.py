@@ -205,10 +205,24 @@ class League:
         return True
 
     def apply_rating_period(self, results: dict[str, list[GameResult]]) -> None:
-        # Update only the entries that participated in this rating period.
+        """
+        Apply Glicko-2 rating updates using two-phase commit (CRIT-6).
+
+        Phase 1: Compute all new ratings using snapshotted opponent ratings.
+        Phase 2: Commit all updates atomically to avoid circular dependency issues.
+        """
+        # Phase 1: Compute new ratings (opponent ratings are already frozen in GameResult)
+        updates: dict[str, tuple[Glicko2Rating, int]] = {}
         for entry_id, games in results.items():
             entry = self.entries.get(entry_id)
             if entry is None:
                 continue
-            entry.rating = rate(entry.rating, games, cfg=self.cfg)
-            entry.games += len(games)
+            new_rating = rate(entry.rating, games, cfg=self.cfg)
+            updates[entry_id] = (new_rating, len(games))
+
+        # Phase 2: Commit all updates atomically
+        for entry_id, (new_rating, game_count) in updates.items():
+            entry = self.entries.get(entry_id)
+            if entry is not None:
+                entry.rating = new_rating
+                entry.games += game_count

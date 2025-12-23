@@ -21,7 +21,7 @@ def test_indirect_fire(make_mech):
     sim.reset({"blue_0": heavy, "blue_1": painter, "red_0": enemy})
 
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
-    fire_action[ActionIndex.FIRE_MISSILE] = 1.0
+    fire_action[ActionIndex.SECONDARY] = 1.0
 
     events = sim._try_fire_missile(heavy, fire_action)
     assert len(events) == 0, "Should not fire without LOS or Paint"
@@ -52,7 +52,7 @@ def test_missile_arc_blocks_rear_shots(make_mech):
     sim.reset({"blue_0": heavy, "blue_1": painter, "red_0": enemy})
 
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
-    fire_action[ActionIndex.FIRE_MISSILE] = 1.0
+    fire_action[ActionIndex.SECONDARY] = 1.0
 
     events = sim._try_fire_missile(heavy, fire_action)
     assert len(events) == 0, "Paint should not bypass missile firing arc"
@@ -74,7 +74,7 @@ def test_paint_lock_is_pack_scoped(make_mech):
     sim.reset({"blue_0": heavy, "blue_10": painter_other_pack, "red_0": enemy})
 
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
-    fire_action[ActionIndex.FIRE_MISSILE] = 1.0
+    fire_action[ActionIndex.SECONDARY] = 1.0
 
     events = sim._try_fire_missile(heavy, fire_action)
     assert len(events) == 0, "Paint from a different pack should not grant indirect lock"
@@ -109,7 +109,7 @@ def test_autocannon_auto_pitch(make_mech):
     sim.reset({"medium": medium, "enemy": enemy})
 
     action = np.zeros(ACTION_DIM, dtype=np.float32)
-    action[ActionIndex.FIRE_KINETIC] = 1.0
+    action[ActionIndex.TERTIARY] = 1.0
     events = sim._try_fire_kinetic(medium, action)
     assert len(events) == 1
     assert len(sim.projectiles) == 1
@@ -160,7 +160,7 @@ def test_gauss_projectile_does_not_tunnel_through_wall(make_mech):
     assert not has_los(world, heavy.pos, enemy.pos)
 
     action = np.zeros(ACTION_DIM, dtype=np.float32)
-    action[ActionIndex.FIRE_KINETIC] = 1.0
+    action[ActionIndex.TERTIARY] = 1.0
     events = sim._try_fire_kinetic(heavy, action)
     assert len(events) == 1
     assert len(sim.projectiles) == 1
@@ -186,7 +186,7 @@ def test_splash_damage_is_occluded_by_walls(make_mech):
     sim.reset({"blue_0": heavy, "blue_1": painter, "red_0": enemy})
 
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
-    fire_action[ActionIndex.FIRE_MISSILE] = 1.0
+    fire_action[ActionIndex.SECONDARY] = 1.0
     events = sim._try_fire_missile(heavy, fire_action)
     assert len(events) == 1
     assert len(sim.projectiles) == 1

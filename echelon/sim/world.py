@@ -62,8 +62,8 @@ class VoxelWorld:
     SOLID = 1
     LAVA = 2
     WATER = 3
-    HOT_DEBRIS = 4
-    KILLED_HULL = 5
+    DEBRIS_FIELD = 4
+    SOLID_DEBRIS = 5
     DIRT = 6
     GLASS = 7      # Blocks movement, not LOS. Low HP.
     REINFORCED = 8 # Indestructible SOLID.
@@ -74,8 +74,8 @@ class VoxelWorld:
         SOLID: {"hp": 100, "collides": True, "blocks_los": True},
         LAVA: {"hp": 0, "collides": False, "blocks_los": False},
         WATER: {"hp": 0, "collides": False, "blocks_los": False},
-        HOT_DEBRIS: {"hp": 50, "collides": True, "blocks_los": True},
-        KILLED_HULL: {"hp": 200, "collides": True, "blocks_los": True},
+        DEBRIS_FIELD: {"hp": 50, "collides": True, "blocks_los": True},
+        SOLID_DEBRIS: {"hp": 200, "collides": True, "blocks_los": True},
         DIRT: {"hp": 0, "collides": False, "blocks_los": False},
         GLASS: {"hp": 10, "collides": True, "blocks_los": False},
         REINFORCED: {"hp": 1000, "collides": True, "blocks_los": True},
@@ -200,6 +200,29 @@ class VoxelWorld:
         if self.voxel_hp is not None:
             self.voxel_hp[0][mask] = 0
 
+    @property
+    def collides_mask(self) -> np.ndarray:
+        # Pre-calculated boolean mask for collisions
+        return self.collides_lut()[self.voxels]
+
+    _BLOCKS_LOS_LUT: ClassVar[np.ndarray | None] = None
+
+    @classmethod
+    def blocks_los_lut(cls) -> np.ndarray:
+        lut = cls.__dict__.get("_BLOCKS_LOS_LUT")
+        if lut is None:
+            lut = np.zeros(256, dtype=np.bool_)
+            for v_id, props in cls.MATERIAL_PROPS.items():
+                if props.get("blocks_los", False):
+                    lut[int(v_id)] = True
+            cls._BLOCKS_LOS_LUT = lut
+        return lut
+
+    @property
+    def blocks_los_mask(self) -> np.ndarray:
+        # Pre-calculated boolean mask for LOS blocking
+        return self.blocks_los_lut()[self.voxels]
+
     def aabb_collides(self, aabb_min: np.ndarray, aabb_max: np.ndarray) -> bool:
         if aabb_min[2] < 0:
             return True
@@ -216,14 +239,8 @@ class VoxelWorld:
             return False
 
         region = self.voxels[s_min_iz:s_max_iz, s_min_iy:s_max_iy, s_min_ix:s_max_ix]
-        # Check against MATERIAL_PROPS collides flag
-        # Optimization: pre-calculate collision bitmask? 
-        # For now, just check all non-AIR and non-FOLIAGE etc.
-        for v_id, props in self.MATERIAL_PROPS.items():
-            if props["collides"]:
-                if np.any(region == v_id):
-                    return True
-        return False
+        # Fast lookup using pre-calculated LUT
+        return bool(np.any(self.collides_lut()[region]))
 
     @classmethod
     def generate(cls, config: WorldConfig, rng: np.random.Generator) -> VoxelWorld:

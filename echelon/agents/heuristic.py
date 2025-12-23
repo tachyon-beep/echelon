@@ -35,21 +35,28 @@ class HeuristicPolicy:
     - Move toward them until "brawling" distance; then strafe.
     - Fire laser when in LOS and roughly facing target.
     - Vent when heat is high.
+    - Optional handicap: suppress weapon outputs on some ticks.
     - Squad Cohesion: Move to squad center if far away.
     - Anti-Stuck: Back off and strafe if blocked.
     """
 
-    def __init__(self, desired_range: float = 5.5, approach_speed_scale: float = 0.5):
+    def __init__(
+        self,
+        desired_range: float = 5.5,
+        approach_speed_scale: float = 0.5,
+        weapon_fire_prob: float = 0.5,
+    ):
         self.desired_range = float(desired_range)
         self.approach_speed_scale = float(approach_speed_scale)
+        self.weapon_fire_prob = float(weapon_fire_prob)
         # State tracking: {mid: {"last_pos": np.array, "stuck_timer": float, "maneuver": str, "maneuver_timer": float}}
         self.states: dict[str, dict] = {}
 
-    def act(self, env: EchelonEnv, mech_id: str) -> np.ndarray:
-        sim = env.sim
-        world = env.world
+    def act(self, env: EchelonEnv, mech_id: str, sim: Sim | None = None, world: VoxelWorld | None = None) -> np.ndarray:
+        sim = sim or env.sim
+        world = world or env.world
         if sim is None or world is None:
-            raise RuntimeError("env must be reset() before act()")
+            raise RuntimeError("env or (sim and world) must be provided")
 
         mech = sim.mechs[mech_id]
         if not mech.alive:
@@ -203,20 +210,18 @@ class HeuristicPolicy:
 
         # Vent/firing logic.
         vent = 1.0 if mech.heat > 0.75 * mech.spec.heat_cap else 0.0
-        fire_laser = 0.0
-        fire_missile = 0.0
-        fire_kinetic = 0.0
-        paint = 0.0
+        
+        primary = 0.0
+        secondary = 0.0
+        tertiary = 0.0
         
         if vent <= 0.5:
             # Laser logic
-            in_range = dist <= 8.0
-            facing_ok = abs(yaw_err) <= math.radians(60.0)
+            laser_in_range = dist <= 8.0
+            laser_facing = abs(yaw_err) <= math.radians(60.0)
             los_ok = has_los(world, mech.pos, target.pos)
-            fire_laser = 1.0 if (in_range and facing_ok and los_ok) else 0.0
             
-            # Missile logic (Heavy only effectively, but logic is generic)
-            # Range 35, Arc 180 (so +/- 90 yaw err)
+            # Missile logic (Heavy only effectively)
             missile_in_range = dist <= 35.0
             missile_facing = abs(yaw_err) <= math.radians(90.0)
             painted_lock = False
@@ -227,34 +232,46 @@ class HeuristicPolicy:
                     p_painter = _pack_index(painter.mech_id)
                     painted_lock = (p_me is not None) and (p_me == p_painter)
             can_fire_missile = missile_in_range and missile_facing and (los_ok or painted_lock)
-            fire_missile = 1.0 if can_fire_missile else 0.0
             
             # Kinetic logic (Gauss/AC)
-            # Gauss Range 60, AC Range 20
-            # Simple check: if medium and < 20, or heavy and < 60
             kinetic_range = 60.0 if mech.spec.name == "heavy" else 20.0
             kinetic_in_range = dist <= kinetic_range
-            kinetic_facing = abs(yaw_err) <= math.radians(30.0) # Need better aim
-            # Dumbfire needs LOS roughly? Or ballistic arc over wall?
-            # Heuristic just shoots if facing
-            fire_kinetic = 1.0 if (kinetic_in_range and kinetic_facing) else 0.0
+            kinetic_facing = abs(yaw_err) <= math.radians(30.0)
 
-            # Paint logic (Light only)
-            # Range 15, Arc 60
+            # Paint logic
             paint_in_range = dist <= 15.0
             paint_facing = abs(yaw_err) <= math.radians(30.0)
-            paint = 1.0 if (paint_in_range and paint_facing and los_ok) else 0.0
+
+            if mech.spec.name == "scout":
+                # Scout: PRIMARY=Paint, SECONDARY=EWAR
+                primary = 1.0 if (paint_in_range and paint_facing and los_ok) else 0.0
+                # EWAR logic below
+            elif mech.spec.name == "light":
+                # Light: PRIMARY=Flamer, SECONDARY=Laser, TERTIARY=Paint
+                # Heuristic: flamer if close, laser if mid, paint if possible
+                primary = 1.0 if (dist <= 4.5 and laser_facing and los_ok) else 0.0
+                secondary = 1.0 if (laser_in_range and laser_facing and los_ok) else 0.0
+                tertiary = 1.0 if (paint_in_range and paint_facing and los_ok) else 0.0
+            elif mech.spec.name == "medium":
+                # Medium: PRIMARY=Laser, TERTIARY=Autocannon, (TERTIARY also Paint)
+                primary = 1.0 if (laser_in_range and laser_facing and los_ok) else 0.0
+                tertiary = 1.0 if (kinetic_in_range and kinetic_facing) else 0.0
+            elif mech.spec.name == "heavy":
+                # Heavy: PRIMARY=Laser, SECONDARY=Missile, TERTIARY=Gauss
+                primary = 1.0 if (laser_in_range and laser_facing and los_ok) else 0.0
+                secondary = 1.0 if can_fire_missile else 0.0
+                tertiary = 1.0 if (kinetic_in_range and kinetic_facing) else 0.0
 
         a = np.zeros(env.ACTION_DIM, dtype=np.float32)
         a[ActionIndex.FORWARD] = forward_throttle
         a[ActionIndex.STRAFE] = strafe_throttle
         a[ActionIndex.VERTICAL] = vertical
         a[ActionIndex.YAW_RATE] = yaw_rate
-        a[ActionIndex.FIRE_LASER] = fire_laser
+        a[ActionIndex.PRIMARY] = primary
         a[ActionIndex.VENT] = vent
-        a[ActionIndex.FIRE_MISSILE] = fire_missile
-        a[ActionIndex.PAINT] = paint
-        a[ActionIndex.FIRE_KINETIC] = fire_kinetic
+        a[ActionIndex.SECONDARY] = secondary
+        a[ActionIndex.TERTIARY] = tertiary
+        a[ActionIndex.SPECIAL] = 0.0 # Smoke not used by heuristic yet
 
         # Target selection: focus our chosen target if it exists in the last-observed contact slots.
         slots = getattr(env, "_last_contact_slots", {}).get(mech_id)
@@ -264,14 +281,29 @@ class HeuristicPolicy:
                     a[getattr(env, "TARGET_START", 0) + int(i)] = 1.0
                     break
 
-        # Light-only EWAR (simple default behavior): jam unless we are heat-stressed.
-        if mech.spec.name == "light":
+        # EWAR logic
+        if mech.spec.name == "scout":
             if mech.heat < 0.7 * mech.spec.heat_cap:
-                a[getattr(env, "EWAR_START", 0) + 0] = 1.0  # ECM
-                a[getattr(env, "EWAR_START", 0) + 1] = 0.0
+                # Value (0, 0.5] = ECM
+                a[ActionIndex.SECONDARY] = 0.25
             else:
-                a[getattr(env, "EWAR_START", 0) + 0] = 0.0
-                a[getattr(env, "EWAR_START", 0) + 1] = 1.0  # ECCM (fallback)
+                # Value > 0.5 = ECCM
+                a[ActionIndex.SECONDARY] = 0.75
+
+        # Handicap: fire less often (suppresses weapon outputs on a fraction of eligible ticks).
+        if self.weapon_fire_prob < 1.0:
+            wants_fire = (
+                float(a[ActionIndex.PRIMARY]) > 0.0
+                or float(a[ActionIndex.TERTIARY]) > 0.0
+                or float(a[ActionIndex.SPECIAL]) > 0.0
+                or (mech.spec.name != "scout" and float(a[ActionIndex.SECONDARY]) > 0.0)
+            )
+            if wants_fire and float(getattr(env, "rng", np.random).random()) > self.weapon_fire_prob:
+                a[ActionIndex.PRIMARY] = 0.0
+                a[ActionIndex.TERTIARY] = 0.0
+                a[ActionIndex.SPECIAL] = 0.0
+                if mech.spec.name != "scout":
+                    a[ActionIndex.SECONDARY] = 0.0
 
         # Observation controls: keep the contact table hostile-focused and sorted by closest.
         a[getattr(env, "OBS_CTRL_START", 0) + 0] = 1.0  # closest
