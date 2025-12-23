@@ -1,0 +1,152 @@
+"""Unit tests for VectorEnv."""
+
+import pytest
+
+from echelon import EnvConfig, WorldConfig
+from echelon.training.vec_env import VectorEnv
+
+
+@pytest.fixture
+def small_env_cfg() -> EnvConfig:
+    """Create a minimal environment config for fast tests."""
+    return EnvConfig(
+        world=WorldConfig(size_x=40, size_y=40, size_z=20),
+        num_packs=1,
+        dt_sim=0.05,
+        decision_repeat=5,
+        max_episode_seconds=10.0,  # Short episodes
+        observation_mode="full",
+        seed=0,
+        record_replay=False,
+    )
+
+
+def test_vec_env_single_env(small_env_cfg: EnvConfig):
+    """Test VectorEnv with single environment (fast unit test)."""
+    vec_env = VectorEnv(num_envs=1, env_cfg=small_env_cfg)
+
+    try:
+        # Reset
+        obs_list, info_list = vec_env.reset(seeds=[42])
+        assert len(obs_list) == 1
+        assert len(info_list) == 1
+        assert isinstance(obs_list[0], dict)
+        assert len(obs_list[0]) > 0  # Should have observations for agents
+
+        # Get agent IDs from first observation
+        agent_ids = list(obs_list[0].keys())
+        assert len(agent_ids) > 0
+
+        # Create dummy actions (zeros) - ACTION_DIM=26 (base=9, target=5, obs_ctrl=4, comm_dim=8)
+        actions = {aid: [0.0] * 26 for aid in agent_ids}
+
+        # Step
+        obs_list, rew_list, term_list, trunc_list, info_list = vec_env.step([actions])
+        assert len(obs_list) == 1
+        assert len(rew_list) == 1
+        assert len(term_list) == 1
+        assert len(trunc_list) == 1
+        assert len(info_list) == 1
+
+        # Check rewards dict
+        assert isinstance(rew_list[0], dict)
+        assert len(rew_list[0]) == len(agent_ids)
+
+        # Check terminations/truncations
+        assert isinstance(term_list[0], dict)
+        assert isinstance(trunc_list[0], dict)
+
+    finally:
+        vec_env.close()
+
+
+def test_vec_env_context_manager(small_env_cfg: EnvConfig):
+    """Test VectorEnv context manager ensures cleanup."""
+    with VectorEnv(num_envs=1, env_cfg=small_env_cfg) as vec_env:
+        obs_list, _ = vec_env.reset(seeds=[42])
+        assert len(obs_list) == 1
+
+    # After context exit, processes should be cleaned up
+    # Check that all processes have terminated
+    for p in vec_env.ps:
+        assert not p.is_alive()
+
+
+def test_vec_env_reset_protocol(small_env_cfg: EnvConfig):
+    """Test reset with different seeds and indices."""
+    with VectorEnv(num_envs=2, env_cfg=small_env_cfg) as vec_env:
+        # Reset all envs
+        obs_list, info_list = vec_env.reset(seeds=[42, 43])
+        assert len(obs_list) == 2
+        assert len(info_list) == 2
+
+        # Reset specific env
+        obs_list2, info_list2 = vec_env.reset(seeds=[100], indices=[0])
+        assert len(obs_list2) == 1
+        assert len(info_list2) == 1
+
+
+def test_vec_env_team_alive_protocol(small_env_cfg: EnvConfig):
+    """Test get_team_alive protocol."""
+    with VectorEnv(num_envs=1, env_cfg=small_env_cfg) as vec_env:
+        vec_env.reset(seeds=[42])
+
+        # Get team alive status
+        team_alive_list = vec_env.get_team_alive()
+        assert len(team_alive_list) == 1
+        assert "blue" in team_alive_list[0]
+        assert "red" in team_alive_list[0]
+        assert isinstance(team_alive_list[0]["blue"], bool)
+        assert isinstance(team_alive_list[0]["red"], bool)
+
+
+def test_vec_env_last_outcomes_protocol(small_env_cfg: EnvConfig):
+    """Test get_last_outcomes protocol."""
+    with VectorEnv(num_envs=1, env_cfg=small_env_cfg) as vec_env:
+        vec_env.reset(seeds=[42])
+
+        # Get last outcomes (should be None after reset)
+        outcomes = vec_env.get_last_outcomes()
+        assert len(outcomes) == 1
+        # Outcome is None or a dict depending on episode state
+
+
+def test_vec_env_heuristic_actions_protocol(small_env_cfg: EnvConfig):
+    """Test get_heuristic_actions protocol."""
+    with VectorEnv(num_envs=1, env_cfg=small_env_cfg) as vec_env:
+        obs_list, _ = vec_env.reset(seeds=[42])
+
+        # Identify red agents (assume second half of agents are red)
+        all_ids = list(obs_list[0].keys())
+        red_ids = all_ids[len(all_ids) // 2 :]  # Second half
+
+        # Get heuristic actions for red team
+        heuristic_actions_list = vec_env.get_heuristic_actions(red_ids)
+        assert len(heuristic_actions_list) == 1
+        assert isinstance(heuristic_actions_list[0], dict)
+        assert len(heuristic_actions_list[0]) == len(red_ids)
+
+
+def test_vec_env_multi_step_rollout(small_env_cfg: EnvConfig):
+    """Integration test: collect short rollout."""
+    with VectorEnv(num_envs=1, env_cfg=small_env_cfg) as vec_env:
+        obs_list, _ = vec_env.reset(seeds=[42])
+
+        agent_ids = list(obs_list[0].keys())
+        rollout_steps = 10
+
+        for _ in range(rollout_steps):
+            # Create dummy actions (ACTION_DIM=26)
+            actions = {aid: [0.0] * 26 for aid in agent_ids}
+
+            # Step
+            obs_list, _rew_list, term_list, trunc_list, _ = vec_env.step([actions])
+
+            # Check episode termination
+            if any(term_list[0].values()) or any(trunc_list[0].values()):
+                # Episode ended, reset
+                obs_list, _ = vec_env.reset(seeds=[43])
+                break
+
+        # Should complete without errors
+        assert len(obs_list) == 1

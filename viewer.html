@@ -99,6 +99,10 @@
         let raycaster = new THREE.Raycaster();
         let mouse = new THREE.Vector2();
 
+        // SSE connection state (must be declared before init() call)
+        let eventSource = null;
+        let connectionStatus = 'disconnected';
+
         init();
         animate();
 
@@ -239,8 +243,6 @@
         }
 
         // --- SSE Connection (replaces WebSocket) ---
-        let eventSource = null;
-        let connectionStatus = 'disconnected';
 
         function updateConnectionIndicator(status) {
             connectionStatus = status;

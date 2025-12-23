@@ -3,13 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import multiprocessing as mp
 import os
 import random
 import subprocess
 import sys
 import time
-import traceback
 import warnings
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -21,94 +19,7 @@ from torch import nn
 
 from echelon.agents.heuristic import HeuristicPolicy
 from echelon.training.normalization import RunningMeanStd
-
-
-def _make_env_thunk(env_cfg):
-    return EchelonEnv(env_cfg)
-
-
-def _env_worker(remote, env_fn, env_cfg):
-    try:
-        env = env_fn(env_cfg)
-        heuristic = HeuristicPolicy()
-        while True:
-            cmd, data = remote.recv()
-            if cmd == "step":
-                obs, reward, term, trunc, info = env.step(data)
-                remote.send((obs, reward, term, trunc, info))
-            elif cmd == "reset":
-                obs, info = env.reset(seed=data)
-                remote.send((obs, info))
-            elif cmd == "get_team_alive":
-                remote.send({team: env.sim.team_alive(team) for team in ("blue", "red")})
-            elif cmd == "get_last_outcome":
-                remote.send(env.last_outcome)
-            elif cmd == "get_heuristic_actions":
-                res = {rid: heuristic.act(env, rid) for rid in data}
-                remote.send(res)
-            elif cmd == "close":
-                remote.close()
-                break
-            else:
-                raise NotImplementedError
-    except Exception:
-        print(f"Worker process encountered error:\n{traceback.format_exc()}")
-        remote.close()
-
-
-class VectorEnv:
-    def __init__(self, num_envs, env_cfg):
-        self.num_envs = num_envs
-        # Use spawn to avoid CUDA fork issues
-        ctx = mp.get_context("spawn")
-        self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(self.num_envs)], strict=False)
-        self.ps = [
-            ctx.Process(target=_env_worker, args=(work_remote, _make_env_thunk, env_cfg))
-            for work_remote in self.work_remotes
-        ]
-        for p in self.ps:
-            p.daemon = True
-            p.start()
-        for remote in self.work_remotes:
-            remote.close()
-
-    def step(self, actions_list):
-        for remote, action in zip(self.remotes, actions_list, strict=False):
-            remote.send(("step", action))
-        results = [remote.recv() for remote in self.remotes]
-        obs, rews, terms, truncs, infos = zip(*results, strict=False)
-        return list(obs), list(rews), list(terms), list(truncs), list(infos)
-
-    def reset(self, seeds, indices=None):
-        if indices is None:
-            indices = list(range(len(seeds)))
-        for i, seed in zip(indices, seeds, strict=False):
-            self.remotes[i].send(("reset", seed))
-        results = [self.remotes[i].recv() for i in indices]
-        obs, infos = zip(*results, strict=False)
-        return list(obs), list(infos)
-
-    def get_team_alive(self):
-        for remote in self.remotes:
-            remote.send(("get_team_alive", None))
-        return [remote.recv() for remote in self.remotes]
-
-    def get_last_outcomes(self):
-        for remote in self.remotes:
-            remote.send(("get_last_outcome", None))
-        return [remote.recv() for remote in self.remotes]
-
-    def get_heuristic_actions(self, red_ids):
-        for remote in self.remotes:
-            remote.send(("get_heuristic_actions", red_ids))
-        return [remote.recv() for remote in self.remotes]
-
-    def close(self):
-        for remote in self.remotes:
-            remote.send(("close", None))
-        for p in self.ps:
-            p.join()
-
+from echelon.training.vec_env import VectorEnv
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
