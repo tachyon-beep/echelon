@@ -19,11 +19,11 @@ class NavNode:
 class NavGraph:
     """
     A graph representation of the walkable surfaces in the VoxelWorld.
-    
-    v0 Implementation (2.5D):
-    - Scans the voxel grid to identify "Walkable Surfaces".
-    - A surface is a SOLID voxel with AIR above it.
-    - Edges connect adjacent surfaces if they are reachable (step up/down).
+
+    v1 Implementation (vectorized):
+    - Uses NumPy broadcasting to identify walkable surfaces
+    - A surface is walkable if: solid below AND clear above for clearance_z
+    - Applies mech_radius footprint via erosion
     """
     def __init__(self, clearance_z: int = 2):
         self.nodes: Dict[NodeID, NavNode] = {}
@@ -35,43 +35,72 @@ class NavGraph:
     def build(cls, world: VoxelWorld, clearance_z: int = 4, mech_radius: int = 1) -> NavGraph:
         graph = cls(clearance_z=clearance_z)
         graph.voxel_size = world.voxel_size_m
-        
-        # 1. Identify Nodes (Walkable Surfaces)
-        sx, sy, sz = world.size_x, world.size_y, world.size_z
-        
-        # Build a comprehensive collision mask based on MATERIAL_PROPS
-        collides_mask = world.collides_mask
-        
-        def _is_blocked_xy(x: int, y: int, z_floor: int) -> bool:
-            # Bounds check for the whole footprint
-            if x - mech_radius < 0 or x + mech_radius >= sx or y - mech_radius < 0 or y + mech_radius >= sy:
-                return True
-            
-            # Check Z band
-            z_start = z_floor + 1
-            z_end = min(sz, z_start + clearance_z)
-            if z_start >= sz: return False
-            
-            # Slice check
-            region = collides_mask[z_start:z_end, y-mech_radius:y+mech_radius+1, x-mech_radius:x+mech_radius+1]
-            return np.any(region)
 
-        # Iterate all columns
-        for y in range(sy):
-            for x in range(sx):
-                # Check bedrock layer
-                if not _is_blocked_xy(x, y, -1):
-                    graph._add_node((-1, y, x), world.voxel_size_m)
-                    
-                # Check voxel layers
-                column = collides_mask[:, y, x]
-                for z in range(sz - 1):
-                    if not column[z]:
-                        continue
-                    if not _is_blocked_xy(x, y, z):
-                        graph._add_node((z, y, x), world.voxel_size_m)
+        collides = world.collides_mask
+        sz, sy, sx = collides.shape
 
-        # 2. Build Edges
+        # --- Vectorized Node Detection ---
+
+        # 1. Find solid voxels (potential surfaces to stand ON)
+        #    We need solid at z, and clear from z+1 to z+clearance_z
+
+        # Walkable mask: start with all False, then mark valid positions
+        # A position (z, y, x) is walkable if:
+        #   - collides[z, y, x] is True (solid to stand on)
+        #   - collides[z+1:z+1+clearance_z, y, x] are all False (headroom)
+
+        walkable = np.zeros((sz, sy, sx), dtype=np.bool_)
+
+        # For each z level that could be a floor (0 to sz-2 at minimum)
+        for z in range(sz - 1):
+            # Check if this z is solid
+            solid_here = collides[z]
+
+            # Check clearance above
+            z_top = min(z + 1 + clearance_z, sz)
+            if z + 1 >= sz:
+                # Top of world, can stand here if solid
+                clear_above = np.ones((sy, sx), dtype=np.bool_)
+            else:
+                # All voxels from z+1 to z_top must be non-colliding
+                clear_above = ~np.any(collides[z+1:z_top], axis=0)
+
+            walkable[z] = solid_here & clear_above
+
+        # 2. Also check bedrock (z=-1, standing on virtual floor below z=0)
+        #    Need clearance from z=0 upward
+        z_top_bedrock = min(clearance_z, sz)
+        if z_top_bedrock > 0:
+            clear_from_bedrock = ~np.any(collides[0:z_top_bedrock], axis=0)
+        else:
+            clear_from_bedrock = np.ones((sy, sx), dtype=np.bool_)
+
+        # 3. Apply mech_radius footprint erosion
+        if mech_radius > 0:
+            # Erode walkable mask - a cell is only walkable if all cells
+            # within mech_radius are also walkable
+            from scipy.ndimage import minimum_filter
+            footprint = np.ones((1, 2*mech_radius+1, 2*mech_radius+1), dtype=np.bool_)
+            walkable = minimum_filter(walkable.astype(np.uint8), footprint=footprint, mode='constant', cval=0).astype(np.bool_)
+
+            # Also erode bedrock walkability
+            footprint_2d = np.ones((2*mech_radius+1, 2*mech_radius+1), dtype=np.bool_)
+            clear_from_bedrock = minimum_filter(clear_from_bedrock.astype(np.uint8), footprint=footprint_2d, mode='constant', cval=0).astype(np.bool_)
+
+        # 4. Extract node coordinates and build node dict
+        # Bedrock nodes (z=-1)
+        bedrock_coords = np.argwhere(clear_from_bedrock)
+        for coord in bedrock_coords:
+            y, x = int(coord[0]), int(coord[1])
+            graph._add_node((-1, y, x), world.voxel_size_m)
+
+        # Regular nodes
+        node_coords = np.argwhere(walkable)
+        for coord in node_coords:
+            z, y, x = int(coord[0]), int(coord[1]), int(coord[2])
+            graph._add_node((z, y, x), world.voxel_size_m)
+
+        # --- Edge Building (still iterative over nodes) ---
         # Neighbor offsets (dy, dx, cost_mult)
         neighbors = [
             (0, 1, 1.0), (0, -1, 1.0), (1, 0, 1.0), (-1, 0, 1.0),
