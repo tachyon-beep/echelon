@@ -15,10 +15,10 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch import nn
 
 from echelon.agents.heuristic import HeuristicPolicy
-from echelon.training.normalization import RunningMeanStd
+from echelon.training.ppo import PPOConfig, PPOTrainer
+from echelon.training.rollout import RolloutBuffer
 from echelon.training.vec_env import VectorEnv
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -175,32 +175,6 @@ def _write_wandb_run_id(run_dir: Path, run_id: str) -> None:
     (run_dir / "wandb_run_id.txt").write_text(f"{run_id}\n", encoding="utf-8")
 
 
-def compute_gae(
-    rewards: torch.Tensor,  # [T, B]
-    values: torch.Tensor,  # [T, B]
-    dones: torch.Tensor,  # [T, B] done at start of step (like CleanRL)
-    next_value: torch.Tensor,  # [B]
-    next_done: torch.Tensor,  # [B] done at end of rollout / start of next step
-    gamma: float,
-    gae_lambda: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    T = rewards.size(0)
-    advantages = torch.zeros_like(rewards)
-    lastgaelam = torch.zeros(rewards.size(1), device=rewards.device)
-    for t in reversed(range(T)):
-        if t == T - 1:
-            next_nonterminal = 1.0 - next_done.float()
-            next_values = next_value
-        else:
-            next_nonterminal = 1.0 - dones[t + 1].float()
-            next_values = values[t + 1]
-        delta = rewards[t] + gamma * next_values * next_nonterminal - values[t]
-        lastgaelam = delta + gamma * gae_lambda * next_nonterminal * lastgaelam
-        advantages[t] = lastgaelam
-    returns = advantages + values
-    return advantages, returns
-
-
 def push_replay(url: str, replay: dict) -> None:
     if not url:
         return
@@ -251,7 +225,7 @@ def evaluate_vs_heuristic(
             for rid in red_ids:
                 actions[rid] = heuristic.act(env, rid)
 
-            obs, rewards, terminations, truncations, infos = env.step(actions)
+            obs, _rewards, terminations, truncations, _infos = env.step(actions)
 
             blue_alive = env.sim.team_alive("blue")
             red_alive = env.sim.team_alive("red")
@@ -272,7 +246,7 @@ def evaluate_vs_heuristic(
                     last_replay = env.get_replay()
                 break
 
-    wins["episodes"] = int(len(seeds))
+    wins["episodes"] = len(seeds)
     wins["win_rate"] = float(wins["blue"] / max(1, len(seeds)))
     wins["mean_hp_margin"] = float(np.mean(hp_margins)) if hp_margins else 0.0
     return wins, last_replay
@@ -514,8 +488,20 @@ def main() -> None:
     obs_dim = int(next(iter(next_obs_dicts[0].values())).shape[0])
 
     model = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-5)
-    return_rms = RunningMeanStd()  # For value function normalization
+
+    # Create PPO trainer with hyperparameters from args
+    ppo_config = PPOConfig(
+        lr=args.lr,
+        gamma=args.gamma,
+        gae_lambda=args.gae_lambda,
+        clip_coef=args.clip_coef,
+        ent_coef=args.ent_coef,
+        vf_coef=args.vf_coef,
+        max_grad_norm=args.max_grad_norm,
+        update_epochs=args.update_epochs,
+        rollout_steps=args.rollout_steps,
+    )
+    trainer = PPOTrainer(model, ppo_config, device)
 
     def _env_signature(env_cfg0: EnvConfig) -> dict:
         d = asdict(env_cfg0)
@@ -585,12 +571,12 @@ def main() -> None:
 
     if resume_ckpt is not None:
         model.load_state_dict(resume_ckpt["model_state"])
-        optimizer.load_state_dict(resume_ckpt["optimizer_state"])
-        optimizer_to_device(optimizer, device)
-        for group in optimizer.param_groups:
+        trainer.optimizer.load_state_dict(resume_ckpt["optimizer_state"])
+        optimizer_to_device(trainer.optimizer, device)
+        for group in trainer.optimizer.param_groups:
             group["lr"] = args.lr
         if "return_rms" in resume_ckpt:
-            return_rms.load_state_dict(resume_ckpt["return_rms"])
+            trainer.return_normalizer.rms.load_state_dict(resume_ckpt["return_rms"])
 
     batch_size_per_env = len(blue_ids)
     batch_size = batch_size_per_env * num_envs
@@ -722,30 +708,30 @@ def main() -> None:
 
     print(f"Starting {args.updates} training updates...")
     for update in range(start_update, end_update + 1):
-        obs_buf = torch.zeros(args.rollout_steps, batch_size, obs_dim, device=device)
-        actions_buf = torch.zeros(args.rollout_steps, batch_size, action_dim, device=device)
-        logprobs_buf = torch.zeros(args.rollout_steps, batch_size, device=device)
-        rewards_buf = torch.zeros(args.rollout_steps, batch_size, device=device)
-        dones_buf = torch.zeros(args.rollout_steps, batch_size, device=device)
-        values_buf = torch.zeros(args.rollout_steps, batch_size, device=device)
-        entropies_buf = torch.zeros(args.rollout_steps, batch_size, device=device)
+        # Create rollout buffer
+        buffer = RolloutBuffer.create(
+            num_steps=args.rollout_steps,
+            num_agents=batch_size,
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            device=device,
+        )
 
         init_state = lstm_state
 
         for step in range(args.rollout_steps):
             global_step += batch_size
-            obs_buf[step] = next_obs
-            dones_buf[step] = next_done
+            buffer.obs[step] = next_obs
+            buffer.dones[step] = next_done
 
             with torch.no_grad():
-                action, logprob, entropy, value, lstm_state = model.get_action_and_value(
+                action, logprob, _entropy, value, lstm_state = model.get_action_and_value(
                     next_obs, lstm_state, next_done
                 )
 
-            actions_buf[step] = action
-            logprobs_buf[step] = logprob
-            values_buf[step] = value
-            entropies_buf[step] = entropy
+            buffer.actions[step] = action
+            buffer.logprobs[step] = logprob
+            buffer.values[step] = value
 
             action_np = action.detach().cpu().numpy()
 
@@ -779,7 +765,7 @@ def main() -> None:
                     all_actions_dicts[env_idx].update(heuristic_acts_list[env_idx])
 
             # Step all environments in parallel
-            next_obs_dicts, rewards_list, terminations_list, truncations_list, infos_list = venv.step(
+            next_obs_dicts, rewards_list, terminations_list, truncations_list, _infos_list = venv.step(
                 all_actions_dicts
             )
 
@@ -875,62 +861,32 @@ def main() -> None:
                             # Resample opponent per episode for training diversity (CRIT-5)
                             _arena_sample_opponent(reset_hidden=False)
 
-            rewards_buf[step] = torch.from_numpy(rewards_flat).to(device)
+            buffer.rewards[step] = torch.from_numpy(rewards_flat).to(device)
             next_done = torch.from_numpy(done_flat).to(device)
             arena_done = torch.from_numpy(arena_done_np).to(opponent_device)
             next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
 
-        # Detach LSTM state to prevent gradient graph retention during value bootstrap
+        # Compute GAE and run PPO updates via trainer
         with torch.no_grad():
             detached_state = LSTMState(h=lstm_state.h.detach(), c=lstm_state.c.detach())
             next_value, _ = model.get_value(next_obs, detached_state, next_done)
 
-        advantages, returns = compute_gae(
-            rewards=rewards_buf,
-            values=values_buf,
-            dones=dones_buf,
+        buffer.compute_gae(
             next_value=next_value,
             next_done=next_done,
             gamma=args.gamma,
             gae_lambda=args.gae_lambda,
         )
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Update running statistics for return normalization
-        return_rms.update(returns)
-        returns_normalized = return_rms.normalize(returns)
+        # Run PPO update
+        metrics = trainer.update(buffer, init_state)
 
-        # PPO updates (recurrent full-batch for now).
-        for _epoch in range(args.update_epochs):
-            new_logprobs = torch.zeros_like(logprobs_buf)
-            new_values = torch.zeros_like(values_buf)
-            new_entropies = torch.zeros_like(entropies_buf)
-
-            lstm_state_train = init_state
-            for t in range(args.rollout_steps):
-                _, lp, ent, val, lstm_state_train = model.get_action_and_value(
-                    obs_buf[t], lstm_state_train, dones_buf[t], action=actions_buf[t]
-                )
-                new_logprobs[t] = lp
-                new_values[t] = val
-                new_entropies[t] = ent
-
-            logratio = new_logprobs - logprobs_buf
-            ratio = logratio.exp()
-
-            pg_loss1 = -advantages * ratio
-            pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - args.clip_coef, 1.0 + args.clip_coef)
-            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-            # Use normalized returns for value loss to stabilize training
-            v_loss = 0.5 * (returns_normalized - new_values).pow(2).mean()
-            entropy_loss = new_entropies.mean()
-            loss = pg_loss - args.ent_coef * entropy_loss + args.vf_coef * v_loss
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-            optimizer.step()
+        # Extract metrics for logging
+        pg_loss = metrics["pg_loss"]
+        v_loss = metrics["vf_loss"]
+        entropy_loss = metrics["entropy"]
+        grad_norm = metrics["grad_norm"]
+        loss = metrics["loss"]
 
         sps = int((global_step - start_global_step) / max(1e-6, (time.time() - start_time)))
 
@@ -953,7 +909,7 @@ def main() -> None:
                 f"update {update:05d} | steps {global_step} | episodes {episodes} | "
                 f"ret {avg_return:.1f} | len {avg_len:.1f} | "
                 f"win_blue {win_rate_blue:.2f} | win_red {win_rate_red:.2f} | "
-                f"loss {loss.item():.3f} | sps {sps}"
+                f"loss {loss:.3f} | sps {sps}"
             )
 
         eval_stats = None
@@ -961,7 +917,7 @@ def main() -> None:
             if eval_seeds is not None:
                 seeds_now = list(eval_seeds)
                 seed0 = int(seeds_now[0]) if seeds_now else int(args.seed)
-                eval_episodes = int(len(seeds_now))
+                eval_episodes = len(seeds_now)
             else:
                 seed0 = int(args.seed + 10_000 + update * 13)
                 eval_episodes = int(args.eval_episodes)
@@ -1029,8 +985,8 @@ def main() -> None:
                     "global_step": global_step,
                     "episodes": episodes,
                     "model_state": model.state_dict(),
-                    "optimizer_state": optimizer.state_dict(),
-                    "return_rms": return_rms.state_dict(),
+                    "optimizer_state": trainer.optimizer.state_dict(),
+                    "return_rms": trainer.return_normalizer.rms.state_dict(),
                     "env_cfg": asdict(env_cfg),
                     "args": vars(args),
                     "eval": eval_stats,
@@ -1078,8 +1034,8 @@ def main() -> None:
                 "global_step": global_step,
                 "episodes": episodes,
                 "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "return_rms": return_rms.state_dict(),
+                "optimizer_state": trainer.optimizer.state_dict(),
+                "return_rms": trainer.return_normalizer.rms.state_dict(),
                 "env_cfg": asdict(env_cfg),
                 "args": vars(args),
                 # Model metadata for fast loading (HIGH-9)
@@ -1099,11 +1055,11 @@ def main() -> None:
                     "global_step": int(global_step),
                     "episodes": int(episodes),
                     "avg_return_10": float(avg_return),
-                    "loss": float(loss.item()),
-                    "pg_loss": float(pg_loss.item()),
-                    "v_loss": float(v_loss.item()),
-                    "entropy": float(entropy_loss.item()),
-                    "grad_norm": float(grad_norm.item()) if hasattr(grad_norm, "item") else float(grad_norm),
+                    "loss": float(loss),
+                    "pg_loss": float(pg_loss),
+                    "v_loss": float(v_loss),
+                    "entropy": float(entropy_loss),
+                    "grad_norm": float(grad_norm),
                     "sps": int(sps),
                     "eval": eval_stats,
                     "best_updated": best_updated,
@@ -1118,13 +1074,11 @@ def main() -> None:
         if wandb_run is not None:
             wandb_metrics = {
                 "train/update": int(update),
-                "train/loss": float(loss.item()),
-                "train/pg_loss": float(pg_loss.item()),
-                "train/v_loss": float(v_loss.item()),
-                "train/entropy": float(entropy_loss.item()),
-                "train/grad_norm": float(grad_norm.item())
-                if hasattr(grad_norm, "item")
-                else float(grad_norm),
+                "train/loss": float(loss),
+                "train/pg_loss": float(pg_loss),
+                "train/v_loss": float(v_loss),
+                "train/entropy": float(entropy_loss),
+                "train/grad_norm": float(grad_norm),
                 "train/sps": int(sps),
                 "train/global_step": int(global_step),
                 "train/episodes": int(episodes),
@@ -1152,8 +1106,8 @@ def main() -> None:
                 "global_step": int(global_step),
                 "episodes": int(episodes),
                 "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "return_rms": return_rms.state_dict(),
+                "optimizer_state": trainer.optimizer.state_dict(),
+                "return_rms": trainer.return_normalizer.rms.state_dict(),
                 "env_cfg": asdict(env_cfg),
                 "args": vars(args),
                 # Model metadata for fast loading (HIGH-9)
