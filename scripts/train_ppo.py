@@ -3,27 +3,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 import random
 import subprocess
 import sys
 import time
+import traceback
 import warnings
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 import torch
 from torch import nn
-import multiprocessing as mp
-import traceback
 
 from echelon.agents.heuristic import HeuristicPolicy
+from echelon.training.normalization import RunningMeanStd
+
 
 def _make_env_thunk(env_cfg):
     return EchelonEnv(env_cfg)
+
 
 def _env_worker(remote, env_fn, env_cfg):
     try:
@@ -53,12 +55,13 @@ def _env_worker(remote, env_fn, env_cfg):
         print(f"Worker process encountered error:\n{traceback.format_exc()}")
         remote.close()
 
+
 class VectorEnv:
     def __init__(self, num_envs, env_cfg):
         self.num_envs = num_envs
         # Use spawn to avoid CUDA fork issues
         ctx = mp.get_context("spawn")
-        self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(self.num_envs)])
+        self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(self.num_envs)], strict=False)
         self.ps = [
             ctx.Process(target=_env_worker, args=(work_remote, _make_env_thunk, env_cfg))
             for work_remote in self.work_remotes
@@ -70,19 +73,19 @@ class VectorEnv:
             remote.close()
 
     def step(self, actions_list):
-        for remote, action in zip(self.remotes, actions_list):
+        for remote, action in zip(self.remotes, actions_list, strict=False):
             remote.send(("step", action))
         results = [remote.recv() for remote in self.remotes]
-        obs, rews, terms, truncs, infos = zip(*results)
+        obs, rews, terms, truncs, infos = zip(*results, strict=False)
         return list(obs), list(rews), list(terms), list(truncs), list(infos)
 
     def reset(self, seeds, indices=None):
         if indices is None:
             indices = list(range(len(seeds)))
-        for i, seed in zip(indices, seeds):
+        for i, seed in zip(indices, seeds, strict=False):
             self.remotes[i].send(("reset", seed))
         results = [self.remotes[i].recv() for i in indices]
-        obs, infos = zip(*results)
+        obs, infos = zip(*results, strict=False)
         return list(obs), list(infos)
 
     def get_team_alive(self):
@@ -105,6 +108,7 @@ class VectorEnv:
             remote.send(("close", None))
         for p in self.ps:
             p.join()
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -157,43 +161,6 @@ class LRUModelCache:
         return len(self._cache)
 
 
-class RunningMeanStd:
-    """Tracks running mean and variance for value normalization (Welford's algorithm)."""
-
-    def __init__(self, epsilon: float = 1e-8):
-        self.mean = 0.0
-        self.var = 1.0
-        self.count = epsilon  # Small initial count for stability
-
-    def update(self, x: torch.Tensor) -> None:
-        """Update statistics with a batch of values."""
-        batch_mean = float(x.mean().item())
-        batch_var = float(x.var().item()) if x.numel() > 1 else 0.0
-        batch_count = x.numel()
-
-        delta = batch_mean - self.mean
-        tot_count = self.count + batch_count
-
-        self.mean = self.mean + delta * batch_count / tot_count
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        m2 = m_a + m_b + delta**2 * self.count * batch_count / tot_count
-        self.var = m2 / tot_count
-        self.count = tot_count
-
-    def normalize(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize values using running statistics."""
-        return (x - self.mean) / (self.var**0.5 + 1e-8)
-
-    def state_dict(self) -> dict:
-        return {"mean": self.mean, "var": self.var, "count": self.count}
-
-    def load_state_dict(self, state: dict) -> None:
-        self.mean = state["mean"]
-        self.var = state["var"]
-        self.count = state["count"]
-
-
 def stack_obs(obs: dict[str, np.ndarray], ids: list[str]) -> np.ndarray:
     return np.stack([obs[aid] for aid in ids], axis=0)
 
@@ -209,7 +176,7 @@ def resolve_devices(device_arg: str) -> list[torch.device]:
         if torch.cuda.is_available():
             return [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
         return [torch.device("cpu")]
-    
+
     parts = [s.strip() for s in device_arg.split(",")]
     return [torch.device(p) for p in parts]
 
@@ -246,8 +213,7 @@ def git_info(repo_root: Path) -> dict[str, Any]:
             p = subprocess.run(
                 args,
                 cwd=str(repo_root),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=2,
                 check=False,
@@ -329,6 +295,7 @@ def push_replay(url: str, replay: dict) -> None:
         return
     try:
         import requests
+
         requests.post(url, json=replay, timeout=5)
     except Exception as e:
         print(f"Failed to push replay: {e}")
@@ -378,7 +345,9 @@ def evaluate_vs_heuristic(
             blue_alive = env.sim.team_alive("blue")
             red_alive = env.sim.team_alive("red")
             done = torch.tensor(
-                [terminations[bid] or truncations[bid] for bid in blue_ids], dtype=torch.float32, device=device
+                [terminations[bid] or truncations[bid] for bid in blue_ids],
+                dtype=torch.float32,
+                device=device,
             )
 
             if any(truncations.values()) or (not blue_alive) or (not red_alive):
@@ -387,7 +356,7 @@ def evaluate_vs_heuristic(
                 wins[winner] += 1
                 hp = outcome.get("hp") or env.team_hp()
                 hp_margins.append(float(hp.get("blue", 0.0) - hp.get("red", 0.0)))
-                
+
                 if record and ep == 0:
                     last_replay = env.get_replay()
                 break
@@ -408,17 +377,30 @@ def main() -> None:
         default=1,
         help="Number of parallel environments for rollout collection (synchronous; increases batch/memory).",
     )
-    parser.add_argument("--packs-per-team", type=int, default=2, help="Number of 10-mech packs (1 Heavy, 5 Med, 3 Light, 1 Scout) per team")
+    parser.add_argument(
+        "--packs-per-team",
+        type=int,
+        default=2,
+        help="Number of 10-mech packs (1 Heavy, 5 Med, 3 Light, 1 Scout) per team",
+    )
     parser.add_argument("--size", type=int, default=100)
     parser.add_argument("--mode", type=str, default="full", choices=["full", "partial"])
     parser.add_argument("--dt-sim", type=float, default=0.05)
     parser.add_argument("--decision-repeat", type=int, default=5)
     parser.add_argument("--episode-seconds", type=float, default=60.0)
     parser.add_argument("--comm-dim", type=int, default=8, help="Pack-local comm message size (0 disables)")
-    parser.add_argument("--disable-target-selection", action="store_true", help="Disable focus-target action fields")
-    parser.add_argument("--disable-ewar", action="store_true", help="Disable ECM/ECCM effects (actions ignored)")
-    parser.add_argument("--disable-obs-control", action="store_true", help="Disable observation-control action fields")
-    parser.add_argument("--disable-comm", action="store_true", help="Disable pack comms (actions ignored; obs zeroed)")
+    parser.add_argument(
+        "--disable-target-selection", action="store_true", help="Disable focus-target action fields"
+    )
+    parser.add_argument(
+        "--disable-ewar", action="store_true", help="Disable ECM/ECCM effects (actions ignored)"
+    )
+    parser.add_argument(
+        "--disable-obs-control", action="store_true", help="Disable observation-control action fields"
+    )
+    parser.add_argument(
+        "--disable-comm", action="store_true", help="Disable pack comms (actions ignored; obs zeroed)"
+    )
     parser.add_argument("--rollout-steps", type=int, default=512)
     parser.add_argument("--updates", type=int, default=200)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -444,8 +426,12 @@ def main() -> None:
     )
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--run-dir", type=str, default="runs/train")
-    parser.add_argument("--resume", type=str, default=None, help="Checkpoint path, or 'latest' (from run-dir)")
-    parser.add_argument("--push-url", type=str, default="http://127.0.0.1:8090/push", help="URL to POST replays to")
+    parser.add_argument(
+        "--resume", type=str, default=None, help="Checkpoint path, or 'latest' (from run-dir)"
+    )
+    parser.add_argument(
+        "--push-url", type=str, default="http://127.0.0.1:8090/push", help="URL to POST replays to"
+    )
     parser.add_argument(
         "--train-mode",
         type=str,
@@ -453,9 +439,15 @@ def main() -> None:
         choices=["heuristic", "arena"],
         help="Opponent for red team during training: heuristic | arena",
     )
-    parser.add_argument("--arena-league", type=str, default="runs/arena/league.json", help="League file (arena mode)")
-    parser.add_argument("--arena-top-k", type=int, default=20, help="Sample opponents from top-K commanders (arena mode)")
-    parser.add_argument("--arena-candidate-k", type=int, default=5, help="Plus K recent candidates (arena mode)")
+    parser.add_argument(
+        "--arena-league", type=str, default="runs/arena/league.json", help="League file (arena mode)"
+    )
+    parser.add_argument(
+        "--arena-top-k", type=int, default=20, help="Sample opponents from top-K commanders (arena mode)"
+    )
+    parser.add_argument(
+        "--arena-candidate-k", type=int, default=5, help="Plus K recent candidates (arena mode)"
+    )
     parser.add_argument(
         "--arena-refresh-episodes",
         type=int,
@@ -467,11 +459,17 @@ def main() -> None:
         action="store_true",
         help="After training, run Glicko-2 evaluation matches and update the arena league (arena mode)",
     )
-    parser.add_argument("--arena-submit-matches", type=int, default=10, help="Matches to play when --arena-submit")
-    parser.add_argument("--arena-submit-log", type=str, default=None, help="Optional JSON log path for --arena-submit")
+    parser.add_argument(
+        "--arena-submit-matches", type=int, default=10, help="Matches to play when --arena-submit"
+    )
+    parser.add_argument(
+        "--arena-submit-log", type=str, default=None, help="Optional JSON log path for --arena-submit"
+    )
 
     # Weights & Biases (W&B)
-    parser.add_argument("--wandb", action="store_true", help="Enable W&B logging (implies --wandb-mode online)")
+    parser.add_argument(
+        "--wandb", action="store_true", help="Enable W&B logging (implies --wandb-mode online)"
+    )
     parser.add_argument(
         "--wandb-mode",
         type=str,
@@ -533,9 +531,9 @@ def main() -> None:
     warnings.filterwarnings("ignore", message=r"CUDA initialization:.*", category=UserWarning)
 
     devices = resolve_devices(args.device)
-    device = devices[0] # Primary learning device
+    device = devices[0]  # Primary learning device
     opponent_device = devices[1] if len(devices) > 1 else device
-    
+
     print(f"devices={devices} cuda_available={torch.cuda.is_available()} torch={torch.__version__}")
     print(f"learning_device={device} opponent_device={opponent_device}")
 
@@ -546,7 +544,9 @@ def main() -> None:
     resume_path: Path | None = None
     if args.resume:
         resume_path = find_latest_checkpoint(run_dir) if args.resume == "latest" else Path(args.resume)
-        resume_ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)  # TODO: migrate to weights_only=True after adding safe globals
+        resume_ckpt = torch.load(
+            resume_path, map_location="cpu", weights_only=False
+        )  # TODO: migrate to weights_only=True after adding safe globals
         env_cfg_dict = dict(resume_ckpt["env_cfg"])
         world = WorldConfig(**env_cfg_dict["world"])
         env_cfg = EnvConfig(
@@ -585,13 +585,13 @@ def main() -> None:
 
     print(f"Initializing {num_envs} environments (mode={args.mode}, size={args.size})...")
     venv = VectorEnv(num_envs, env_cfg)
-    
+
     # Use one env instance for metadata (ID lists, dimensions)
     temp_env = EchelonEnv(env_cfg)
     blue_ids = temp_env.blue_ids
     red_ids = temp_env.red_ids
     action_dim = temp_env.ACTION_DIM
-    
+
     # Run provenance (best-effort; safe to run outside git as well).
     repo_git = git_info(ROOT)
 
@@ -633,14 +633,18 @@ def main() -> None:
         sig = _env_signature(env_cfg)
         if league.env_signature is not None and league.env_signature != sig:
             raise RuntimeError("training env_cfg does not match league env_signature")
-        pool = league.top_commanders(int(args.arena_top_k)) + league.recent_candidates(int(args.arena_candidate_k))
+        pool = league.top_commanders(int(args.arena_top_k)) + league.recent_candidates(
+            int(args.arena_candidate_k)
+        )
         by_id = {e.entry_id: e for e in pool}
         arena_pool = list(by_id.values())
         if not arena_pool:
             raise RuntimeError("arena league has no eligible opponents (need commanders/candidates)")
 
     def _arena_load_model(ckpt_path: str) -> ActorCriticLSTM:
-        ckpt = torch.load(ckpt_path, map_location=opponent_device, weights_only=False)  # TODO: migrate to weights_only=True after adding safe globals
+        ckpt = torch.load(
+            ckpt_path, map_location=opponent_device, weights_only=False
+        )  # TODO: migrate to weights_only=True after adding safe globals
         opp = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(opponent_device)
         opp.load_state_dict(ckpt["model_state"])
         opp.eval()
@@ -656,7 +660,9 @@ def main() -> None:
             arena_cache.put(arena_opponent_id, cached)
         arena_opponent = cached
         if reset_hidden:
-            arena_lstm_state = arena_opponent.initial_state(batch_size=num_envs * len(red_ids), device=opponent_device)
+            arena_lstm_state = arena_opponent.initial_state(
+                batch_size=num_envs * len(red_ids), device=opponent_device
+            )
             arena_done = torch.ones(num_envs * len(red_ids), device=opponent_device)
 
     if args.train_mode == "arena":
@@ -831,10 +837,10 @@ def main() -> None:
             entropies_buf[step] = entropy
 
             action_np = action.detach().cpu().numpy()
-            
+
             # Prepare action dictionaries for all envs
             all_actions_dicts = [{} for _ in range(num_envs)]
-            
+
             # (1) Blue team (learning policy)
             for env_idx in range(num_envs):
                 off = env_idx * batch_size_per_env
@@ -862,19 +868,21 @@ def main() -> None:
                     all_actions_dicts[env_idx].update(heuristic_acts_list[env_idx])
 
             # Step all environments in parallel
-            next_obs_dicts, rewards_list, terminations_list, truncations_list, infos_list = venv.step(all_actions_dicts)
+            next_obs_dicts, rewards_list, terminations_list, truncations_list, infos_list = venv.step(
+                all_actions_dicts
+            )
 
             rewards_flat = np.zeros(batch_size, dtype=np.float32)
             done_flat = np.zeros(batch_size, dtype=np.float32)
             arena_done_np = np.zeros(num_envs * len(red_ids), dtype=np.float32)
-            
+
             # Aggregate results and check terminations
             team_alive_list = venv.get_team_alive()
             last_outcomes = venv.get_last_outcomes()
 
             for env_idx in range(num_envs):
                 off = env_idx * batch_size_per_env
-                
+
                 # Learning policy (blue)
                 r_i = np.asarray([rewards_list[env_idx][bid] for bid in blue_ids], dtype=np.float32)
                 rewards_flat[off : off + batch_size_per_env] = r_i
@@ -882,13 +890,15 @@ def main() -> None:
                 current_ep_lens[env_idx] += 1
 
                 d_i = np.asarray(
-                    [terminations_list[env_idx][bid] or truncations_list[env_idx][bid] for bid in blue_ids], dtype=np.float32
+                    [terminations_list[env_idx][bid] or truncations_list[env_idx][bid] for bid in blue_ids],
+                    dtype=np.float32,
                 )
                 done_flat[off : off + batch_size_per_env] = d_i
-                
+
                 # Opponent policy (red)
                 arena_d_i = np.asarray(
-                    [terminations_list[env_idx][rid] or truncations_list[env_idx][rid] for rid in red_ids], dtype=np.float32
+                    [terminations_list[env_idx][rid] or truncations_list[env_idx][rid] for rid in red_ids],
+                    dtype=np.float32,
                 )
                 arena_done_np[env_idx * len(red_ids) : (env_idx + 1) * len(red_ids)] = arena_d_i
 
@@ -929,22 +939,25 @@ def main() -> None:
                     current_ep_lens[env_idx] = 0
                     episodes += 1
                     env_episode_counts[env_idx] += 1
-                    
+
                     # Reset this env
                     reset_obs, _ = venv.reset(
                         [int(args.seed) + env_idx * 1_000_000 + env_episode_counts[env_idx]],
-                        indices=[env_idx]
+                        indices=[env_idx],
                     )
                     next_obs_dicts[env_idx] = reset_obs[0]
-                    
+
                     # Ensure LSTM resets for this env (learning policy)
                     done_flat[off : off + batch_size_per_env] = 1.0
-                    
+
                     # Ensure LSTM resets for this env (arena opponent)
                     arena_done_np[env_idx * len(red_ids) : (env_idx + 1) * len(red_ids)] = 1.0
-                    
+
                     if args.train_mode == "arena":
-                        if args.arena_refresh_episodes > 0 and episodes % int(args.arena_refresh_episodes) == 0:
+                        if (
+                            args.arena_refresh_episodes > 0
+                            and episodes % int(args.arena_refresh_episodes) == 0
+                        ):
                             _arena_refresh_pool()
                             _arena_sample_opponent(reset_hidden=True)
                         else:
@@ -977,7 +990,7 @@ def main() -> None:
         returns_normalized = return_rms.normalize(returns)
 
         # PPO updates (recurrent full-batch for now).
-        for epoch in range(args.update_epochs):
+        for _epoch in range(args.update_epochs):
             new_logprobs = torch.zeros_like(logprobs_buf)
             new_values = torch.zeros_like(values_buf)
             new_entropies = torch.zeros_like(entropies_buf)
@@ -1009,12 +1022,12 @@ def main() -> None:
             optimizer.step()
 
         sps = int((global_step - start_global_step) / max(1e-6, (time.time() - start_time)))
-        
+
         # Stats Aggregation
         window = 20
         avg_return = float(np.mean(episodic_returns[-window:])) if episodic_returns else 0.0
         avg_len = float(np.mean(episodic_lengths[-window:])) if episodic_lengths else 0.0
-        
+
         recent_outcomes = episodic_outcomes[-window:]
         n_out = len(recent_outcomes)
         if n_out > 0:
@@ -1130,13 +1143,19 @@ def main() -> None:
                     ),
                     encoding="utf-8",
                 )
-                print(f"new best: win_rate={win_rate:.3f} mean_hp_margin={mean_hp_margin:.2f} @ update {update}")
+                print(
+                    f"new best: win_rate={win_rate:.3f} mean_hp_margin={mean_hp_margin:.2f} @ update {update}"
+                )
 
                 if wandb_run is not None and wandb_log_best_model:
                     artifact = wandb.Artifact(
                         name=f"model-{wandb_run.id}",
                         type="model",
-                        metadata={"update": int(update), "global_step": int(global_step), **best_ckpt["eval"]},
+                        metadata={
+                            "update": int(update),
+                            "global_step": int(global_step),
+                            **best_ckpt["eval"],
+                        },
                     )
                     artifact.add_file(str(best_pt))
                     wandb_run.log_artifact(artifact, aliases=["best", f"update_{update:05d}"])
@@ -1173,7 +1192,7 @@ def main() -> None:
                     "pg_loss": float(pg_loss.item()),
                     "v_loss": float(v_loss.item()),
                     "entropy": float(entropy_loss.item()),
-                    "grad_norm": float(grad_norm.item()) if hasattr(grad_norm, 'item') else float(grad_norm),
+                    "grad_norm": float(grad_norm.item()) if hasattr(grad_norm, "item") else float(grad_norm),
                     "sps": int(sps),
                     "eval": eval_stats,
                     "best_updated": best_updated,
@@ -1192,7 +1211,9 @@ def main() -> None:
                 "train/pg_loss": float(pg_loss.item()),
                 "train/v_loss": float(v_loss.item()),
                 "train/entropy": float(entropy_loss.item()),
-                "train/grad_norm": float(grad_norm.item()) if hasattr(grad_norm, 'item') else float(grad_norm),
+                "train/grad_norm": float(grad_norm.item())
+                if hasattr(grad_norm, "item")
+                else float(grad_norm),
                 "train/sps": int(sps),
                 "train/global_step": int(global_step),
                 "train/episodes": int(episodes),
