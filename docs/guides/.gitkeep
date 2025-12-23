@@ -1,0 +1,36 @@
+# Developer Guides
+
+This folder contains how-to documentation.
+
+## Suggested Guides
+
+- `setup.md` - Development environment setup
+- `testing.md` - Running tests, writing new tests
+- `training.md` - How to train agents, hyperparameters
+- `visualization.md` - Using the viewer, server.py
+- `adding-weapons.md` - How to add new weapon types
+- `adding-biomes.md` - How to create new terrain biomes
+
+## Template
+
+```markdown
+# How to [Task]
+
+## Prerequisites
+- Requirement 1
+- Requirement 2
+
+## Steps
+
+### 1. First Step
+Description and commands.
+
+### 2. Second Step
+Description and commands.
+
+## Verification
+How to confirm it worked.
+
+## Troubleshooting
+Common issues and solutions.
+```

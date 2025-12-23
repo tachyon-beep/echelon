@@ -17,4 +17,3 @@ def test_env_fills_dirt_ground_layer():
     assert env.world is not None
     assert env.world.size_z > 0
     assert not bool(np.any(env.world.voxels[0] == VoxelWorld.AIR))
-

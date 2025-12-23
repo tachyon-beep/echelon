@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -10,6 +9,9 @@ import torch
 from ..config import EnvConfig, WorldConfig
 from ..env.env import EchelonEnv
 from ..rl.model import ActorCriticLSTM
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _stack_obs(obs: dict[str, np.ndarray], ids: list[str]) -> np.ndarray:
@@ -36,7 +38,9 @@ def _env_cfg_from_checkpoint(ckpt: dict[str, Any]) -> EnvConfig:
 
 def load_policy(ckpt_path: Path, *, device: torch.device) -> LoadedPolicy:
     ckpt_path = ckpt_path.resolve()
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)  # TODO: migrate to weights_only=True after adding safe globals
+    ckpt = torch.load(
+        ckpt_path, map_location=device, weights_only=False
+    )  # TODO: migrate to weights_only=True after adding safe globals
     env_cfg = _env_cfg_from_checkpoint(ckpt)
 
     # Use cached model dimensions if available (HIGH-9), otherwise fall back to env creation
@@ -97,15 +101,21 @@ def play_match(
         actions = {bid: act_b_np[i] for i, bid in enumerate(blue_ids)}
         actions.update({rid: act_r_np[i] for i, rid in enumerate(red_ids)})
 
-        obs, rewards, terminations, truncations, infos = env.step(actions)
+        obs, _rewards, terminations, truncations, _infos = env.step(actions)
 
-        blue_done = torch.tensor([terminations[bid] or truncations[bid] for bid in blue_ids], device=device, dtype=torch.float32)
-        red_done = torch.tensor([terminations[rid] or truncations[rid] for rid in red_ids], device=device, dtype=torch.float32)
+        blue_done = torch.tensor(
+            [terminations[bid] or truncations[bid] for bid in blue_ids], device=device, dtype=torch.float32
+        )
+        red_done = torch.tensor(
+            [terminations[rid] or truncations[rid] for rid in red_ids], device=device, dtype=torch.float32
+        )
 
         steps += 1
         if max_steps is not None and steps >= int(max_steps):
             break
 
+        if env.sim is None:
+            break
         blue_alive = env.sim.team_alive("blue")
         red_alive = env.sim.team_alive("red")
         if any(truncations.values()) or (not blue_alive) or (not red_alive):

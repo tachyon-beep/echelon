@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Tuple
+from typing import TYPE_CHECKING
 
-import numpy as np
 import numba
+import numpy as np
 
-from .world import VoxelWorld
+if TYPE_CHECKING:
+    from .world import VoxelWorld
 
 
 @dataclass(frozen=True)
@@ -19,10 +20,14 @@ class RaycastHit:
 def _raycast_dda_pure(
     voxels: np.ndarray,
     blocks_los_lut: np.ndarray,
-    start_x: float, start_y: float, start_z: float,
-    end_x_f: float, end_y_f: float, end_z_f: float,
+    start_x: float,
+    start_y: float,
+    start_z: float,
+    end_x_f: float,
+    end_y_f: float,
+    end_z_f: float,
     include_end: bool,
-) -> Tuple[bool, int, int, int]:
+) -> tuple[bool, int, int, int]:
     """
     Pure-Python DDA raycast core.
 
@@ -33,20 +38,20 @@ def _raycast_dda_pure(
     dy = end_y_f - start_y
     dz = end_z_f - start_z
 
-    length = math.sqrt(dx*dx + dy*dy + dz*dz)
+    length = math.sqrt(dx * dx + dy * dy + dz * dz)
     if length <= 1e-9:
         return (False, -1, -1, -1)
 
     # Unit direction
-    ux, uy, uz = dx/length, dy/length, dz/length
+    ux, uy, uz = dx / length, dy / length, dz / length
 
     # Current voxel coordinates
-    x = int(math.floor(start_x))
-    y = int(math.floor(start_y))
-    z = int(math.floor(start_z))
-    end_x = int(math.floor(end_x_f))
-    end_y = int(math.floor(end_y_f))
-    end_z = int(math.floor(end_z_f))
+    x = math.floor(start_x)
+    y = math.floor(start_y)
+    z = math.floor(start_z)
+    end_x = math.floor(end_x_f)
+    end_y = math.floor(end_y_f)
+    end_z = math.floor(end_z_f)
 
     step_x = 1 if ux > 0 else (-1 if ux < 0 else 0)
     step_y = 1 if uy > 0 else (-1 if uy < 0 else 0)
@@ -88,9 +93,8 @@ def _raycast_dda_pure(
             if not include_end:
                 return (False, -1, -1, -1)
             # Check end voxel if requested
-            if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz:
-                if blocks_los_lut[voxels[z, y, x]]:
-                    return (True, x, y, z)
+            if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz and blocks_los_lut[voxels[z, y, x]]:
+                return (True, x, y, z)
             return (False, -1, -1, -1)
 
         if t_max_x < t_max_y:
@@ -129,10 +133,14 @@ def _raycast_dda_pure(
 def _raycast_dda_numba(
     voxels: np.ndarray,
     blocks_los_lut: np.ndarray,
-    start_x: float, start_y: float, start_z: float,
-    end_x_f: float, end_y_f: float, end_z_f: float,
+    start_x: float,
+    start_y: float,
+    start_z: float,
+    end_x_f: float,
+    end_y_f: float,
+    end_z_f: float,
     include_end: bool,
-) -> Tuple[bool, int, int, int]:
+) -> tuple[bool, int, int, int]:
     """
     Numba JIT-compiled DDA raycast core.
 
@@ -143,20 +151,20 @@ def _raycast_dda_numba(
     dy = end_y_f - start_y
     dz = end_z_f - start_z
 
-    length = math.sqrt(dx*dx + dy*dy + dz*dz)
+    length = math.sqrt(dx * dx + dy * dy + dz * dz)
     if length <= 1e-9:
         return (False, -1, -1, -1)
 
     # Unit direction
-    ux, uy, uz = dx/length, dy/length, dz/length
+    ux, uy, uz = dx / length, dy / length, dz / length
 
     # Current voxel coordinates
-    x = int(math.floor(start_x))
-    y = int(math.floor(start_y))
-    z = int(math.floor(start_z))
-    end_x = int(math.floor(end_x_f))
-    end_y = int(math.floor(end_y_f))
-    end_z = int(math.floor(end_z_f))
+    x = math.floor(start_x)
+    y = math.floor(start_y)
+    z = math.floor(start_z)
+    end_x = math.floor(end_x_f)
+    end_y = math.floor(end_y_f)
+    end_z = math.floor(end_z_f)
 
     step_x = 1 if ux > 0 else (-1 if ux < 0 else 0)
     step_y = 1 if uy > 0 else (-1 if uy < 0 else 0)
@@ -200,9 +208,8 @@ def _raycast_dda_numba(
             if not include_end:
                 return (False, -1, -1, -1)
             # Check end voxel if requested
-            if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz:
-                if blocks_los_lut[voxels[z, y, x]]:
-                    return (True, x, y, z)
+            if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz and blocks_los_lut[voxels[z, y, x]]:
+                return (True, x, y, z)
             return (False, -1, -1, -1)
 
         if t_max_x < t_max_y:
@@ -253,8 +260,12 @@ def raycast_voxels(
     blocked, hx, hy, hz = _raycast_dda_numba(
         world.voxels,
         blocks_los_lut,
-        float(start_xyz[0]), float(start_xyz[1]), float(start_xyz[2]),
-        float(end_xyz[0]), float(end_xyz[1]), float(end_xyz[2]),
+        float(start_xyz[0]),
+        float(start_xyz[1]),
+        float(start_xyz[2]),
+        float(end_xyz[0]),
+        float(end_xyz[1]),
+        float(end_xyz[2]),
         include_end,
     )
 
@@ -292,8 +303,12 @@ def _batch_raycast_numba(
         blocked, _, _, _ = _raycast_dda_numba(
             voxels,
             blocks_los_lut,
-            starts[i, 0], starts[i, 1], starts[i, 2],
-            ends[i, 0], ends[i, 1], ends[i, 2],
+            starts[i, 0],
+            starts[i, 1],
+            starts[i, 2],
+            ends[i, 0],
+            ends[i, 1],
+            ends[i, 2],
             False,
         )
         results[i] = not blocked
@@ -326,4 +341,5 @@ def batch_has_los(
 
     blocks_los_lut = world.blocks_los_lut()
 
-    return _batch_raycast_numba(world.voxels, blocks_los_lut, starts_f, ends_f)
+    result: np.ndarray = _batch_raycast_numba(world.voxels, blocks_los_lut, starts_f, ends_f)
+    return result

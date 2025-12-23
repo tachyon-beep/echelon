@@ -28,7 +28,15 @@ def clear_spawn_corner(world: VoxelWorld, *, corner: str, spawn_clear: int) -> N
     elif corner == "TL":
         world.set_box_solid(0, world.size_y - spawn_clear, 0, spawn_clear, world.size_y, world.size_z, False)
     elif corner == "TR":
-        world.set_box_solid(world.size_x - spawn_clear, world.size_y - spawn_clear, 0, world.size_x, world.size_y, world.size_z, False)
+        world.set_box_solid(
+            world.size_x - spawn_clear,
+            world.size_y - spawn_clear,
+            0,
+            world.size_x,
+            world.size_y,
+            world.size_z,
+            False,
+        )
     else:
         raise ValueError(f"Unknown corner: {corner!r}")
 
@@ -69,7 +77,9 @@ def main() -> None:
     spawns = regions.get("spawns", {}) or {}
     spawn_clear = int((spawns.get("blue") or {}).get("spawn_clear", 0))
     if spawn_clear <= 0:
-        spawn_clear = int(world.get("spawn_clear", 0)) or max(25, int(min(world_cfg.size_x, world_cfg.size_y) * 0.25))
+        spawn_clear = int(world.get("spawn_clear", 0)) or max(
+            25, int(min(world_cfg.size_x, world_cfg.size_y) * 0.25)
+        )
     spawn_clear = min(spawn_clear, world_cfg.size_x, world_cfg.size_y)
 
     seq = np.random.SeedSequence(seed)
@@ -85,14 +95,17 @@ def main() -> None:
     obj_radius = objective.get("radius")
     if (
         str(objective.get("shape", "circle")) != "circle"
-        or not isinstance(obj_center, (list, tuple))
+        or not isinstance(obj_center, list | tuple)
         or len(obj_center) < 2
-        or not isinstance(obj_center[0], (int, float))
-        or not isinstance(obj_center[1], (int, float))
-        or not isinstance(obj_radius, (int, float))
+        or not isinstance(obj_center[0], int | float)
+        or not isinstance(obj_center[1], int | float)
+        or not isinstance(obj_radius, int | float)
     ):
         raise SystemExit("Recipe has no `regions.objective` circle; cannot reproduce.")
-    repro_world.meta["capture_zone"] = {"center": [float(obj_center[0]), float(obj_center[1])], "radius": float(obj_radius)}
+    repro_world.meta["capture_zone"] = {
+        "center": [float(obj_center[0]), float(obj_center[1])],
+        "radius": float(obj_radius),
+    }
 
     clear_spawn_corner(repro_world, corner=spawn_corners.get("blue", "BL"), spawn_clear=spawn_clear)
     clear_spawn_corner(repro_world, corner=spawn_corners.get("red", "TR"), spawn_clear=spawn_clear)

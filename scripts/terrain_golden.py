@@ -46,7 +46,15 @@ def _clear_corner(world: VoxelWorld, corner: str, spawn_clear: int) -> None:
     elif corner == "TL":
         world.set_box_solid(0, world.size_y - spawn_clear, 0, spawn_clear, world.size_y, world.size_z, False)
     elif corner == "TR":
-        world.set_box_solid(world.size_x - spawn_clear, world.size_y - spawn_clear, 0, world.size_x, world.size_y, world.size_z, False)
+        world.set_box_solid(
+            world.size_x - spawn_clear,
+            world.size_y - spawn_clear,
+            0,
+            world.size_x,
+            world.size_y,
+            world.size_z,
+            False,
+        )
     else:
         raise ValueError(f"Unknown corner: {corner!r}")
 
@@ -63,7 +71,10 @@ def generate_hashes(seed: int, world_cfg: WorldConfig, *, packs_per_team: int) -
     red_canon = opposite_corner(blue_canon)
     transform = str(rng_variants.choice(list_transforms()))
     world.voxels = apply_transform_voxels(world.voxels, transform)
-    spawn_corners = {"blue": transform_corner(blue_canon, transform), "red": transform_corner(red_canon, transform)}
+    spawn_corners = {
+        "blue": transform_corner(blue_canon, transform),
+        "red": transform_corner(red_canon, transform),
+    }
 
     spawn_clear = _spawn_clear_for_packs(world_cfg, packs_per_team)
     world.meta["transform"] = transform
@@ -123,7 +134,9 @@ def generate_hashes(seed: int, world_cfg: WorldConfig, *, packs_per_team: int) -
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--golden", type=str, default="runs/terrain_golden.json")
-    parser.add_argument("--write", action="store_true", help="Write/update the golden file instead of checking it")
+    parser.add_argument(
+        "--write", action="store_true", help="Write/update the golden file instead of checking it"
+    )
     parser.add_argument("--seeds", type=str, default="1,2,3,12345,99991")
     parser.add_argument("--size", type=int, default=100)
     parser.add_argument("--z", type=int, default=20)
@@ -167,8 +180,8 @@ def main() -> None:
             print(f"missing seed in golden: {seed}")
             continue
 
-        exp = (g.get("hashes") or {})
-        got = (e.get("hashes") or {})
+        exp = g.get("hashes") or {}
+        got = e.get("hashes") or {}
         if exp.get("solid") != got.get("solid"):
             ok = False
             print(f"seed {seed}: solid hash mismatch expected={exp.get('solid')} got={got.get('solid')}")

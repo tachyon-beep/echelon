@@ -14,10 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from echelon.arena.league import League
+from typing import TYPE_CHECKING
+
 from echelon.arena.glicko2 import GameResult
-from echelon.arena.match import load_policy, play_match, LoadedPolicy
-from echelon.config import EnvConfig
+from echelon.arena.league import League
+from echelon.arena.match import LoadedPolicy, load_policy, play_match
+
+if TYPE_CHECKING:
+    from echelon.config import EnvConfig
 
 
 class LRUPolicyCache:
@@ -88,7 +92,9 @@ def cmd_add(args: argparse.Namespace) -> None:
         entry.commander_name = str(args.name)
 
     league.save(league_path)
-    print(f"ok: added {entry.entry_id} kind={entry.kind} rating={entry.rating.rating:.1f}±{entry.rating.rd:.1f}")
+    print(
+        f"ok: added {entry.entry_id} kind={entry.kind} rating={entry.rating.rating:.1f}±{entry.rating.rd:.1f}"
+    )
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -137,7 +143,9 @@ def cmd_eval_candidate(args: argparse.Namespace) -> None:
 
     top_k = int(args.top_k)
     cand_k = int(args.candidate_k)
-    pool = league.top_commanders(top_k) + league.recent_candidates(cand_k, exclude_id=candidate_entry.entry_id)
+    pool = league.top_commanders(top_k) + league.recent_candidates(
+        cand_k, exclude_id=candidate_entry.entry_id
+    )
     pool = [e for e in pool if e.entry_id != candidate_entry.entry_id]
     if not pool:
         raise SystemExit("no opponents available (need commanders/candidates in league)")
@@ -216,7 +224,7 @@ def cmd_eval_candidate(args: argparse.Namespace) -> None:
             }
         )
         print(
-            f"match {i+1}/{matches}: opp={opp_entry.entry_id} cand_as={cand_team} winner={out.winner} "
+            f"match {i + 1}/{matches}: opp={opp_entry.entry_id} cand_as={cand_team} winner={out.winner} "
             f"score={cand_score}"
         )
 

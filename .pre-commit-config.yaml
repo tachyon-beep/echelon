@@ -1,0 +1,53 @@
+# Pre-commit hooks for Echelon
+# Install: uv run pre-commit install
+# Run manually: uv run pre-commit run --all-files
+
+repos:
+  # Ruff - linting and formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # Mypy - type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.14.1
+    hooks:
+      - id: mypy
+        args: [--config-file=pyproject.toml]
+        additional_dependencies:
+          - numpy>=2.1
+          - torch>=2.6
+        pass_filenames: false
+        entry: mypy echelon/
+
+  # Guidance hook - runs after failures to show help
+  - repo: local
+    hooks:
+      - id: lint-guidance
+        name: "Lint Fix Guidance"
+        entry: |
+          bash -c '
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════════╗"
+          echo "║                     PRE-COMMIT HOOK FAILED                       ║"
+          echo "╠══════════════════════════════════════════════════════════════════╣"
+          echo "║ Before fixing manually, ask Claude Code to use these skills:     ║"
+          echo "║                                                                  ║"
+          echo "║ RUFF ERRORS:                                                     ║"
+          echo "║   Skill: axiom-python-engineering:systematic-delinting           ║"
+          echo "║   Prompt: \"Use the systematic-delinting skill to fix ruff errors\"║"
+          echo "║                                                                  ║"
+          echo "║ MYPY ERRORS:                                                     ║"
+          echo "║   Skill: axiom-python-engineering:resolving-mypy-errors          ║"
+          echo "║   Prompt: \"Use the resolving-mypy-errors skill to fix types\"    ║"
+          echo "╚══════════════════════════════════════════════════════════════════╝"
+          echo ""
+          exit 0
+          '
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-commit]

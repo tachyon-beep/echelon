@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-
 # Epsilon for numerical stability in tanh squashing (consistent throughout)
 TANH_EPS = 1e-6
 
@@ -59,7 +58,9 @@ class ActorCriticLSTM(nn.Module):
         c = torch.zeros(1, batch_size, self.lstm_hidden_dim, device=device)
         return LSTMState(h=h, c=c)
 
-    def _step_lstm(self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor) -> tuple[torch.Tensor, LSTMState]:
+    def _step_lstm(
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor
+    ) -> tuple[torch.Tensor, LSTMState]:
         # x: [batch, feat]
         # done: [batch] with 1.0 meaning episode boundary before this step.
         x_seq = x.unsqueeze(0)  # [1, batch, feat]
@@ -113,7 +114,9 @@ class ActorCriticLSTM(nn.Module):
         return action, logprob, entropy, value, next_state
 
     @torch.no_grad()
-    def get_value(self, obs: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor) -> tuple[torch.Tensor, LSTMState]:
+    def get_value(
+        self, obs: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor
+    ) -> tuple[torch.Tensor, LSTMState]:
         obs = obs.float()
         done = done.float()
         x = self.encoder(obs)

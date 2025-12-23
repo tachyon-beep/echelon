@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-import hashlib
+from typing import TYPE_CHECKING, Any
 
 from .glicko2 import GameResult, Glicko2Config, Glicko2Rating, rate
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _now_iso() -> str:
@@ -85,7 +87,7 @@ class LeagueEntry:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], *, cfg: Glicko2Config) -> "LeagueEntry":
+    def from_dict(cls, d: dict[str, Any], *, cfg: Glicko2Config) -> LeagueEntry:
         rating = d.get("rating") or {}
         return cls(
             entry_id=str(d.get("id")),
@@ -121,7 +123,7 @@ class League:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "League":
+    def from_dict(cls, d: dict[str, Any]) -> League:
         g = d.get("glicko2") or {}
         cfg = Glicko2Config(
             tau=float(g.get("tau", Glicko2Config().tau)),
@@ -137,7 +139,7 @@ class League:
         return league
 
     @classmethod
-    def load(cls, path: Path) -> "League":
+    def load(cls, path: Path) -> League:
         data = json.loads(path.read_text(encoding="utf-8"))
         return cls.from_dict(data)
 

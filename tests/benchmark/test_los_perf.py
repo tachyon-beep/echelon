@@ -2,14 +2,16 @@
 
 Run with: pytest tests/benchmark/test_los_perf.py -v -s
 """
+
 from __future__ import annotations
 
 import time
+
 import numpy as np
 import pytest
 
+from echelon.sim.los import batch_has_los, raycast_voxels
 from echelon.sim.world import VoxelWorld
-from echelon.sim.los import raycast_voxels, has_los, batch_has_los
 
 
 @pytest.fixture
@@ -67,7 +69,7 @@ class TestSingleRayPerformance:
         rays_per_sec = n_rays / elapsed
         us_per_ray = (elapsed / n_rays) * 1e6
 
-        print(f"\nSingle-ray performance:")
+        print("\nSingle-ray performance:")
         print(f"  {rays_per_sec:,.0f} rays/sec")
         print(f"  {us_per_ray:.2f} us/ray")
 
@@ -91,7 +93,7 @@ class TestBatchRayPerformance:
 
         # Benchmark
         t0 = time.perf_counter()
-        results = batch_has_los(large_world, starts, ends)
+        batch_has_los(large_world, starts, ends)
         elapsed = time.perf_counter() - t0
 
         rays_per_sec = n_rays / elapsed
@@ -100,7 +102,7 @@ class TestBatchRayPerformance:
         print(f"\nBatch ray performance ({n_rays} rays):")
         print(f"  {rays_per_sec:,.0f} rays/sec")
         print(f"  {us_per_ray:.2f} us/ray")
-        print(f"  Total time: {elapsed*1000:.1f} ms")
+        print(f"  Total time: {elapsed * 1000:.1f} ms")
 
         # Soft assertion: batch should be faster than single
         assert rays_per_sec > 100000, f"Too slow: {rays_per_sec:.0f} rays/sec"
@@ -121,7 +123,7 @@ class TestBatchRayPerformance:
             batch_has_los(large_world, starts, ends)
             elapsed = time.perf_counter() - t0
 
-            print(f"  n={n:>5}: {n/elapsed:>10,.0f} rays/sec ({elapsed*1000:.2f} ms)")
+            print(f"  n={n:>5}: {n / elapsed:>10,.0f} rays/sec ({elapsed * 1000:.2f} ms)")
 
 
 class TestLargeWorldPerformance:
@@ -140,11 +142,11 @@ class TestLargeWorldPerformance:
         batch_has_los(target_world, starts[:100], ends[:100])
 
         t0 = time.perf_counter()
-        results = batch_has_los(target_world, starts, ends)
+        batch_has_los(target_world, starts, ends)
         elapsed = time.perf_counter() - t0
 
         rays_per_sec = n_rays / elapsed
 
-        print(f"\n500x500x100 world batch performance:")
+        print("\n500x500x100 world batch performance:")
         print(f"  {rays_per_sec:,.0f} rays/sec")
-        print(f"  Total time: {elapsed*1000:.1f} ms for {n_rays} rays")
+        print(f"  Total time: {elapsed * 1000:.1f} ms for {n_rays} rays")

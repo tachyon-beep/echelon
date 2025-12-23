@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from ..actions import ACTION_DIM, ActionIndex
-from ..constants import PACK_SIZE
 from ..config import (
     AMS_COOLDOWN_S,
     AMS_INTERCEPT_PROB,
@@ -36,19 +37,40 @@ from ..config import (
     WATER_COOLING_PER_S,
     WATER_SPEED_MULT,
 )
+from ..constants import (
+    FALLEN_DURATION_S,
+    GRAVITY_M_S2,
+    LEG_HIT_BODY_DAMAGE_MULT,
+    LEGGED_STABILITY_MULT,
+    MISSILE_VERTICAL_VEL,
+    MOVING_STABILITY_MULT,
+    NOISE_MASS_FACTORS,
+    PACK_SIZE,
+    PROJECTILE_SPAWN_OFFSET_Z,
+    REAR_ARC_COS_THRESHOLD,
+    REAR_ARMOR_DAMAGE_MULT,
+    STABILITY_REGEN_PER_S,
+    STANDUP_STABILITY_FRACTION,
+    UNSTABLE_ACCEL_MULT,
+    VENT_HEAT_MULT,
+)
 from .los import has_los, raycast_voxels
-from .mech import MechState
 from .projectile import Projectile
 from .world import VoxelWorld
 
+if TYPE_CHECKING:
+    from .mech import MechState
+
 # Lightweight "role" extensions (kept simple and readable in replays).
+
 
 @dataclass
 class SmokeCloud:
-    pos: np.ndarray # float32[3]
+    pos: np.ndarray  # float32[3]
     radius: float
     remaining_life: float
     alive: bool = True
+
 
 def _wrap_pi(angle: float) -> float:
     # Wrap to (-pi, pi]
@@ -96,10 +118,8 @@ class SpatialGrid:
             return
         # Remove from old cell
         if old_cell is not None and old_cell in self.grid:
-            try:
+            with contextlib.suppress(ValueError):
                 self.grid[old_cell].remove(mech_id)
-            except ValueError:
-                pass
         # Add to new cell
         self._mech_cells[mech_id] = new_cell
         if new_cell not in self.grid:
@@ -109,7 +129,7 @@ class SpatialGrid:
     def query_nearby(self, pos: np.ndarray, radius: float) -> list[str]:
         """Return mech IDs in cells overlapping the query circle."""
         cx, cy = self._cell_for_pos(pos)
-        r_cells = int(math.ceil(radius / self.cell_size))
+        r_cells = math.ceil(radius / self.cell_size)
         result: list[str] = []
         for dx in range(-r_cells, r_cells + 1):
             for dy in range(-r_cells, r_cells + 1):
@@ -133,10 +153,8 @@ class SpatialGrid:
         """Remove a mech from the grid (call on death)."""
         old_cell = self._mech_cells.pop(mech_id, None)
         if old_cell is not None and old_cell in self.grid:
-            try:
+            with contextlib.suppress(ValueError):
                 self.grid[old_cell].remove(mech_id)
-            except ValueError:
-                pass
             if not self.grid[old_cell]:
                 del self.grid[old_cell]
 
@@ -241,11 +259,11 @@ class Sim:
         mag2 = float(np.dot(d, d))
         if mag2 < 1e-9:
             return True
-        
+
         for cloud in self.smoke_clouds:
             if not cloud.alive:
                 continue
-            
+
             # Distance from point to line segment
             v = cloud.pos - p1
             t = float(np.dot(v, d) / mag2)
@@ -323,14 +341,12 @@ class Sim:
     def _collides_any(self, mech: MechState, pos: np.ndarray) -> bool:
         if self._collides_world(mech, pos):
             return True
-        if self._collides_mechs(mech, pos):
-            return True
-        return False
+        return bool(self._collides_mechs(mech, pos))
 
     def _apply_movement(self, mech: MechState, action: np.ndarray) -> None:
         if mech.shutdown:
             # No control while shutdown, but physics should continue (gravity + damping).
-            g_vox = 9.81 / float(self.world.voxel_size_m)
+            g_vox = GRAVITY_M_S2 / float(self.world.voxel_size_m)
             mech.vel[2] = float(mech.vel[2] - g_vox * self.dt)
             mech.vel *= 0.98
             return
@@ -350,19 +366,21 @@ class Sim:
         accel_scale = 1.0
         if mech.is_legged:
             speed_scale *= 0.4
-            accel_scale *= 0.5
-        
+            accel_scale *= UNSTABLE_ACCEL_MULT
+
         # Hazard: Water Slow
         ix, iy, iz = int(mech.pos[0]), int(mech.pos[1]), int(mech.pos[2] - mech.half_size[2])
         if self.world.get_voxel(ix, iy, iz) == VoxelWorld.WATER:
             speed_scale *= WATER_SPEED_MULT
 
-        desired = (forward * forward_throttle + right * strafe_throttle) * float(mech.spec.max_speed * speed_scale)
+        desired = (forward * forward_throttle + right * strafe_throttle) * float(
+            mech.spec.max_speed * speed_scale
+        )
         mech.vel[0] = float(desired[0])
         mech.vel[1] = float(desired[1])
 
         # Vertical is acceleration-based (jump jets) with gravity; mechs tend to rest on the ground.
-        g_vox = 9.81 / float(self.world.voxel_size_m)
+        g_vox = GRAVITY_M_S2 / float(self.world.voxel_size_m)
         jet_acc = vertical_throttle * float(mech.spec.max_jet_accel * accel_scale)
         mech.vel[2] = float(mech.vel[2] + (jet_acc - g_vox) * self.dt)
 
@@ -380,7 +398,7 @@ class Sim:
             return
         vent = float(action[ActionIndex.VENT]) > 0.0
         if vent:
-            mech.heat = max(0.0, float(mech.heat - 2.0 * mech.spec.heat_dissipation * self.dt))
+            mech.heat = max(0.0, float(mech.heat - VENT_HEAT_MULT * mech.spec.heat_dissipation * self.dt))
 
     def _dissipate(self, mech: MechState) -> None:
         mech.heat = max(0.0, float(mech.heat - mech.spec.heat_dissipation * self.dt))
@@ -392,19 +410,19 @@ class Sim:
 
         # Axis-by-axis collision resolution (cheap, stable) with Step-Up support.
         # Step-up logic: if blocked horizontally, try to 'lift' the mech by up to 1 voxel.
-        step_up_max = 1.1 # slightly more than 1 voxel to be safe
+        step_up_max = 1.1  # slightly more than 1 voxel to be safe
 
         def _try_move(target_pos: np.ndarray) -> bool:
             if not self._collides_any(mech, target_pos):
                 return True
-            
+
             # If blocked, try stepping up
             # Only if we are roughly on the ground (vel[2] is small or negative)
             if abs(vel[2]) < 1.0:
                 up_trial = target_pos.copy()
                 up_trial[2] += step_up_max
                 if not self._collides_any(mech, up_trial):
-                    # We can step up! 
+                    # We can step up!
                     # But we need to check if there's a floor underneath the NEW position
                     # to avoid 'teleporting' through a thin wall into air.
                     # For v0 sim, we just allow it if the destination is clear.
@@ -436,7 +454,7 @@ class Sim:
         # Clamp to world boundaries.
         pos[0] = float(np.clip(pos[0], hs[0], float(self.world.size_x) - hs[0]))
         pos[1] = float(np.clip(pos[1], hs[1], float(self.world.size_y) - hs[1]))
-        pos[2] = float(max(hs[2], pos[2])) # Ground floor
+        pos[2] = float(max(hs[2], pos[2]))  # Ground floor
 
         mech.pos[:] = pos
         # Update spatial grid for efficient collision/target queries (HIGH-11)
@@ -447,12 +465,12 @@ class Sim:
         aabb_min = mech.pos - hs
         aabb_max = mech.pos + hs
 
-        min_ix = int(math.floor(float(aabb_min[0])))
-        min_iy = int(math.floor(float(aabb_min[1])))
-        min_iz = int(math.floor(float(aabb_min[2])))
-        max_ix = int(math.ceil(float(aabb_max[0])))
-        max_iy = int(math.ceil(float(aabb_max[1])))
-        max_iz = int(math.ceil(float(aabb_max[2])))
+        min_ix = math.floor(float(aabb_min[0]))
+        min_iy = math.floor(float(aabb_min[1]))
+        min_iz = math.floor(float(aabb_min[2]))
+        max_ix = math.ceil(float(aabb_max[0]))
+        max_iy = math.ceil(float(aabb_max[1]))
+        max_iz = math.ceil(float(aabb_max[2]))
 
         min_ix = max(0, min_ix)
         min_iy = max(0, min_iy)
@@ -465,8 +483,8 @@ class Sim:
         # Heavy: High chance of solid hull. Scout: mostly debris.
         probs = {"scout": 0.1, "light": 0.3, "medium": 0.6, "heavy": 0.9}
         p_solid = probs.get(mech.spec.name, 0.5)
-        
-        # Roll once for the whole wreck or per-voxel? 
+
+        # Roll once for the whole wreck or per-voxel?
         # Whole wreck is cleaner tactically.
         is_solid_wreck = self.rng.random() < p_solid
         voxel_type = VoxelWorld.SOLID_DEBRIS if is_solid_wreck else VoxelWorld.DEBRIS_FIELD
@@ -517,18 +535,18 @@ class Sim:
         if dist < 1e-6:
             return 1.0, False
         attack_dir = attack_vec / dist
-        
+
         # Target facing
         forward, _ = _yaw_to_forward_right(target.yaw)
         forward_2d = forward[:2]
-        
+
         # Dot product
         # 1.0 = attack traveling exactly with facing (Rear Hit)
         # -1.0 = attack traveling opposite to facing (Front Hit)
         dot = float(np.dot(forward_2d, attack_dir))
-        
-        if dot > 0.707: # 45 degree rear cone
-            return 1.5, True # 1.5x damage
+
+        if dot > REAR_ARC_COS_THRESHOLD:  # 45 degree rear cone
+            return REAR_ARMOR_DAMAGE_MULT, True
         return 1.0, False
 
     def _handle_death(self, target: MechState, shooter_id: str) -> list[dict]:
@@ -546,31 +564,35 @@ class Sim:
             self._spawn_debris(target)
         return events
 
-    def _get_paint_bonus(self, target: MechState, raw_damage: float, shooter_id: str) -> tuple[float, list[dict]]:
+    def _get_paint_bonus(
+        self, target: MechState, raw_damage: float, shooter_id: str
+    ) -> tuple[float, list[dict]]:
         events = []
         if target.painted_remaining > 0.0 and target.last_painter_id:
             painter = self.mechs.get(target.last_painter_id)
             shooter = self.mechs.get(shooter_id)
             if painter is not None and shooter is not None and _same_pack(painter, shooter):
-                bonus = raw_damage * 0.10 # 10% bonus
+                bonus = raw_damage * 0.10  # 10% bonus
                 if target.last_painter_id != shooter_id:
-                    events.append({
-                        "type": "assist",
-                        "painter": target.last_painter_id,
-                        "shooter": shooter_id,
-                        "damage": bonus
-                    })
+                    events.append(
+                        {
+                            "type": "assist",
+                            "painter": target.last_painter_id,
+                            "shooter": shooter_id,
+                            "damage": bonus,
+                        }
+                    )
                 return raw_damage + bonus, events
         return raw_damage, events
 
     def _apply_hazards(self, mech: MechState) -> list[dict]:
         if not mech.alive:
             return []
-        
+
         events = []
         ix, iy, iz = int(mech.pos[0]), int(mech.pos[1]), int(mech.pos[2] - mech.half_size[2])
         vox = self.world.get_voxel(ix, iy, iz)
-        
+
         if vox == VoxelWorld.LAVA:
             mech.heat = float(mech.heat + LAVA_HEAT_PER_S * self.dt)
             dmg = LAVA_DMG_PER_S * self.dt
@@ -586,33 +608,33 @@ class Sim:
             events.extend(self._handle_death(mech, "debris"))
         elif vox == VoxelWorld.WATER:
             mech.heat = float(max(0.0, mech.heat - WATER_COOLING_PER_S * self.dt))
-            
+
         return events
 
     def _try_fire_laser(self, shooter: MechState, action: np.ndarray) -> list[dict]:
         if len(action) < ACTION_DIM:
             return []
-        
+
         # PRIMARY slot: Laser (Medium, Heavy)
         # SECONDARY slot: Laser (Light)
         fire_laser = False
         fire_flame = False
-        
+
         if shooter.spec.name in ("medium", "heavy"):
             fire_laser = float(action[ActionIndex.PRIMARY]) > 0.0
         elif shooter.spec.name == "light":
             fire_laser = float(action[ActionIndex.SECONDARY]) > 0.0
             # PRIMARY slot for light is FLAMER
             fire_flame = float(action[ActionIndex.PRIMARY]) > 0.0
-        
+
         if not (fire_laser or fire_flame) or shooter.shutdown or not shooter.alive:
             return []
-        
+
         if fire_laser and shooter.laser_cooldown > 0.0:
             fire_laser = False
         if fire_flame and shooter.kinetic_cooldown > 0.0:
             fire_flame = False
-            
+
         if not (fire_laser or fire_flame):
             return []
 
@@ -665,7 +687,7 @@ class Sim:
             else:
                 shooter.kinetic_cooldown = FLAMER.cooldown_s
                 heat_transfer = FLAME_HEAT_TRANSFER
-            
+
             shooter.heat = float(shooter.heat + spec.heat)
 
             mult, is_crit = self._get_damage_multiplier(target, shooter.pos)
@@ -682,7 +704,7 @@ class Sim:
             if hit_z < min_z + height * 0.3:
                 is_leg_hit = True
                 target.leg_hp -= final_dmg
-                final_dmg *= 0.5
+                final_dmg *= LEG_HIT_BODY_DAMAGE_MULT
 
             target.hp -= final_dmg
             target.heat = float(target.heat + heat_transfer)
@@ -700,7 +722,7 @@ class Sim:
                     "damage": final_dmg,
                     "is_crit": is_crit,
                     "is_leg_hit": is_leg_hit,
-                    "is_painted": target.painted_remaining > 0.0 # For visualization
+                    "is_painted": target.painted_remaining > 0.0,  # For visualization
                 }
             )
             all_events.extend(bonus_events)
@@ -725,9 +747,12 @@ class Sim:
                 return "los"
             if target.painted_remaining > 0.0 and target.last_painter_id:
                 painter = self.mechs.get(target.last_painter_id)
-                if painter is not None and _same_pack(painter, shooter):
-                    if self._sensor_quality(shooter) >= PAINT_LOCK_MIN_QUALITY:
-                        return "paint"
+                if (
+                    painter is not None
+                    and _same_pack(painter, shooter)
+                    and self._sensor_quality(shooter) >= PAINT_LOCK_MIN_QUALITY
+                ):
+                    return "paint"
             return None
 
         focus: MechState | None = None
@@ -778,7 +803,7 @@ class Sim:
         delta = target.pos - shooter.pos
         delta_norm = delta / (np.linalg.norm(delta) + 1e-6)
         up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        vel = (delta_norm + up * 0.5)
+        vel = delta_norm + up * MISSILE_VERTICAL_VEL
         vel /= np.linalg.norm(vel)
         speed = float(MISSILE.speed_vox)
         vel *= speed
@@ -787,7 +812,8 @@ class Sim:
             shooter_id=shooter.mech_id,
             target_id=target.mech_id,
             weapon=MISSILE.name,
-            pos=shooter.pos.copy() + np.array([0, 0, shooter.half_size[2] + 0.5], dtype=np.float32),
+            pos=shooter.pos.copy()
+            + np.array([0, 0, shooter.half_size[2] + PROJECTILE_SPAWN_OFFSET_Z], dtype=np.float32),
             vel=vel,
             speed=speed,
             damage=MISSILE.damage,
@@ -813,7 +839,7 @@ class Sim:
     def _try_fire_smoke(self, shooter: MechState, action: np.ndarray) -> list[dict]:
         if len(action) < ACTION_DIM:
             return []
-        
+
         # SPECIAL slot: Smoke (Universal)
         fire = float(action[ActionIndex.SPECIAL]) > 0.0
         if not fire or shooter.shutdown or not shooter.alive:
@@ -828,11 +854,11 @@ class Sim:
                 dist = np.linalg.norm(tgt.pos - shooter.pos)
                 if dist <= SMOKE.range_vox:
                     target_pos = tgt.pos
-        
+
         forward, _ = _yaw_to_forward_right(shooter.yaw)
         if target_pos is not None:
-            vel = (target_pos - shooter.pos)
-            vel[2] = 0 # keep it level
+            vel = target_pos - shooter.pos
+            vel[2] = 0  # keep it level
             dist = np.linalg.norm(vel)
             if dist > 1e-6:
                 vel = vel / dist * SMOKE.speed_vox
@@ -840,7 +866,7 @@ class Sim:
                 vel = forward * SMOKE.speed_vox
         else:
             vel = forward * SMOKE.speed_vox
-            
+
         proj = Projectile(
             shooter_id=shooter.mech_id,
             target_id=None,
@@ -853,7 +879,7 @@ class Sim:
             max_lifetime=SMOKE.range_vox / SMOKE.speed_vox,
             guidance="linear",
             splash_rad=SMOKE.splash_rad_vox,
-            splash_scale=1.0, 
+            splash_scale=1.0,
         )
         self.projectiles.append(proj)
         shooter.missile_cooldown = SMOKE.cooldown_s
@@ -871,7 +897,7 @@ class Sim:
     def _try_paint(self, shooter: MechState, action: np.ndarray) -> list[dict]:
         if len(action) < ACTION_DIM:
             return []
-        
+
         paint = False
         if shooter.spec.name == "scout":
             # PRIMARY slot for Scout
@@ -879,7 +905,7 @@ class Sim:
         elif shooter.spec.name in ("light", "medium"):
             # TERTIARY slot for others
             paint = float(action[ActionIndex.TERTIARY]) > 0.0
-        
+
         if not paint or shooter.shutdown or not shooter.alive:
             return []
         if shooter.painter_cooldown > 0.0:
@@ -915,14 +941,14 @@ class Sim:
 
             if best is None or dist < best[0]:
                 best = (dist, target)
-        
+
         if best is None:
             return []
-        
+
         target = best[1]
         shooter.painter_cooldown = PAINTER.cooldown_s
         shooter.heat = float(shooter.heat + PAINTER.heat)
-        target.painted_remaining = 5.0 # 5 seconds of paint
+        target.painted_remaining = 5.0  # 5 seconds of paint
         target.last_painter_id = shooter.mech_id
 
         return [
@@ -938,13 +964,13 @@ class Sim:
     def _try_fire_kinetic(self, shooter: MechState, action: np.ndarray) -> list[dict]:
         if len(action) < ACTION_DIM:
             return []
-        
+
         spec = None
         if shooter.spec.name == "heavy":
             spec = GAUSS
         elif shooter.spec.name == "medium":
             spec = AUTOCANNON
-        
+
         if spec is None:
             return []
 
@@ -973,7 +999,7 @@ class Sim:
                 if yaw_err < 0.2:
                     target_pos = focus.pos
                     best_dist = dist
-        
+
         # HIGH-12: Use spatial grid to query only nearby enemies instead of all mechs
         for t in self.enemies_in_range(shooter, spec.range_vox):
             if focus is not None and t is focus:
@@ -985,15 +1011,15 @@ class Sim:
                 if yaw_err < 0.1:  # Tight cone
                     target_pos = t.pos
                     best_dist = dist
-        
-        start_pos = shooter.pos.copy() + np.array([0, 0, shooter.half_size[2]*0.8], dtype=np.float32)
-        
+
+        start_pos = shooter.pos.copy() + np.array([0, 0, shooter.half_size[2] * 0.8], dtype=np.float32)
+
         if target_pos is not None:
             delta = target_pos - start_pos
             dist = float(np.linalg.norm(delta))
             if dist > 1e-6 and spec.guidance == "ballistic":
                 flight_time = dist / max(1e-6, spec.speed_vox)
-                g = 9.81 / self.world.voxel_size_m
+                g = GRAVITY_M_S2 / self.world.voxel_size_m
                 drop = 0.5 * g * (flight_time**2)
                 delta = delta.copy()
                 delta[2] += drop
@@ -1004,10 +1030,10 @@ class Sim:
                 vel = forward * spec.speed_vox
         else:
             vel = forward * spec.speed_vox
-        
+
         proj = Projectile(
             shooter_id=shooter.mech_id,
-            target_id=None, # Dumbfire
+            target_id=None,  # Dumbfire
             weapon=spec.name,
             pos=start_pos,
             vel=vel,
@@ -1020,7 +1046,7 @@ class Sim:
             splash_scale=spec.splash_dmg_scale,
         )
         self.projectiles.append(proj)
-        
+
         shooter.kinetic_cooldown = spec.cooldown_s
         shooter.heat += spec.heat
 
@@ -1033,7 +1059,9 @@ class Sim:
             }
         ]
 
-    def _explode(self, pos: np.ndarray, proj: Projectile, exclude_mech: MechState | None = None) -> list[dict]:
+    def _explode(
+        self, pos: np.ndarray, proj: Projectile, exclude_mech: MechState | None = None
+    ) -> list[dict]:
         events = []
         # HIGH-12: Use spatial grid for splash damage radius check
         nearby_ids = self._spatial_grid.query_nearby(pos, proj.splash_rad)
@@ -1059,22 +1087,24 @@ class Sim:
                 m.stability = max(0.0, m.stability - raw_stab)
                 m.was_hit = True
                 m.took_damage += raw_dmg
-                
+
                 shooter = self.mechs.get(proj.shooter_id)
                 if shooter:
                     shooter.dealt_damage += raw_dmg
-                    events.append({
-                        "type": "projectile_hit",
-                        "weapon": proj.weapon,
-                        "shooter": proj.shooter_id,
-                        "target": m.mech_id,
-                        "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
-                        "damage": raw_dmg,
-                        "stability": raw_stab,
-                        "is_crit": is_crit
-                    })
+                    events.append(
+                        {
+                            "type": "projectile_hit",
+                            "weapon": proj.weapon,
+                            "shooter": proj.shooter_id,
+                            "target": m.mech_id,
+                            "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
+                            "damage": raw_dmg,
+                            "stability": raw_stab,
+                            "is_crit": is_crit,
+                        }
+                    )
                     events.extend(self._handle_death(m, proj.shooter_id))
-        
+
         # Damage Voxels in radius
         r = proj.splash_rad
         min_ix, min_iy, min_iz = np.floor(pos - r).astype(int)
@@ -1086,13 +1116,15 @@ class Sim:
                     if np.linalg.norm(v_pos - pos) <= r:
                         self.world.damage_voxel(ix, iy, iz, proj.damage * proj.splash_scale)
 
-        events.append({
-            "type": "explosion",
-            "weapon": proj.weapon,
-            "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
-            "radius": proj.splash_rad,
-            "shooter": proj.shooter_id
-        })
+        events.append(
+            {
+                "type": "explosion",
+                "weapon": proj.weapon,
+                "pos": [float(pos[0]), float(pos[1]), float(pos[2])],
+                "radius": proj.splash_rad,
+                "shooter": proj.shooter_id,
+            }
+        )
         return events
 
     def _impact_pos_before_voxel(
@@ -1141,7 +1173,7 @@ class Sim:
 
             shooter = self.mechs.get(p.shooter_id)
             shooter_team = shooter.team if shooter is not None else None
-            
+
             p.age += self.dt
             if p.age > p.max_lifetime:
                 p.alive = False
@@ -1183,7 +1215,7 @@ class Sim:
                     target = self.mechs[p.target_id]
                     if target.alive:
                         delta = target.pos - p.pos
-                        dist = np.linalg.norm(delta)
+                        dist = float(np.linalg.norm(delta))
                         if dist > 0.1:
                             desired = (delta / dist) * p.speed
                             steer = 4.0 * self.dt
@@ -1195,7 +1227,7 @@ class Sim:
             # Integration
             step = p.vel * self.dt
             next_pos = p.pos + step
-            
+
             impact = False
             impact_pos = next_pos
             impact_voxel = None
@@ -1220,11 +1252,10 @@ class Sim:
                     t = float(np.clip(t, 0.0, 1.0))
                     closest = p.pos + step * t
                     delta = target.pos - closest
-                    if float(np.dot(delta, delta)) <= radius * radius:
-                        if best_t is None or t < best_t:
-                            best_t = t
-                            best_target = target
-                            best_pos = closest
+                    if float(np.dot(delta, delta)) <= radius * radius and (best_t is None or t < best_t):
+                        best_t = t
+                        best_target = target
+                        best_pos = closest
 
             if best_target is not None and best_pos is not None:
                 hit = raycast_voxels(self.world, p.pos, best_pos, include_end=True)
@@ -1247,7 +1278,7 @@ class Sim:
                     if hit.blocked and hit.blocked_voxel is not None:
                         impact_voxel = hit.blocked_voxel
                         impact_pos = self._impact_pos_before_voxel(p.pos, next_pos, hit.blocked_voxel)
-            
+
             if impact:
                 if impact_voxel:
                     self.world.damage_voxel(impact_voxel[0], impact_voxel[1], impact_voxel[2], p.damage)
@@ -1263,7 +1294,7 @@ class Sim:
                     if float(impact_pos[2]) < min_z + height * 0.3:
                         is_leg_hit = True
                         m.leg_hp -= base_dmg
-                        base_dmg *= 0.5
+                        base_dmg *= LEG_HIT_BODY_DAMAGE_MULT
                     final_dmg, bonus_events = self._get_paint_bonus(m, base_dmg, p.shooter_id)
                     final_stab = p.stability_damage * mult
                     m.hp -= final_dmg
@@ -1275,7 +1306,7 @@ class Sim:
                     shooter = self.mechs.get(p.shooter_id)
                     if shooter:
                         shooter.dealt_damage += final_dmg
-                        events.append({
+                        event: dict[str, Any] = {
                             "type": "projectile_hit",
                             "weapon": p.weapon,
                             "shooter": shooter.mech_id,
@@ -1285,20 +1316,22 @@ class Sim:
                             "stability": final_stab,
                             "is_crit": is_crit,
                             "is_leg_hit": is_leg_hit,
-                            "is_painted": m.painted_remaining > 0.0
-                        })
+                            "is_painted": m.painted_remaining > 0.0,
+                        }
+                        events.append(event)
                         events.extend(bonus_events)
                         events.extend(self._handle_death(m, p.shooter_id))
-                
+
                 if p.weapon == SMOKE.name:
                     splash_pos = direct_hit_mech.pos if direct_hit_mech else impact_pos
                     cloud = SmokeCloud(pos=splash_pos.copy(), radius=p.splash_rad, remaining_life=10.0)
                     self.smoke_clouds.append(cloud)
-                    events.append({
+                    smoke_event: dict[str, Any] = {
                         "type": "smoke_cloud",
                         "pos": [float(cloud.pos[0]), float(cloud.pos[1]), float(cloud.pos[2])],
-                        "radius": cloud.radius
-                    })
+                        "radius": cloud.radius,
+                    }
+                    events.append(smoke_event)
                 elif p.splash_rad > 0.0:
                     splash_pos = direct_hit_mech.pos if direct_hit_mech else impact_pos
                     events.extend(self._explode(splash_pos, p, exclude_mech=direct_hit_mech))
@@ -1341,19 +1374,19 @@ class Sim:
                     mech.fallen_time -= self.dt
                     if mech.fallen_time <= 0.0:
                         mech.fallen_time = 0.0
-                        mech.stability = mech.max_stability * 0.5
+                        mech.stability = mech.max_stability * STANDUP_STABILITY_FRACTION
                 else:
                     if mech.stability <= 0.0:
-                        mech.fallen_time = 3.0
+                        mech.fallen_time = FALLEN_DURATION_S
                         mech.vel[:] = 0.0
                     else:
-                        regen = 10.0 * self.dt
+                        regen = STABILITY_REGEN_PER_S * self.dt
                         max_stab = mech.max_stability
                         if mech.is_legged:
-                            regen *= 0.5
-                            max_stab *= 0.5
+                            regen *= LEGGED_STABILITY_MULT
+                            max_stab *= LEGGED_STABILITY_MULT
                         if np.linalg.norm(mech.vel) > 1.0:
-                            regen *= 0.5
+                            regen *= MOVING_STABILITY_MULT
                         if mech.suppressed_time > 0.0:
                             regen *= SUPPRESS_REGEN_SCALE
                         mech.stability = min(max_stab, mech.stability + regen)
@@ -1372,7 +1405,7 @@ class Sim:
             order = [m for m in self.mechs.values() if m.alive]
             self.rng.shuffle(order)
             for mech in order:
-                if mech.fallen_time > 0.0: 
+                if mech.fallen_time > 0.0:
                     self._apply_movement(mech, zero_action)
                     self._integrate(mech)
                     mech.noise_level = 0.0
@@ -1381,9 +1414,9 @@ class Sim:
                 self._apply_rotation(mech, a)
                 self._apply_movement(mech, a)
                 self._integrate(mech)
-                
+
                 # Acoustic Noise: speed * mass_factor
                 speed = float(np.linalg.norm(mech.vel))
-                mass_factor = {"scout": 1.0, "light": 1.5, "medium": 2.5, "heavy": 4.0}.get(mech.spec.name, 1.0)
+                mass_factor = NOISE_MASS_FACTORS.get(mech.spec.name, 1.0)
                 mech.noise_level = float(speed * mass_factor)
         return events

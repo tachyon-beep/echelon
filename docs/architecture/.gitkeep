@@ -1,0 +1,40 @@
+# Architecture Documents
+
+This folder contains system design documentation.
+
+## Suggested Documents
+
+- `overview.md` - High-level system architecture
+- `simulation.md` - Sim loop, physics, combat systems
+- `environment.md` - Gym environment, observations, actions
+- `training.md` - PPO pipeline, arena self-play
+- `terrain.md` - World generation, biomes, validation
+- `navigation.md` - Nav graph, planner, pathfinding
+
+## Template
+
+```markdown
+# [Component] Architecture
+
+## Overview
+Brief description of this component's role.
+
+## Components
+- Component A: purpose
+- Component B: purpose
+
+## Data Flow
+```
+Input -> Processing -> Output
+```
+
+## Key Interfaces
+- `function_name(args) -> return`: description
+
+## Dependencies
+- Internal: list modules
+- External: list libraries
+
+## Performance Considerations
+Notes on hot paths, scaling, caching.
+```

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass
 from typing import Any
 
-import heapq
-
 import numpy as np
 
-from .objective import capture_zone_anchor
 from ..nav.graph import NavGraph
 from ..nav.planner import Planner
 from ..sim.world import VoxelWorld
+from .objective import capture_zone_anchor
 
 
 @dataclass(frozen=True)
@@ -65,7 +64,11 @@ class ConnectivityValidator:
         penalty_cost: float = 20.0,
         carve_width: int = 5,
     ) -> None:
-        self.size_z, self.size_y, self.size_x = (int(world_shape_zyx[0]), int(world_shape_zyx[1]), int(world_shape_zyx[2]))
+        self.size_z, self.size_y, self.size_x = (
+            int(world_shape_zyx[0]),
+            int(world_shape_zyx[1]),
+            int(world_shape_zyx[2]),
+        )
         self.clearance_z = max(1, int(min(clearance_z, self.size_z)))
         self.obstacle_inflate_radius = max(0, int(obstacle_inflate_radius))
         self.wall_cost = float(wall_cost)
@@ -82,7 +85,9 @@ class ConnectivityValidator:
         meta: dict[str, Any],
     ) -> np.ndarray:
         if voxels.shape != (self.size_z, self.size_y, self.size_x):
-            raise ValueError(f"voxels has shape {voxels.shape}, expected {(self.size_z, self.size_y, self.size_x)}")
+            raise ValueError(
+                f"voxels has shape {voxels.shape}, expected {(self.size_z, self.size_y, self.size_x)}"
+            )
 
         fixups: list[str] = meta.setdefault("fixups", [])
         stats: dict[str, Any] = meta.setdefault("stats", {})
@@ -105,15 +110,17 @@ class ConnectivityValidator:
         # Convert anchors to world pos for NavGraph
         # Note: NavGraph assumes voxel_size=5.0 by default or reads from world.
         # We construct a temp world to build the graph.
-        
+
         # We need to loop: Check Nav -> If bad, Fix 2D -> Recheck.
-        
-        for team, start, label in [
+
+        for _team, start, label in [
             ("blue", blue, "blue_to_objective"),
             ("red", red, "red_to_objective"),
         ]:
-            voxels = self._ensure_path_nav(voxels, start, objective, label=label, fixups=fixups, paths_stats=paths_stats)
-            
+            voxels = self._ensure_path_nav(
+                voxels, start, objective, label=label, fixups=fixups, paths_stats=paths_stats
+            )
+
         return voxels
 
     def _ensure_path_nav(
@@ -131,40 +138,42 @@ class ConnectivityValidator:
             # 1. Build Nav Graph
             tmp_world = VoxelWorld(voxels=voxels, voxel_size_m=5.0)
             # Ensure ground layer so z=-1 nodes exist?
-            # VoxelWorld.generate calls ensure_ground_layer. 
-            # But here we just wrap voxels. 
+            # VoxelWorld.generate calls ensure_ground_layer.
+            # But here we just wrap voxels.
             # NavGraph respects DIRT logic (z=0 is non-colliding).
             # If voxels has DIRT at 0, NavGraph works.
             # If voxels has AIR at 0, NavGraph works (floor is -1).
-            
-            graph = NavGraph.build(tmp_world, clearance_z=self.clearance_z, mech_radius=self.obstacle_inflate_radius)
+
+            graph = NavGraph.build(
+                tmp_world, clearance_z=self.clearance_z, mech_radius=self.obstacle_inflate_radius
+            )
             planner = Planner(graph)
-            
+
             # 2. Find Nodes
-            # We assume flat ground at start/goal? 
+            # We assume flat ground at start/goal?
             # We search for nearest node to (x, y, 0).
             start_pos = (float(start_yx[1] + 0.5) * 5.0, float(start_yx[0] + 0.5) * 5.0, 0.0)
             goal_pos = (float(goal_yx[1] + 0.5) * 5.0, float(goal_yx[0] + 0.5) * 5.0, 0.0)
-            
+
             start_node = graph.get_nearest_node(start_pos)
             goal_node = graph.get_nearest_node(goal_pos)
-            
+
             found = False
             if start_node and goal_node:
-                path, pstats = planner.find_path(start_node, goal_node)
+                _path, pstats = planner.find_path(start_node, goal_node)
                 found = pstats.found
-            
+
             paths_stats.setdefault(label, {})["attempt_" + str(attempt)] = found
-            
+
             if found:
                 return voxels
-            
+
             # 3. If fail, use 2D digger
             # We find a path on the 2D projected grid (where obstacles are high cost)
             nav_2d = self._build_nav_grid(voxels)
             forbidden = self._forbidden_footprint()
             res = self._astar_dig(nav_2d, start_yx, goal_yx, penalty=None, forbidden=forbidden)
-            
+
             if res.found:
                 # Use Staircase Digger: Create explicit ramps along the 2D path
                 voxels = self._apply_staircase_carve(voxels, res.path)
@@ -172,37 +181,40 @@ class ConnectivityValidator:
             else:
                 fixups.append(f"{label}:attempt={attempt}:2d_failed")
                 break
-        
-        raise RuntimeError(f"ConnectivityValidator failed to find path for {label} after {attempt+1} attempts.")
+
+        raise RuntimeError(
+            f"ConnectivityValidator failed to find path for {label} after {attempt + 1} attempts."
+        )
 
     def _apply_staircase_carve(self, voxels: np.ndarray, path: list[tuple[int, int]]) -> np.ndarray:
         """
         Creates a 3D traversable ramp along a 2D path.
         Forces floor and headroom at each step.
         """
-        if not path: return voxels
-        
+        if not path:
+            return voxels
+
         radius = max(1, int(self.carve_width // 2))
         sz, sy, sx = voxels.shape
-        
+
         # We start at bedrock (z=-1) and maintain current_z
         cur_z = -1
-        
+
         for i in range(len(path)):
             y, x = path[i]
-            y0, y1 = max(0, y-radius), min(sy, y+radius+1)
-            x0, x1 = max(0, x-radius), min(sx, x+radius+1)
+            y0, y1 = max(0, y - radius), min(sy, y + radius + 1)
+            x0, x1 = max(0, x - radius), min(sx, x + radius + 1)
 
             # 1. Place Floor (SOLID) if above bedrock
             if cur_z >= 0:
-                voxels[cur_z, y0:y1, x0:x1] = 1 # SOLID
-            
+                voxels[cur_z, y0:y1, x0:x1] = 1  # SOLID
+
             # 2. Clear Headroom (AIR)
             # Stand at cur_z, so clear from cur_z + 1
             z_start = max(0, cur_z + 1)
             z_top = min(sz, z_start + self.clearance_z)
-            voxels[z_start : z_top, y0:y1, x0:x1] = 0 # AIR
-            
+            voxels[z_start:z_top, y0:y1, x0:x1] = 0  # AIR
+
         return voxels
 
     def _build_nav_grid(self, voxels: np.ndarray) -> np.ndarray:
@@ -259,7 +271,9 @@ class ConnectivityValidator:
             return PathResult([], float("inf"), 0, False)
         if forbidden is not None:
             if forbidden.shape != (self.size_y, self.size_x):
-                raise ValueError(f"forbidden has shape {forbidden.shape}, expected {(self.size_y, self.size_x)}")
+                raise ValueError(
+                    f"forbidden has shape {forbidden.shape}, expected {(self.size_y, self.size_x)}"
+                )
             if forbidden[sy, sx] or forbidden[gy, gx]:
                 return PathResult([], float("inf"), 0, False)
 
@@ -319,5 +333,5 @@ class ConnectivityValidator:
             x0 = max(0, x - radius)
             x1 = min(self.size_x, x + radius + 1)
             # Clear 0..clearance_z + 1 to ensure standing room
-            voxels[0 : self.clearance_z + 1, y0:y1, x0:x1] = 0 # AIR
+            voxels[0 : self.clearance_z + 1, y0:y1, x0:x1] = 0  # AIR
         return voxels

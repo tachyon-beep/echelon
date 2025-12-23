@@ -46,7 +46,7 @@ def main() -> None:
     env = EchelonEnv(
         EnvConfig(
             world=WorldConfig(size_x=args.size, size_y=args.size, size_z=args.size),
-            num_packs=max(1, args.num_per_team // 10), # Pack size is now 10
+            num_packs=max(1, args.num_per_team // 10),  # Pack size is now 10
             seed=args.seed,
         )
     )

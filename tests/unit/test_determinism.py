@@ -1,6 +1,8 @@
 import numpy as np
+
 from echelon import EchelonEnv, EnvConfig
 from echelon.config import WorldConfig
+
 
 def test_sim_determinism():
     """
@@ -9,7 +11,7 @@ def test_sim_determinism():
     """
     seed = 12345
     steps = 100
-    
+
     cfg = EnvConfig(
         world=WorldConfig(size_x=20, size_y=20, size_z=10, obstacle_fill=0.1),
         num_packs=1,
@@ -26,7 +28,9 @@ def test_sim_determinism():
 
     # Check initial observations
     for agent_id in env1.agents:
-        np.testing.assert_array_equal(obs1[agent_id], obs2[agent_id], err_msg=f"Initial obs mismatch for {agent_id}")
+        np.testing.assert_array_equal(
+            obs1[agent_id], obs2[agent_id], err_msg=f"Initial obs mismatch for {agent_id}"
+        )
 
     # Check internal state (positions)
     for mid, m1 in env1.sim.mechs.items():
@@ -42,12 +46,14 @@ def test_sim_determinism():
             act = rng.uniform(-1.0, 1.0, size=env1.ACTION_DIM).astype(np.float32)
             actions[agent_id] = act
 
-        o1, r1, t1, tr1, i1 = env1.step(actions)
-        o2, r2, t2, tr2, i2 = env2.step(actions)
+        o1, r1, t1, _tr1, _i1 = env1.step(actions)
+        o2, r2, t2, _tr2, _i2 = env2.step(actions)
 
         # Check observations
         for agent_id in env1.agents:
-            np.testing.assert_array_equal(o1[agent_id], o2[agent_id], err_msg=f"Step {step}: Obs mismatch for {agent_id}")
+            np.testing.assert_array_equal(
+                o1[agent_id], o2[agent_id], err_msg=f"Step {step}: Obs mismatch for {agent_id}"
+            )
             assert r1[agent_id] == r2[agent_id], f"Step {step}: Reward mismatch for {agent_id}"
             assert t1[agent_id] == t2[agent_id], f"Step {step}: Termination mismatch for {agent_id}"
 

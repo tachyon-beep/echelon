@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ..sim.world import VoxelWorld
+if TYPE_CHECKING:
+    from ..sim.world import VoxelWorld
 
 DEFAULT_CAPTURE_ZONE_RADIUS = 15.0
 
@@ -16,11 +17,11 @@ def capture_zone_params(meta: dict[str, Any], *, size_x: int, size_y: int) -> tu
     center = cz.get("center")
     radius = cz.get("radius")
     if (
-        not isinstance(center, (list, tuple))
+        not isinstance(center, list | tuple)
         or len(center) < 2
-        or not isinstance(center[0], (int, float))
-        or not isinstance(center[1], (int, float))
-        or not isinstance(radius, (int, float))
+        or not isinstance(center[0], int | float)
+        or not isinstance(center[1], int | float)
+        or not isinstance(radius, int | float)
     ):
         raise ValueError("world meta has no valid `capture_zone.center` or `capture_zone.radius`")
     cx = float(center[0])
@@ -33,8 +34,8 @@ def capture_zone_params(meta: dict[str, Any], *, size_x: int, size_y: int) -> tu
 
 def capture_zone_anchor(meta: dict[str, Any], *, size_x: int, size_y: int) -> tuple[int, int]:
     cx, cy, _ = capture_zone_params(meta, size_x=size_x, size_y=size_y)
-    x = int(round(cx))
-    y = int(round(cy))
+    x = round(cx)
+    y = round(cy)
     x = int(np.clip(x, 0, max(0, size_x - 1)))
     y = int(np.clip(y, 0, max(0, size_y - 1)))
     return (y, x)
@@ -50,7 +51,9 @@ def _circle_intersects_aabb(
     return dx * dx + dy * dy <= r * r
 
 
-def _spawn_clear_aabb(corner: str, spawn_clear: int, *, size_x: int, size_y: int) -> tuple[float, float, float, float]:
+def _spawn_clear_aabb(
+    corner: str, spawn_clear: int, *, size_x: int, size_y: int
+) -> tuple[float, float, float, float]:
     sc = float(max(0, spawn_clear))
     sx = float(size_x)
     sy = float(size_y)
@@ -67,8 +70,8 @@ def _spawn_clear_aabb(corner: str, spawn_clear: int, *, size_x: int, size_y: int
 
 def _center_clear(world: VoxelWorld, cx: float, cy: float) -> bool:
     # Require a small patch of ground around the center to be free of walls.
-    ix = int(round(cx))
-    iy = int(round(cy))
+    ix = round(cx)
+    iy = round(cy)
     if ix < 1 or ix >= world.size_x - 1:
         return False
     if iy < 1 or iy >= world.size_y - 1:
@@ -104,7 +107,9 @@ def sample_capture_zone(
     y_min_global = r + margin
     y_max_global = float(world.size_y) - r - margin
 
-    def _range_for_quadrant(min_global: float, max_global: float, mid: float, choose_low: bool) -> tuple[float, float]:
+    def _range_for_quadrant(
+        min_global: float, max_global: float, mid: float, choose_low: bool
+    ) -> tuple[float, float]:
         if choose_low:
             lo, hi = min_global, min(max_global, mid)
         else:
@@ -120,7 +125,9 @@ def sample_capture_zone(
         for corner in (spawn_corners.get("blue"), spawn_corners.get("red")):
             if not corner:
                 continue
-            x0, x1, y0, y1 = _spawn_clear_aabb(str(corner), spawn_clear, size_x=world.size_x, size_y=world.size_y)
+            x0, x1, y0, y1 = _spawn_clear_aabb(
+                str(corner), spawn_clear, size_x=world.size_x, size_y=world.size_y
+            )
             if _circle_intersects_aabb(cx, cy, r, x0=x0, x1=x1, y0=y0, y1=y1):
                 return True
         return False

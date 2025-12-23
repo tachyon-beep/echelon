@@ -1,0 +1,34 @@
+# Architecture Decision Records
+
+This folder documents significant technical decisions.
+
+## Format
+
+Each ADR should follow this template:
+
+```markdown
+# ADR-NNNN: [Decision Title]
+
+**Status:** Proposed | Accepted | Deprecated | Superseded by ADR-XXXX
+**Date:** YYYY-MM-DD
+
+## Context
+What is the issue we're facing? What forces are at play?
+
+## Decision
+What is the change we're proposing or have agreed to?
+
+## Consequences
+What are the positive and negative effects of this decision?
+
+## Alternatives Considered
+What other options were evaluated?
+```
+
+## Example ADRs to Create
+
+- `0001-use-ppo-for-policy-optimization.md`
+- `0002-lstm-for-partial-observability.md`
+- `0003-voxel-world-representation.md`
+- `0004-zone-control-victory-condition.md`
+- `0005-pack-based-team-composition.md`

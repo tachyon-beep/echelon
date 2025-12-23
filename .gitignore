@@ -1,15 +1,52 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
-.pytest_cache/
+*.pyd
+.Python
+*.so
 
-.venv/
-.uv_cache/
-
-runs/
-.hypothesis/
+# Testing
 .pytest_cache/
 .coverage
 htmlcov/
-.mutmut-cache/
+.hypothesis/
+
+# Type checking
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# UV
+.uv_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+runs/
 mutants/
+.mutmut-cache/
+
+# Temporary
+*.log
+*.tmp
+
+# Environment
+.env
+.env.*
+
+# AI assistant configs (keep local, don't publish)
+CLAUDE.md
+GEMINI.md

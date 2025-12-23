@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ..sim.world import VoxelWorld
+if TYPE_CHECKING:
+    from ..sim.world import VoxelWorld
 
 # Type alias for a node ID: (z, y, x)
-NodeID = Tuple[int, int, int]
+NodeID = tuple[int, int, int]
+
 
 @dataclass
 class NavNode:
     id: NodeID
-    pos: Tuple[float, float, float]  # World center of the walkable surface
-    edges: List[Tuple[NodeID, float]] = field(default_factory=list) # List of (neighbor_id, cost)
+    pos: tuple[float, float, float]  # World center of the walkable surface
+    edges: list[tuple[NodeID, float]] = field(default_factory=list)  # List of (neighbor_id, cost)
+
 
 class NavGraph:
     """
@@ -25,11 +28,12 @@ class NavGraph:
     - A surface is walkable if: solid below AND clear above for clearance_z
     - Applies mech_radius footprint via erosion
     """
+
     def __init__(self, clearance_z: int = 2):
-        self.nodes: Dict[NodeID, NavNode] = {}
-        self.nodes_by_col: Dict[Tuple[int, int], List[int]] = {} # (y, x) -> [z, z...]
+        self.nodes: dict[NodeID, NavNode] = {}
+        self.nodes_by_col: dict[tuple[int, int], list[int]] = {}  # (y, x) -> [z, z...]
         self.clearance_z = clearance_z
-        self.voxel_size = 5.0 # Should match world config, passed in build?
+        self.voxel_size = 5.0  # Should match world config, passed in build?
 
     @classmethod
     def build(cls, world: VoxelWorld, clearance_z: int = 4, mech_radius: int = 1) -> NavGraph:
@@ -63,7 +67,7 @@ class NavGraph:
                 clear_above = np.ones((sy, sx), dtype=np.bool_)
             else:
                 # All voxels from z+1 to z_top must be non-colliding
-                clear_above = ~np.any(collides[z+1:z_top], axis=0)
+                clear_above = ~np.any(collides[z + 1 : z_top], axis=0)
 
             walkable[z] = solid_here & clear_above
 
@@ -80,12 +84,17 @@ class NavGraph:
             # Erode walkable mask - a cell is only walkable if all cells
             # within mech_radius are also walkable
             from scipy.ndimage import minimum_filter
-            footprint = np.ones((1, 2*mech_radius+1, 2*mech_radius+1), dtype=np.bool_)
-            walkable = minimum_filter(walkable.astype(np.uint8), footprint=footprint, mode='constant', cval=0).astype(np.bool_)
+
+            footprint = np.ones((1, 2 * mech_radius + 1, 2 * mech_radius + 1), dtype=np.bool_)
+            walkable = minimum_filter(
+                walkable.astype(np.uint8), footprint=footprint, mode="constant", cval=0
+            ).astype(np.bool_)
 
             # Also erode bedrock walkability
-            footprint_2d = np.ones((2*mech_radius+1, 2*mech_radius+1), dtype=np.bool_)
-            clear_from_bedrock = minimum_filter(clear_from_bedrock.astype(np.uint8), footprint=footprint_2d, mode='constant', cval=0).astype(np.bool_)
+            footprint_2d = np.ones((2 * mech_radius + 1, 2 * mech_radius + 1), dtype=np.bool_)
+            clear_from_bedrock = minimum_filter(
+                clear_from_bedrock.astype(np.uint8), footprint=footprint_2d, mode="constant", cval=0
+            ).astype(np.bool_)
 
         # 4. Extract node coordinates and build node dict
         # Bedrock nodes (z=-1)
@@ -103,20 +112,26 @@ class NavGraph:
         # --- Edge Building (still iterative over nodes) ---
         # Neighbor offsets (dy, dx, cost_mult)
         neighbors = [
-            (0, 1, 1.0), (0, -1, 1.0), (1, 0, 1.0), (-1, 0, 1.0),
-            (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414)
+            (0, 1, 1.0),
+            (0, -1, 1.0),
+            (1, 0, 1.0),
+            (-1, 0, 1.0),
+            (1, 1, 1.414),
+            (1, -1, 1.414),
+            (-1, 1, 1.414),
+            (-1, -1, 1.414),
         ]
-        
+
         step_height_max = 2
-            
+
         for (z, y, x), node in graph.nodes.items():
             for dy, dx, dist_mult in neighbors:
                 ny, nx = y + dy, x + dx
-                
+
                 potential_zs = graph.nodes_by_col.get((ny, nx))
                 if not potential_zs:
                     continue
-                
+
                 # Diagonal Corner-Cutting Check:
                 # If moving diagonally (dy!=0 and dx!=0), check the two adjacent orthogonals.
                 # If either is blocked at the CURRENT Z, we can't cut the corner.
@@ -124,7 +139,7 @@ class NavGraph:
                     ortho1 = (z, y + dy, x)
                     ortho2 = (z, y, x + dx)
                     if ortho1 not in graph.nodes or ortho2 not in graph.nodes:
-                        # Optimization: This is strict (requires same Z). 
+                        # Optimization: This is strict (requires same Z).
                         # A better check would be 'is traversable'.
                         # But for 2.5D this is a good safety.
                         continue
@@ -147,58 +162,51 @@ class NavGraph:
         wx = (x + 0.5) * scale
         wy = (y + 0.5) * scale
         self.nodes[nid] = NavNode(nid, (wx, wy, wz))
-        
+
         if (y, x) not in self.nodes_by_col:
             self.nodes_by_col[(y, x)] = []
         self.nodes_by_col[(y, x)].append(z)
 
-    def get_nearest_node(self, pos: Tuple[float, float, float]) -> Optional[NodeID]:
+    def get_nearest_node(self, pos: tuple[float, float, float]) -> NodeID | None:
         """Find the nearest graph node to a world position."""
         scale = self.voxel_size
         ix = int(pos[0] // scale)
         iy = int(pos[1] // scale)
-        wz = pos[2] # World Z
-        
-        best_node: Optional[NodeID] = None
-        best_dist_sq = float('inf')
-        
+        wz = pos[2]  # World Z
+
+        best_node: NodeID | None = None
+        best_dist_sq = float("inf")
+
         search_r = 1
         for dy in range(-search_r, search_r + 1):
             for dx in range(-search_r, search_r + 1):
                 ny, nx = iy + dy, ix + dx
-                
+
                 zs = self.nodes_by_col.get((ny, nx))
                 if not zs:
                     continue
-                
+
                 for z in zs:
                     node = self.nodes[(z, ny, nx)]
                     # Simple euclidean dist sq
-                    d_sq = (node.pos[0] - pos[0])**2 + (node.pos[1] - pos[1])**2 + (node.pos[2] - wz)**2
-                    
+                    d_sq = (node.pos[0] - pos[0]) ** 2 + (node.pos[1] - pos[1]) ** 2 + (node.pos[2] - wz) ** 2
+
                     # Bias towards nodes at similar Z height (don't pick the bridge overhead)
                     dz = abs(node.pos[2] - wz)
                     if dz > scale * 1.5:
-                        d_sq += 1000.0 # Heavy penalty for Z mismatch
-                    
+                        d_sq += 1000.0  # Heavy penalty for Z mismatch
+
                     if d_sq < best_dist_sq:
                         best_dist_sq = d_sq
                         best_node = node.id
-        
+
         return best_node
 
     def to_dict(self) -> dict:
         """Serialize graph to a JSON-safe dictionary."""
         out_nodes = []
         for nid, node in self.nodes.items():
-            out_nodes.append({
-                "id": list(nid),
-                "pos": list(node.pos),
-                "edges": [list(e[0]) for e in node.edges]
-            })
-        return {
-            "voxel_size": self.voxel_size,
-            "clearance_z": self.clearance_z,
-            "nodes": out_nodes
-        }
-
+            out_nodes.append(
+                {"id": list(nid), "pos": list(node.pos), "edges": [list(e[0]) for e in node.edges]}
+            )
+        return {"voxel_size": self.voxel_size, "clearance_z": self.clearance_z, "nodes": out_nodes}

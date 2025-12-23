@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
+
 from echelon import EchelonEnv, EnvConfig
 from echelon.config import WorldConfig
+
 
 def test_api_fuzzing_nan_inf():
     """
@@ -30,7 +32,7 @@ def test_api_fuzzing_nan_inf():
 
     # Step should not crash
     try:
-        obs, rewards, terminations, truncations, infos = env.step(actions)
+        _obs, _rewards, _terminations, _truncations, _infos = env.step(actions)
     except Exception as e:
         pytest.fail(f"Env crashed on NaN/Inf inputs: {e}")
 
@@ -39,6 +41,7 @@ def test_api_fuzzing_nan_inf():
         assert np.all(np.isfinite(mech.pos)), f"Mech {mid} pos became non-finite"
         assert np.all(np.isfinite(mech.vel)), f"Mech {mid} vel became non-finite"
         assert np.isfinite(mech.yaw), f"Mech {mid} yaw became non-finite"
+
 
 def test_api_fuzzing_oob_actions():
     """
@@ -56,10 +59,10 @@ def test_api_fuzzing_oob_actions():
     for agent_id in env.agents:
         act = np.zeros(env.ACTION_DIM, dtype=np.float32)
         # Huge movement value
-        act[0] = 1000.0 
+        act[0] = 1000.0
         actions[agent_id] = act
 
-    obs, _, _, _, _ = env.step(actions)
+    _obs, _, _, _, _ = env.step(actions)
 
     # Mech should not have teleported 1000 units
     # Max speed is ~5-7 m/s. dt=0.1s. Max step ~0.7m.

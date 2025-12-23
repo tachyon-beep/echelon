@@ -42,8 +42,8 @@ class WeaponSpec:
     heat: float
     cooldown_s: float
     arc_deg: float
-    speed_vox: float = 0.0 # 0 for hitscan
-    guidance: str = "none" # "homing", "ballistic", "linear"
+    speed_vox: float = 0.0  # 0 for hitscan
+    guidance: str = "none"  # "homing", "ballistic", "linear"
     splash_rad_vox: float = 0.0
     splash_dmg_scale: float = 0.0
 
@@ -63,7 +63,7 @@ FLAMER = WeaponSpec(
     range_vox=4.5,
     damage=4.0,
     stability_damage=0.0,
-    heat=10.0, # Self heat
+    heat=10.0,  # Self heat
     cooldown_s=0.15,
     arc_deg=90.0,
 )
@@ -99,11 +99,11 @@ GAUSS = WeaponSpec(
     name="gauss",
     range_vox=60.0,
     damage=50.0,
-    stability_damage=60.0, # Huge impact
+    stability_damage=60.0,  # Huge impact
     heat=15.0,
     cooldown_s=4.0,
     arc_deg=60.0,
-    speed_vox=40.0, # Very fast
+    speed_vox=40.0,  # Very fast
     guidance="ballistic",
     splash_rad_vox=1.5,
     splash_dmg_scale=0.5,
@@ -115,7 +115,7 @@ AUTOCANNON = WeaponSpec(
     damage=8.0,
     stability_damage=5.0,
     heat=6.0,
-    cooldown_s=0.2, # Rapid fire
+    cooldown_s=0.2,  # Rapid fire
     arc_deg=90.0,
     speed_vox=25.0,
     guidance="linear",
@@ -135,7 +135,7 @@ PAINTER = WeaponSpec(
 
 # Lightweight "role" extensions (kept simple and readable in replays).
 LASER_HEAT_TRANSFER = 6.0  # Heat applied to the target on laser hit.
-FLAME_HEAT_TRANSFER = 15.0 # High heat for flamer.
+FLAME_HEAT_TRANSFER = 15.0  # High heat for flamer.
 
 # Autocannon suppression: slows stability regen briefly after AC hits.
 SUPPRESS_DURATION_S = 1.2
@@ -182,6 +182,6 @@ class EnvConfig:
     enable_ewar: bool = True
     enable_obs_control: bool = True
     enable_comm: bool = True
-    nav_mode: str = "off" # "off" | "assist" | "planner"
+    nav_mode: str = "off"  # "off" | "assist" | "planner"
     record_replay: bool = False
     seed: int | None = None

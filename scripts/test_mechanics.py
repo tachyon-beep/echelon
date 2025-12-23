@@ -3,35 +3,49 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from echelon.sim.sim import Sim
-from echelon.sim.los import has_los
-from echelon.sim.world import VoxelWorld
-from echelon.sim.mech import MechState
+from echelon import EchelonEnv, EnvConfig
 from echelon.actions import ACTION_DIM, ActionIndex
 from echelon.config import MechClassConfig, WorldConfig
-from echelon import EchelonEnv, EnvConfig
 from echelon.constants import PACK_SIZE
+from echelon.sim.los import has_los
+from echelon.sim.mech import MechState
+from echelon.sim.sim import Sim
+from echelon.sim.world import VoxelWorld
+
 
 def make_mech(mid: str, team: str, pos: list, cls_name: str) -> MechState:
     # Minimal config for test
     spec = MechClassConfig(
         name=cls_name,
-        size_voxels=(1,1,1) if cls_name != "heavy" else (2,2,2),
-        max_speed=5.0, max_yaw_rate=2.0, max_jet_accel=5.0,
-        hp=100.0, leg_hp=50.0, heat_cap=100.0, heat_dissipation=10.0
+        size_voxels=(1, 1, 1) if cls_name != "heavy" else (2, 2, 2),
+        max_speed=5.0,
+        max_yaw_rate=2.0,
+        max_jet_accel=5.0,
+        hp=100.0,
+        leg_hp=50.0,
+        heat_cap=100.0,
+        heat_dissipation=10.0,
     )
     return MechState(
-        mech_id=mid, team=team, spec=spec,
+        mech_id=mid,
+        team=team,
+        spec=spec,
         pos=np.array(pos, dtype=np.float32),
         vel=np.zeros(3, dtype=np.float32),
-        yaw=0.0, hp=spec.hp, leg_hp=spec.leg_hp, heat=0.0, stability=100.0
+        yaw=0.0,
+        hp=spec.hp,
+        leg_hp=spec.leg_hp,
+        heat=0.0,
+        stability=100.0,
     )
+
 
 def test_indirect_fire():
     # Setup world
@@ -50,12 +64,12 @@ def test_indirect_fire():
     painter = make_mech("blue_1", "blue", [6.0, 10.0, 1.0], "light")
     # Enemy at (15, 10, 0) behind wall
     enemy = make_mech("red_0", "red", [15.0, 10.0, 1.0], "medium")
-    
+
     sim.reset({"blue_0": heavy, "blue_1": painter, "red_0": enemy})
 
     # Action to fire missile: SECONDARY slot for heavy
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
-    fire_action[ActionIndex.SECONDARY] = 1.0 # Missile
+    fire_action[ActionIndex.SECONDARY] = 1.0  # Missile
 
     # 1. Try fire without LOS or Paint
     events = sim._try_fire_missile(heavy, fire_action)
@@ -64,18 +78,19 @@ def test_indirect_fire():
     # 2. Paint the enemy
     enemy.painted_remaining = 5.0
     enemy.last_painter_id = painter.mech_id
-    
+
     # 3. Try fire again
     events = sim._try_fire_missile(heavy, fire_action)
     assert len(events) == 1, "Should fire at painted target despite no LOS"
     assert len(sim.projectiles) == 1
-    
+
     # 4. Verify projectile homing
     # Projectile should have velocity towards enemy
     p = sim.projectiles[0]
     assert p.target_id == "red_0"
-    
+
     print("Indirect fire test passed!")
+
 
 def test_missile_arc_blocks_rear_shots():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
@@ -99,6 +114,7 @@ def test_missile_arc_blocks_rear_shots():
     assert len(events) == 0, "Paint should not bypass missile firing arc"
     assert len(sim.projectiles) == 0
     print("Missile arc blocks rear shots test passed!")
+
 
 def test_paint_lock_is_pack_scoped():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
@@ -124,6 +140,7 @@ def test_paint_lock_is_pack_scoped():
     assert len(sim.projectiles) == 0
     print("Paint lock is pack scoped test passed!")
 
+
 def test_shutdown_keeps_physics():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
     world.voxels.fill(VoxelWorld.AIR)
@@ -143,6 +160,7 @@ def test_shutdown_keeps_physics():
     assert mech.vel[0] != 0.0 and mech.vel[0] < vel0[0], "Shutdown mech should damp, not zero velocity"
     print("Shutdown keeps physics test passed!")
 
+
 def test_autocannon_auto_pitch():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
     world.voxels.fill(VoxelWorld.AIR)
@@ -160,6 +178,7 @@ def test_autocannon_auto_pitch():
     assert len(sim.projectiles) == 1
     assert float(sim.projectiles[0].vel[2]) > 0.1, "Autocannon should auto-pitch toward elevated targets"
     print("Autocannon auto pitch test passed!")
+
 
 def test_knockdown_immobilizes():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
@@ -196,6 +215,7 @@ def test_knockdown_immobilizes():
     assert float(np.linalg.norm(mech.pos[:2] - pos0[:2])) > 0.5, "Recovered mech should be able to move again"
     print("Knockdown immobilizes test passed!")
 
+
 def test_gauss_projectile_does_not_tunnel_through_wall():
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
     world.voxels.fill(VoxelWorld.AIR)
@@ -222,10 +242,10 @@ def test_gauss_projectile_does_not_tunnel_through_wall():
 
     assert float(enemy.hp) == float(enemy.spec.hp), "Projectile should not hit through a wall"
     assert not any(
-        ev.get("type") == "projectile_hit" and ev.get("target") == "enemy"
-        for ev in events
+        ev.get("type") == "projectile_hit" and ev.get("target") == "enemy" for ev in events
     ), "Should not record a hit through terrain"
     print("Gauss projectile tunneling test passed!")
+
 
 def test_pack_comm_is_pack_scoped():
     # Two packs per team so we can verify comm does not leak across packs.
@@ -238,14 +258,14 @@ def test_pack_comm_is_pack_scoped():
         max_episode_seconds=5.0,
     )
     env = EchelonEnv(cfg)
-    obs, _ = env.reset(seed=0)
+    _obs, _ = env.reset(seed=0)
 
     contacts_total = int(env.CONTACT_SLOTS * env.CONTACT_DIM)
     comm_total = PACK_SIZE * int(cfg.comm_dim)
 
-    sender = "blue_0"        # pack 0
-    same_pack = "blue_1"     # pack 0
-    other_pack = "blue_10"   # pack 1
+    sender = "blue_0"  # pack 0
+    same_pack = "blue_1"  # pack 0
+    other_pack = "blue_10"  # pack 1
 
     msg = np.array([0.25, -0.5, 0.9], dtype=np.float32)
     a_sender = np.zeros(env.ACTION_DIM, dtype=np.float32)
@@ -262,6 +282,7 @@ def test_pack_comm_is_pack_scoped():
     assert np.allclose(row0, msg), "Packmate should receive sender's message"
     assert np.allclose(comm_other_pack, 0.0), "Other pack should not receive sender's message"
     print("Pack comm is pack scoped test passed!")
+
 
 def test_partial_visibility_is_pack_scoped():
     cfg = EnvConfig(
@@ -281,8 +302,8 @@ def test_partial_visibility_is_pack_scoped():
     env.world.set_box_solid(20, 0, 0, 21, env.world.size_y, env.world.size_z, True)
 
     viewer_id = "blue_0"
-    packmate_id = "blue_1"      # same pack as blue_0
-    other_pack_id = "blue_10"   # different pack
+    packmate_id = "blue_1"  # same pack as blue_0
+    other_pack_id = "blue_10"  # different pack
 
     viewer = env.sim.mechs[viewer_id]
     packmate = env.sim.mechs[packmate_id]
@@ -321,6 +342,7 @@ def test_partial_visibility_is_pack_scoped():
     rel = contacts2[:, 13:16]
     assert float(rel[:, 0].sum()) == 1.0, "Visible contact should be marked friendly"
     print("Partial visibility is pack scoped test passed!")
+
 
 def test_topk_contact_quota_and_repurpose():
     cfg = EnvConfig(
@@ -366,6 +388,7 @@ def test_topk_contact_quota_and_repurpose():
     assert n_hostile == 2
     assert n_friendly == 3
     print("Top-K contact quota test passed!")
+
 
 if __name__ == "__main__":
     test_indirect_fire()

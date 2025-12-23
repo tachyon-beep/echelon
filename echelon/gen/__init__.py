@@ -1,6 +1,12 @@
-from .validator import ConnectivityValidator
 from .recipe import build_recipe
-from .transforms import apply_transform_solids, apply_transform_voxels, list_transforms, opposite_corner, transform_corner
+from .transforms import (
+    apply_transform_solids,
+    apply_transform_voxels,
+    list_transforms,
+    opposite_corner,
+    transform_corner,
+)
+from .validator import ConnectivityValidator
 
 __all__ = [
     "ConnectivityValidator",

@@ -1,12 +1,14 @@
 """Performance benchmarks for NavGraph building."""
+
 from __future__ import annotations
 
 import time
+
 import numpy as np
 import pytest
 
-from echelon.sim.world import VoxelWorld
 from echelon.nav.graph import NavGraph
+from echelon.sim.world import VoxelWorld
 
 
 @pytest.fixture
@@ -44,13 +46,13 @@ class TestNavGraphPerformance:
         graph = NavGraph.build(medium_world, clearance_z=4, mech_radius=1)
         elapsed = time.perf_counter() - t0
 
-        print(f"\n100x100x20 NavGraph build:")
-        print(f"  Time: {elapsed*1000:.1f} ms")
+        print("\n100x100x20 NavGraph build:")
+        print(f"  Time: {elapsed * 1000:.1f} ms")
         print(f"  Nodes: {len(graph.nodes):,}")
         print(f"  Edges: {sum(len(n.edges) for n in graph.nodes.values()):,}")
 
         # Should build in under 500ms
-        assert elapsed < 0.5, f"Too slow: {elapsed*1000:.0f} ms"
+        assert elapsed < 0.5, f"Too slow: {elapsed * 1000:.0f} ms"
 
     def test_large_world_build_time(self, large_world: VoxelWorld):
         """Benchmark on 200x200x40 world."""
@@ -58,10 +60,10 @@ class TestNavGraphPerformance:
         graph = NavGraph.build(large_world, clearance_z=4, mech_radius=1)
         elapsed = time.perf_counter() - t0
 
-        print(f"\n200x200x40 NavGraph build:")
-        print(f"  Time: {elapsed*1000:.1f} ms")
+        print("\n200x200x40 NavGraph build:")
+        print(f"  Time: {elapsed * 1000:.1f} ms")
         print(f"  Nodes: {len(graph.nodes):,}")
         print(f"  Edges: {sum(len(n.edges) for n in graph.nodes.values()):,}")
 
         # Should build in under 2s
-        assert elapsed < 2.0, f"Too slow: {elapsed*1000:.0f} ms"
+        assert elapsed < 2.0, f"Too slow: {elapsed * 1000:.0f} ms"

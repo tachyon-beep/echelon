@@ -10,6 +10,7 @@ Features:
 - Graceful shutdown with client cleanup
 - Connection health monitoring
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,13 +19,13 @@ import json
 import logging
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -146,9 +147,7 @@ class SSEManager:
             self._event_counter += 1
             return self._event_counter
 
-    async def register(
-        self, channel: str | None = None, last_event_id: int = 0
-    ) -> SSEClient:
+    async def register(self, channel: str | None = None, last_event_id: int = 0) -> SSEClient:
         """Register a new SSE client."""
         async with self.lock:
             if len(self.clients) >= settings.SSE_MAX_CLIENTS:
@@ -228,10 +227,8 @@ class SSEManager:
                 # Non-blocking put with backpressure
                 if client.queue.full():
                     # Drop oldest event (drain one)
-                    try:
+                    with suppress(asyncio.QueueEmpty):
                         client.queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
                 client.queue.put_nowait((event_id, event_type, data))
                 notified += 1
             except Exception as e:
@@ -281,7 +278,7 @@ class ReplayManager:
         world = replay.get("world") if isinstance(replay, dict) else None
         frames = replay.get("frames") if isinstance(replay, dict) else None
         out: dict[str, Any] = {
-            "frames": int(len(frames)) if isinstance(frames, list) else None,
+            "frames": len(frames) if isinstance(frames, list) else None,
         }
         if isinstance(world, dict):
             out["seed"] = world.get("seed")
@@ -334,7 +331,9 @@ class ReplayManager:
                 heapq.heapreplace(items, (mtime, p))
 
         items.sort(key=lambda t: t[0], reverse=True)
-        return [{"name": p.relative_to(root).as_posix(), "path": p.relative_to(root).as_posix()} for _, p in items]
+        return [
+            {"name": p.relative_to(root).as_posix(), "path": p.relative_to(root).as_posix()} for _, p in items
+        ]
 
 
 # --- Global State & Lifespan ---
@@ -391,7 +390,7 @@ async def sse_event_generator(client: SSEClient):
                 )
                 yield f"id: {event_id}\nevent: {event_type}\ndata: {data}\n\n"
                 client.last_event_id = event_id
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Send keep-alive comment (SSE spec: lines starting with : are comments)
                 yield f": keepalive {int(time.time())}\n\n"
 
@@ -421,10 +420,8 @@ async def sse_endpoint(
     last_event_id = 0
     last_event_header = request.headers.get("Last-Event-ID", "")
     if last_event_header:
-        try:
+        with suppress(ValueError):
             last_event_id = int(last_event_header)
-        except ValueError:
-            pass
 
     client = await sse_manager.register(channel=channel, last_event_id=last_event_id)
 
@@ -457,7 +454,8 @@ async def health_check():
     return {
         "status": "ok",
         "clients": len(sse_manager.clients),
-        "uptime_s": time.time() - (min((c.connected_at for c in sse_manager.clients.values()), default=time.time())),
+        "uptime_s": time.time()
+        - (min((c.connected_at for c in sse_manager.clients.values()), default=time.time())),
     }
 
 
@@ -489,7 +487,7 @@ async def get_replay(path: str):
         raise
     except Exception as e:
         logger.error(f"Error serving replay {path}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/push", response_model=ReplayPushResponse)
@@ -518,7 +516,9 @@ async def push_replay(
         text, nbytes = replay_manager.encode(replay)
     except Exception as e:
         logger.error(f"Encoding failed: {e}")
-        return ReplayPushResponse(status="error", bytes=0, summary={}, channel=channel, event_id=0, clients_notified=0)
+        return ReplayPushResponse(
+            status="error", bytes=0, summary={}, channel=channel, event_id=0, clients_notified=0
+        )
 
     summary = replay_manager.summarize(replay)
 
@@ -535,7 +535,9 @@ async def push_replay(
         channel=channel,
     )
 
-    logger.info(f"Pushed replay to '{channel}' ({nbytes / 1024:.1f} KB, event_id={event_id}, clients={clients_notified})")
+    logger.info(
+        f"Pushed replay to '{channel}' ({nbytes / 1024:.1f} KB, event_id={event_id}, clients={clients_notified})"
+    )
     return ReplayPushResponse(
         status="ok",
         bytes=nbytes,
@@ -577,7 +579,7 @@ async def build_nav_graph(world_data: dict[str, Any]):
         raise
     except Exception as e:
         logger.error(f"Failed to build NavGraph: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 class PathRequest(BaseModel):
@@ -628,7 +630,7 @@ async def plan_path(req: PathRequest):
         raise
     except Exception as e:
         logger.error(f"Failed to plan path: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # --- Main ---

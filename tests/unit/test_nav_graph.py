@@ -1,11 +1,12 @@
 """Tests for NavGraph building and correctness."""
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from echelon.sim.world import VoxelWorld
 from echelon.nav.graph import NavGraph
+from echelon.sim.world import VoxelWorld
 
 
 @pytest.fixture
@@ -38,14 +39,14 @@ class TestNavGraphBuild:
 
         # All nodes should be at z=0 (standing on floor)
         for nid in graph.nodes:
-            z, y, x = nid
+            z, _y, _x = nid
             assert z == 0, f"Node {nid} not at ground level"
 
     def test_platform_world_has_two_levels(self, platform_world: VoxelWorld):
         """Platform world should have nodes at both levels."""
         graph = NavGraph.build(platform_world, clearance_z=2, mech_radius=0)
 
-        z_levels = set(nid[0] for nid in graph.nodes)
+        z_levels = {nid[0] for nid in graph.nodes}
 
         # Should have ground (z=0) and platform (z=3) nodes
         assert 0 in z_levels, "Missing ground level nodes"
@@ -86,6 +87,6 @@ class TestNavGraphBuild:
 
         # Nodes under ceiling should be excluded
         for nid in graph.nodes:
-            z, y, x = nid
+            z, _y, x = nid
             if z == 0 and x >= 5:
                 pytest.fail(f"Node {nid} should be blocked by low ceiling")

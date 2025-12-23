@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ..config import MechClassConfig
+if TYPE_CHECKING:
+    from ..config import MechClassConfig
 
 
 @dataclass
@@ -21,7 +23,7 @@ class MechState:
     heat: float
     stability: float
     max_stability: float = 100.0
-    fallen_time: float = 0.0 # >0 means fallen/stunned
+    fallen_time: float = 0.0  # >0 means fallen/stunned
 
     # Optional per-step intent (set by the env, read by the sim).
     focus_target_id: str | None = None
@@ -33,14 +35,14 @@ class MechState:
     # Status effects.
     suppressed_time: float = 0.0  # Stability regen penalty while > 0.
     ams_cooldown: float = 0.0  # Anti-missile system cooldown (seconds).
-    
+
     laser_cooldown: float = 0.0
     missile_cooldown: float = 0.0
     kinetic_cooldown: float = 0.0
     painter_cooldown: float = 0.0
     painted_remaining: float = 0.0
     last_painter_id: str | None = None
-    noise_level: float = 0.0 # Acoustic footprint
+    noise_level: float = 0.0  # Acoustic footprint
     alive: bool = True
 
     # Per-decision-step scratch.

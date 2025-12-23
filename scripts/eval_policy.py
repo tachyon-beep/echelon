@@ -14,8 +14,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from echelon import EchelonEnv, EnvConfig
-from echelon.config import WorldConfig
 from echelon.agents.heuristic import HeuristicPolicy
+from echelon.config import WorldConfig
 from echelon.rl.model import ActorCriticLSTM
 
 
@@ -41,7 +41,9 @@ def main() -> None:
 
     device = resolve_device(args.device)
     print(f"device={device} cuda_available={torch.cuda.is_available()} torch={torch.__version__}")
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)  # TODO: migrate to weights_only=True after adding safe globals
+    ckpt = torch.load(
+        args.checkpoint, map_location=device, weights_only=False
+    )  # TODO: migrate to weights_only=True after adding safe globals
     env_cfg_dict = dict(ckpt["env_cfg"])
     world = WorldConfig(**env_cfg_dict["world"])
     env_cfg = EnvConfig(
@@ -85,9 +87,11 @@ def main() -> None:
             for rid in red_ids:
                 actions[rid] = heuristic.act(env, rid)
 
-            obs, rewards, terminations, truncations, infos = env.step(actions)
+            obs, _rewards, terminations, truncations, _infos = env.step(actions)
             done = torch.tensor(
-                [terminations[bid] or truncations[bid] for bid in blue_ids], dtype=torch.float32, device=device
+                [terminations[bid] or truncations[bid] for bid in blue_ids],
+                dtype=torch.float32,
+                device=device,
             )
 
             blue_alive = env.sim.team_alive("blue")

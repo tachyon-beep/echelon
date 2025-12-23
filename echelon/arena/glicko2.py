@@ -3,8 +3,10 @@ from __future__ import annotations
 import dataclasses
 import math
 from dataclasses import dataclass
-from typing import Iterable
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _GLICKO2_SCALE = 173.7178
 _DEFAULT_RATING = 1500.0
@@ -29,10 +31,10 @@ class Glicko2Rating:
         return {"rating": float(self.rating), "rd": float(self.rd), "vol": float(self.vol)}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Glicko2Rating":
+    def from_dict(cls, d: dict) -> Glicko2Rating:
         return cls(rating=float(d["rating"]), rd=float(d["rd"]), vol=float(d["vol"]))
 
-    def with_defaults(self, cfg: Glicko2Config) -> "Glicko2Rating":
+    def with_defaults(self, cfg: Glicko2Config) -> Glicko2Rating:
         # Useful if older league files are missing some fields.
         return dataclasses.replace(
             self,
@@ -137,7 +139,7 @@ def rate(
     v = 1.0 / max(1e-12, v_inv)
 
     delta_sum = 0.0
-    for ((mu_j, phi_j, _), s_j), g_j, E_j in zip(opp, g_list, E_list, strict=True):
+    for ((_mu_j, _phi_j, _), s_j), g_j, E_j in zip(opp, g_list, E_list, strict=True):
         delta_sum += g_j * (s_j - E_j)
     delta = v * delta_sum
 
@@ -160,4 +162,3 @@ def expected_score(a: Glicko2Rating, b: Glicko2Rating, *, cfg: Glicko2Config = G
     mu_a, _, _ = _to_mu_phi(a, cfg)
     mu_b, phi_b, _ = _to_mu_phi(b, cfg)
     return float(_E(mu_a, mu_b, phi_b))
-

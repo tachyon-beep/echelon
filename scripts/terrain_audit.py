@@ -14,10 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from echelon.env.env import default_mech_classes
 from echelon.config import WorldConfig
-from echelon.gen.objective import capture_zone_params, clear_capture_zone, sample_capture_zone
+from echelon.env.env import default_mech_classes
 from echelon.gen.corridors import carve_macro_corridors
+from echelon.gen.objective import capture_zone_params, clear_capture_zone, sample_capture_zone
 from echelon.gen.recipe import build_recipe
 from echelon.gen.transforms import apply_transform_voxels, list_transforms, opposite_corner, transform_corner
 from echelon.gen.validator import ConnectivityValidator
@@ -127,18 +127,31 @@ def main() -> None:
         red_canon = opposite_corner(blue_canon)
         transform = str(rng_variants.choice(list_transforms()))
         world.voxels = apply_transform_voxels(world.voxels, transform)
-        spawn_corners = {"blue": transform_corner(blue_canon, transform), "red": transform_corner(red_canon, transform)}
+        spawn_corners = {
+            "blue": transform_corner(blue_canon, transform),
+            "red": transform_corner(red_canon, transform),
+        }
 
         # Apply spawn clears (matching env defaults today).
         if spawn_corners["blue"] == "BL":
             world.set_box_solid(0, 0, 0, spawn_clear, spawn_clear, world.size_z, False)
         elif spawn_corners["blue"] == "BR":
-            world.set_box_solid(world.size_x - spawn_clear, 0, 0, world.size_x, spawn_clear, world.size_z, False)
+            world.set_box_solid(
+                world.size_x - spawn_clear, 0, 0, world.size_x, spawn_clear, world.size_z, False
+            )
         elif spawn_corners["blue"] == "TL":
-            world.set_box_solid(0, world.size_y - spawn_clear, 0, spawn_clear, world.size_y, world.size_z, False)
+            world.set_box_solid(
+                0, world.size_y - spawn_clear, 0, spawn_clear, world.size_y, world.size_z, False
+            )
         elif spawn_corners["blue"] == "TR":
             world.set_box_solid(
-                world.size_x - spawn_clear, world.size_y - spawn_clear, 0, world.size_x, world.size_y, world.size_z, False
+                world.size_x - spawn_clear,
+                world.size_y - spawn_clear,
+                0,
+                world.size_x,
+                world.size_y,
+                world.size_z,
+                False,
             )
         else:
             raise ValueError(spawn_corners["blue"])
@@ -146,12 +159,22 @@ def main() -> None:
         if spawn_corners["red"] == "BL":
             world.set_box_solid(0, 0, 0, spawn_clear, spawn_clear, world.size_z, False)
         elif spawn_corners["red"] == "BR":
-            world.set_box_solid(world.size_x - spawn_clear, 0, 0, world.size_x, spawn_clear, world.size_z, False)
+            world.set_box_solid(
+                world.size_x - spawn_clear, 0, 0, world.size_x, spawn_clear, world.size_z, False
+            )
         elif spawn_corners["red"] == "TL":
-            world.set_box_solid(0, world.size_y - spawn_clear, 0, spawn_clear, world.size_y, world.size_z, False)
+            world.set_box_solid(
+                0, world.size_y - spawn_clear, 0, spawn_clear, world.size_y, world.size_z, False
+            )
         elif spawn_corners["red"] == "TR":
             world.set_box_solid(
-                world.size_x - spawn_clear, world.size_y - spawn_clear, 0, world.size_x, world.size_y, world.size_z, False
+                world.size_x - spawn_clear,
+                world.size_y - spawn_clear,
+                0,
+                world.size_x,
+                world.size_y,
+                world.size_z,
+                False,
             )
         else:
             raise ValueError(spawn_corners["red"])
@@ -205,7 +228,7 @@ def main() -> None:
             "walls": int(np.count_nonzero(world.solid)),
             "carved_voxels": carved,
             "carved_ratio": carved_ratio,
-            "fixups_count": int(len(world.meta.get("fixups", []))),
+            "fixups_count": len(world.meta.get("fixups", [])),
             "paths": paths,
             "hashes": recipe.get("hashes", {}),
         }
@@ -220,7 +243,7 @@ def main() -> None:
         "world_config": asdict(world_cfg),
         "spawn_clear": int(spawn_clear),
         "packs_per_team": int(args.packs_per_team),
-        "count": int(len(entries)),
+        "count": len(entries),
         "elapsed_s": float(elapsed),
         "badness_max": float(worst[0]["badness"]) if worst else 0.0,
         "badness_p95": float(np.percentile([e["badness"] for e in entries], 95)) if entries else 0.0,

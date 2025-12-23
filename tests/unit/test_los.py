@@ -1,11 +1,18 @@
 """Tests for LOS raycasting correctness and performance."""
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
+from echelon.sim.los import (
+    _raycast_dda_numba,
+    _raycast_dda_pure,
+    batch_has_los,
+    has_los,
+    raycast_voxels,
+)
 from echelon.sim.world import VoxelWorld
-from echelon.sim.los import raycast_voxels, has_los, RaycastHit, _raycast_dda_pure, _raycast_dda_numba, batch_has_los
 
 
 @pytest.fixture
@@ -111,7 +118,7 @@ class TestNumbaConsistency:
         voxels = rng.choice(
             [VoxelWorld.AIR, VoxelWorld.SOLID, VoxelWorld.GLASS, VoxelWorld.FOLIAGE],
             size=(20, 20, 20),
-            p=[0.7, 0.2, 0.05, 0.05]
+            p=[0.7, 0.2, 0.05, 0.05],
         ).astype(np.uint8)
         return VoxelWorld(voxels=voxels)
 
@@ -128,16 +135,24 @@ class TestNumbaConsistency:
             result_pure = _raycast_dda_pure(
                 random_world.voxels,
                 blocks_los_lut,
-                float(start[0]), float(start[1]), float(start[2]),
-                float(end[0]), float(end[1]), float(end[2]),
+                float(start[0]),
+                float(start[1]),
+                float(start[2]),
+                float(end[0]),
+                float(end[1]),
+                float(end[2]),
                 False,
             )
 
             result_numba = _raycast_dda_numba(
                 random_world.voxels,
                 blocks_los_lut,
-                float(start[0]), float(start[1]), float(start[2]),
-                float(end[0]), float(end[1]), float(end[2]),
+                float(start[0]),
+                float(start[1]),
+                float(start[2]),
+                float(end[0]),
+                float(end[1]),
+                float(end[2]),
                 False,
             )
 
@@ -150,16 +165,22 @@ class TestBatchRaycast:
 
     def test_batch_has_los_empty_world(self, empty_world: VoxelWorld):
         """Batch LOS in empty world should all be clear."""
-        starts = np.array([
-            [1.5, 1.5, 1.5],
-            [2.5, 2.5, 2.5],
-            [3.5, 3.5, 3.5],
-        ], dtype=np.float32)
-        ends = np.array([
-            [8.5, 8.5, 8.5],
-            [7.5, 7.5, 7.5],
-            [6.5, 6.5, 6.5],
-        ], dtype=np.float32)
+        starts = np.array(
+            [
+                [1.5, 1.5, 1.5],
+                [2.5, 2.5, 2.5],
+                [3.5, 3.5, 3.5],
+            ],
+            dtype=np.float32,
+        )
+        ends = np.array(
+            [
+                [8.5, 8.5, 8.5],
+                [7.5, 7.5, 7.5],
+                [6.5, 6.5, 6.5],
+            ],
+            dtype=np.float32,
+        )
 
         results = batch_has_los(empty_world, starts, ends)
 
@@ -169,22 +190,28 @@ class TestBatchRaycast:
 
     def test_batch_has_los_with_wall(self, wall_world: VoxelWorld):
         """Batch LOS with wall blocking some rays."""
-        starts = np.array([
-            [2.5, 5.0, 5.0],  # Will hit wall
-            [2.5, 5.0, 5.0],  # Will hit wall
-            [6.5, 5.0, 5.0],  # After wall, clear to end
-        ], dtype=np.float32)
-        ends = np.array([
-            [8.5, 5.0, 5.0],  # Blocked
-            [4.0, 5.0, 5.0],  # Clear (before wall)
-            [9.5, 5.0, 5.0],  # Clear (both after wall)
-        ], dtype=np.float32)
+        starts = np.array(
+            [
+                [2.5, 5.0, 5.0],  # Will hit wall
+                [2.5, 5.0, 5.0],  # Will hit wall
+                [6.5, 5.0, 5.0],  # After wall, clear to end
+            ],
+            dtype=np.float32,
+        )
+        ends = np.array(
+            [
+                [8.5, 5.0, 5.0],  # Blocked
+                [4.0, 5.0, 5.0],  # Clear (before wall)
+                [9.5, 5.0, 5.0],  # Clear (both after wall)
+            ],
+            dtype=np.float32,
+        )
 
         results = batch_has_los(wall_world, starts, ends)
 
-        assert results[0] == False  # Blocked by wall
-        assert results[1] == True   # Before wall
-        assert results[2] == True   # After wall
+        assert not results[0]  # Blocked by wall
+        assert results[1]  # Before wall
+        assert results[2]  # After wall
 
     def test_batch_has_los_matches_single(self, wall_world: VoxelWorld):
         """Batch results must match individual has_los calls."""

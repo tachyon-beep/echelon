@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
-from ..config import WorldConfig
+if TYPE_CHECKING:
+    from ..config import WorldConfig
 
 
 class _SolidMask:
@@ -29,7 +30,7 @@ class _SolidMask:
         return int(self._world.voxels.size)
 
     def __array__(self, dtype: Any | None = None) -> np.ndarray:
-        out = self._world.collides_lut()[self._world.voxels]
+        out: np.ndarray = self._world.collides_lut()[self._world.voxels]
         if dtype is None:
             return out
         return out.astype(dtype, copy=False)
@@ -65,11 +66,11 @@ class VoxelWorld:
     DEBRIS_FIELD = 4
     SOLID_DEBRIS = 5
     DIRT = 6
-    GLASS = 7      # Blocks movement, not LOS. Low HP.
-    REINFORCED = 8 # Indestructible SOLID.
-    FOLIAGE = 9    # Blocks LOS, not movement. 0 HP.
+    GLASS = 7  # Blocks movement, not LOS. Low HP.
+    REINFORCED = 8  # Indestructible SOLID.
+    FOLIAGE = 9  # Blocks LOS, not movement. 0 HP.
 
-    MATERIAL_PROPS = {
+    MATERIAL_PROPS: ClassVar[dict[int, dict[str, int | bool]]] = {
         AIR: {"hp": 0, "collides": False, "blocks_los": False},
         SOLID: {"hp": 100, "collides": True, "blocks_los": True},
         LAVA: {"hp": 0, "collides": False, "blocks_los": False},
@@ -85,7 +86,7 @@ class VoxelWorld:
     _COLLIDES_LUT: ClassVar[np.ndarray | None] = None
 
     voxels: np.ndarray  # uint8[sz, sy, sx] (z-major)
-    voxel_hp: np.ndarray | None = None # float32[sz, sy, sx]
+    voxel_hp: np.ndarray | None = None  # float32[sz, sy, sx]
     voxel_size_m: float = 5.0
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -120,7 +121,7 @@ class VoxelWorld:
             self.voxels[:] = np.where(arr, self.SOLID, self.AIR).astype(np.uint8, copy=False)
         else:
             self.voxels[:] = arr.astype(np.uint8, copy=False)
-        
+
         # Sync HP
         if self.voxel_hp is not None:
             for v_id, props in self.MATERIAL_PROPS.items():
@@ -148,7 +149,7 @@ class VoxelWorld:
 
     def is_solid_index(self, ix: int, iy: int, iz: int) -> bool:
         v = self.get_voxel(ix, iy, iz)
-        return self.MATERIAL_PROPS.get(v, {}).get("collides", False)
+        return bool(self.MATERIAL_PROPS.get(v, {}).get("collides", False))
 
     def set_box_solid(
         self,
@@ -160,14 +161,16 @@ class VoxelWorld:
         max_iz_excl: int,
         value: bool | int,
     ) -> None:
-        min_ix = max(min_ix, 0); min_iy = max(min_iy, 0); min_iz = max(min_iz, 0)
+        min_ix = max(min_ix, 0)
+        min_iy = max(min_iy, 0)
+        min_iz = max(min_iz, 0)
         max_ix_excl = min(max_ix_excl, self.size_x)
         max_iy_excl = min(max_iy_excl, self.size_y)
         max_iz_excl = min(max_iz_excl, self.size_z)
         if min_ix >= max_ix_excl or min_iy >= max_iy_excl or min_iz >= max_iz_excl:
             return
-        
-        val = int(value) if isinstance(value, (int, np.integer)) else (self.SOLID if value else self.AIR)
+
+        val = int(value) if isinstance(value, int | np.integer) else (self.SOLID if value else self.AIR)
         self.voxels[min_iz:max_iz_excl, min_iy:max_iy_excl, min_ix:max_ix_excl] = val
         if self.voxel_hp is not None:
             # Sync HP for the region
@@ -178,11 +181,11 @@ class VoxelWorld:
         """Subtracts HP from a voxel. Returns True if destroyed."""
         if not self.in_bounds(ix, iy, iz) or self.voxel_hp is None:
             return False
-        
+
         v_id = self.voxels[iz, iy, ix]
         if v_id == self.AIR or v_id == self.REINFORCED:
             return False
-            
+
         self.voxel_hp[iz, iy, ix] -= amount
         if self.voxel_hp[iz, iy, ix] <= 0:
             # Voxel destroyed!
@@ -195,7 +198,7 @@ class VoxelWorld:
         if self.size_z <= 0:
             return
         layer = self.voxels[0]
-        mask = (layer == self.AIR)
+        mask = layer == self.AIR
         layer[mask] = self.DIRT
         if self.voxel_hp is not None:
             self.voxel_hp[0][mask] = 0
@@ -203,7 +206,8 @@ class VoxelWorld:
     @property
     def collides_mask(self) -> np.ndarray:
         # Pre-calculated boolean mask for collisions
-        return self.collides_lut()[self.voxels]
+        result: np.ndarray = self.collides_lut()[self.voxels]
+        return result
 
     _BLOCKS_LOS_LUT: ClassVar[np.ndarray | None] = None
 
@@ -221,7 +225,8 @@ class VoxelWorld:
     @property
     def blocks_los_mask(self) -> np.ndarray:
         # Pre-calculated boolean mask for LOS blocking
-        return self.blocks_los_lut()[self.voxels]
+        result: np.ndarray = self.blocks_los_lut()[self.voxels]
+        return result
 
     def aabb_collides(self, aabb_min: np.ndarray, aabb_max: np.ndarray) -> bool:
         if aabb_min[2] < 0:
@@ -246,4 +251,5 @@ class VoxelWorld:
     def generate(cls, config: WorldConfig, rng: np.random.Generator) -> VoxelWorld:
         # Defer to the modular layout generator (v2 architecture)
         from ..gen.layout import generate_layout
+
         return generate_layout(config, rng)

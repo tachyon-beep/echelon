@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ..sim.world import VoxelWorld
 from .objective import capture_zone_params
+
+if TYPE_CHECKING:
+    from ..sim.world import VoxelWorld
 
 
 def _corner_anchor_xy(corner: str, spawn_clear: int, *, size_x: int, size_y: int) -> tuple[float, float]:
@@ -34,12 +36,12 @@ def _carve_line(world: VoxelWorld, x0: float, y0: float, x1: float, y1: float, *
         t = float(i) / float(steps)
         px = x0 + (x1 - x0) * t
         py = y0 + (y1 - y0) * t
-        min_x = int(math.floor(px - half_w))
-        max_x = int(math.floor(px + half_w)) + 1
-        min_y = int(math.floor(py - half_w))
-        max_y = int(math.floor(py + half_w)) + 1
+        min_x = math.floor(px - half_w)
+        max_x = math.floor(px + half_w) + 1
+        min_y = math.floor(py - half_w)
+        max_y = math.floor(py + half_w) + 1
         # Clear only standing room
-        world.voxels[0 : clearance_z + 1, min_y:max_y, min_x:max_x] = 0 # AIR
+        world.voxels[0 : clearance_z + 1, min_y:max_y, min_x:max_x] = 0  # AIR
 
 
 def carve_macro_corridors(
@@ -67,7 +69,7 @@ def carve_macro_corridors(
     width_f = float(width)
 
     # Objective ring (a readable "laning" structure near the hill).
-    ring_r = int(round(float(zone_r) + width_f * 1.25))
+    ring_r = round(float(zone_r) + width_f * 1.25)
     ring_r = int(np.clip(ring_r, 3, max(3, int(min_dim * 0.35))))
 
     x0 = float(np.clip(cx - ring_r, 1.0, float(sx - 2)))
@@ -81,14 +83,26 @@ def carve_macro_corridors(
     _carve_line(world, x1, y0, x1, y1, width_vox=width_f)
 
     corridors: list[dict[str, Any]] = meta.setdefault("corridors", [])
-    corridors.append({"kind": "objective_ring", "width": float(width_f), "points": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]})
+    corridors.append(
+        {
+            "kind": "objective_ring",
+            "width": float(width_f),
+            "points": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        }
+    )
 
     # Spawn-to-objective lanes (two per team: direct + offset flank).
     for team in ("blue", "red"):
         corner = str(spawn_corners.get(team, "BL"))
         ax, ay = _corner_anchor_xy(corner, spawn_clear, size_x=sx, size_y=sy)
         _carve_line(world, ax, ay, float(cx), float(cy), width_vox=width_f)
-        corridors.append({"kind": f"{team}_lane_main", "width": float(width_f), "points": [[ax, ay], [float(cx), float(cy)]]})
+        corridors.append(
+            {
+                "kind": f"{team}_lane_main",
+                "width": float(width_f),
+                "points": [[ax, ay], [float(cx), float(cy)]],
+            }
+        )
 
         vx = float(cx - ax)
         vy = float(cy - ay)
@@ -109,5 +123,6 @@ def carve_macro_corridors(
         tx = float(np.clip(cx + px * offset, 1.0, float(sx - 2)))
         ty = float(np.clip(cy + py * offset, 1.0, float(sy - 2)))
         _carve_line(world, bx, by, tx, ty, width_vox=width_f)
-        corridors.append({"kind": f"{team}_lane_flank", "width": float(width_f), "points": [[bx, by], [tx, ty]]})
-
+        corridors.append(
+            {"kind": f"{team}_lane_flank", "width": float(width_f), "points": [[bx, by], [tx, ty]]}
+        )

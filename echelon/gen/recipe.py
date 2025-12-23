@@ -4,12 +4,14 @@ import copy
 import dataclasses
 import hashlib
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ..config import WorldConfig
 from .objective import capture_zone_params
+
+if TYPE_CHECKING:
+    from ..config import WorldConfig
 
 
 def canonical_json_bytes(obj: Any) -> bytes:
@@ -35,7 +37,7 @@ def build_recipe(
     world_meta: dict[str, Any],
     solids_zyx: np.ndarray,
 ) -> dict[str, Any]:
-    sx, sy, sz = int(solids_zyx.shape[2]), int(solids_zyx.shape[1]), int(solids_zyx.shape[0])
+    sx, sy, _sz = int(solids_zyx.shape[2]), int(solids_zyx.shape[1]), int(solids_zyx.shape[0])
     spawn_clear = int(world_meta.get("spawn_clear", max(25, int(sx * 0.25))))
     spawn_corners = dict(world_meta.get("spawn_corners", {"blue": "BL", "red": "TR"}))
     obj_x, obj_y, obj_r = capture_zone_params(world_meta, size_x=sx, size_y=sy)

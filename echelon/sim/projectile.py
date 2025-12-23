@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 
 @dataclass
@@ -16,10 +18,10 @@ class Projectile:
     damage: float
     stability_damage: float
     max_lifetime: float
-    guidance: str = "homing" # "homing", "ballistic", "linear"
+    guidance: str = "homing"  # "homing", "ballistic", "linear"
     splash_rad: float = 0.0
     splash_scale: float = 0.0
-    
+
     # State
     age: float = 0.0
     alive: bool = True

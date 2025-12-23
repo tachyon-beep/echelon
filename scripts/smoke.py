@@ -15,12 +15,12 @@ from echelon.agents.heuristic import HeuristicPolicy
 
 
 def run_episode(env: EchelonEnv, policy: HeuristicPolicy, seed: int) -> dict:
-    obs, _ = env.reset(seed=seed)
+    _obs, _ = env.reset(seed=seed)
 
     steps = 0
     while True:
         actions = {aid: policy.act(env, aid) for aid in env.agents}
-        obs, rewards, terminations, truncations, infos = env.step(actions)
+        _obs, _rewards, _terminations, truncations, _infos = env.step(actions)
         steps += 1
 
         if any(truncations.values()) or (not env.sim.team_alive("blue")) or (not env.sim.team_alive("red")):
