@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from echelon.agents.heuristic import HeuristicPolicy
+from echelon.training.evaluation import evaluate_vs_heuristic
 from echelon.training.ppo import PPOConfig, PPOTrainer
 from echelon.training.rollout import RolloutBuffer
 from echelon.training.vec_env import VectorEnv
@@ -184,72 +184,6 @@ def push_replay(url: str, replay: dict) -> None:
         requests.post(url, json=replay, timeout=5)
     except Exception as e:
         print(f"Failed to push replay: {e}")
-
-
-@torch.no_grad()
-def evaluate_vs_heuristic(
-    model: ActorCriticLSTM,
-    env_cfg: EnvConfig,
-    episodes: int,
-    seed: int,
-    device: torch.device,
-    *,
-    seeds: list[int] | None = None,
-    record: bool = False,
-) -> tuple[dict, dict | None]:
-    # Set record_replay if requested
-    env_cfg = replace(env_cfg, record_replay=record)
-    env = EchelonEnv(env_cfg)
-    heuristic = HeuristicPolicy()
-
-    blue_ids = env.blue_ids
-    red_ids = env.red_ids
-
-    if seeds is None:
-        seeds = [int(seed) + int(i) for i in range(int(episodes))]
-    wins = {"blue": 0, "red": 0, "draw": 0}
-    hp_margins: list[float] = []
-    last_replay = None
-
-    for ep, ep_seed in enumerate(seeds):
-        obs, _ = env.reset(seed=int(ep_seed))
-        lstm_state = model.initial_state(batch_size=len(blue_ids), device=device)
-        done = torch.zeros(len(blue_ids), device=device)
-
-        while True:
-            obs_b = torch.from_numpy(stack_obs(obs, blue_ids)).to(device)
-            action_b, _, _, _, lstm_state = model.get_action_and_value(obs_b, lstm_state, done)
-            action_np = action_b.cpu().numpy()
-
-            actions = {bid: action_np[i] for i, bid in enumerate(blue_ids)}
-            for rid in red_ids:
-                actions[rid] = heuristic.act(env, rid)
-
-            obs, _rewards, terminations, truncations, _infos = env.step(actions)
-
-            blue_alive = env.sim.team_alive("blue")
-            red_alive = env.sim.team_alive("red")
-            done = torch.tensor(
-                [terminations[bid] or truncations[bid] for bid in blue_ids],
-                dtype=torch.float32,
-                device=device,
-            )
-
-            if any(truncations.values()) or (not blue_alive) or (not red_alive):
-                outcome = env.last_outcome or {"winner": "draw", "hp": env.team_hp()}
-                winner = outcome.get("winner", "draw")
-                wins[winner] += 1
-                hp = outcome.get("hp") or env.team_hp()
-                hp_margins.append(float(hp.get("blue", 0.0) - hp.get("red", 0.0)))
-
-                if record and ep == 0:
-                    last_replay = env.get_replay()
-                break
-
-    wins["episodes"] = len(seeds)
-    wins["win_rate"] = float(wins["blue"] / max(1, len(seeds)))
-    wins["mean_hp_margin"] = float(np.mean(hp_margins)) if hp_margins else 0.0
-    return wins, last_replay
 
 
 def main() -> None:
@@ -923,16 +857,22 @@ def main() -> None:
                 eval_episodes = int(args.eval_episodes)
                 seeds_now = [seed0 + i for i in range(eval_episodes)]
 
-            eval_stats, replay = evaluate_vs_heuristic(
+            eval_stats_obj, replay = evaluate_vs_heuristic(
                 model=model,
                 env_cfg=env_cfg,
                 episodes=eval_episodes,
-                seed=seed0,
-                device=device,
                 seeds=seeds_now,
-                record=(bool(args.push_url) or bool(args.save_eval_replay)),
+                device=device,
+                save_replay=(bool(args.push_url) or bool(args.save_eval_replay)),
             )
-            eval_stats["seeds"] = seeds_now
+            # Convert to dict for backward compatibility with logging
+            eval_stats = {
+                "episodes": eval_stats_obj.episodes,
+                "win_rate": eval_stats_obj.win_rate,
+                "mean_hp_margin": eval_stats_obj.mean_hp_margin,
+                "mean_episode_length": eval_stats_obj.mean_episode_length,
+                "seeds": seeds_now,
+            }
             print(f"eval vs heuristic: {eval_stats}")
             if replay is not None:
                 replay["run"] = {

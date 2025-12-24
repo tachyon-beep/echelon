@@ -156,8 +156,8 @@ class EchelonEnv:
 
     CONTACT_SLOTS = 5
     # rel(3) + rel_vel(3) + yaw(2) + hp/heat(2) + stab/fallen/legged(3)
-    # + relation_onehot(3) + class_onehot(3) + painted(1) + visible(1) + lead_pitch(1)
-    CONTACT_DIM = 22
+    # + relation_onehot(3) + class_onehot(4) + painted(1) + visible(1) + lead_pitch(1)
+    CONTACT_DIM = 23
 
     BASE_ACTION_DIM = ACTION_DIM_CONST
     OBS_SORT_DIM = 3
@@ -578,13 +578,15 @@ class EchelonEnv:
             raise ValueError(f"Unknown relation: {relation!r}")
 
         cls = other.spec.name
-        class_onehot = np.zeros(3, dtype=np.float32)
-        if cls in ("light", "scout"):
+        class_onehot = np.zeros(4, dtype=np.float32)
+        if cls == "scout":
             class_onehot[0] = 1.0
-        elif cls == "medium":
+        elif cls == "light":
             class_onehot[1] = 1.0
-        elif cls == "heavy":
+        elif cls == "medium":
             class_onehot[2] = 1.0
+        elif cls == "heavy":
+            class_onehot[3] = 1.0
 
         feat[0:3] = rel
         feat[3:6] = rel_vel
@@ -592,9 +594,9 @@ class EchelonEnv:
         feat[8:10] = np.asarray([hp_norm, heat_norm], dtype=np.float32)
         feat[10:13] = np.asarray([stab_norm, fallen, is_legged], dtype=np.float32)
         feat[13:16] = rel_onehot
-        feat[16:19] = class_onehot
-        feat[19] = 1.0 if painted_by_pack else 0.0
-        feat[20] = 1.0  # visible
+        feat[16:20] = class_onehot
+        feat[20] = 1.0 if painted_by_pack else 0.0
+        feat[21] = 1.0  # visible
 
         # lead_pitch: Suggested pitch for a ballistic hit (Gauss speed 40vox/s)
         # pitch = atan2(dz + drop, dist_xy)
@@ -607,9 +609,9 @@ class EchelonEnv:
             g = 9.81 / world.voxel_size_m
             drop = 0.5 * g * (flight_time**2)
             pitch = math.atan2(dz + drop, dist_xy)
-            feat[21] = float(np.clip(pitch / (math.pi / 4), -1.0, 1.0))
+            feat[22] = float(np.clip(pitch / (math.pi / 4), -1.0, 1.0))
         else:
-            feat[21] = 0.0
+            feat[22] = 0.0
 
         return feat
 
@@ -920,6 +922,11 @@ class EchelonEnv:
             shutdown = 1.0 if viewer.shutdown else 0.0
             crit_heat = 1.0 if (viewer.heat / max(1.0, viewer.spec.heat_cap)) > 0.85 else 0.0
 
+            # Continuous self-state for heat/damage management (policy needs these to learn
+            # proper vent timing and risk assessment, not just binary flags).
+            self_hp_norm = float(np.clip(viewer.hp / max(1.0, viewer.spec.hp), 0.0, 1.0))
+            self_heat_norm = float(np.clip(viewer.heat / max(1.0, viewer.spec.heat_cap), 0.0, 2.0))
+
             incoming_missile = 0.0
             for p in sim.projectiles:
                 if not getattr(p, "alive", False):
@@ -988,6 +995,8 @@ class EchelonEnv:
                         painted_flag,
                         shutdown,
                         crit_heat,
+                        self_hp_norm,
+                        self_heat_norm,
                         incoming_missile,
                         sensor_quality_norm,
                         jam_norm,
@@ -1032,11 +1041,11 @@ class EchelonEnv:
         comm_dim = PACK_SIZE * int(max(0, int(getattr(self.config, "comm_dim", 0))))
         # self features =
         #   acoustic_quadrants(4) + hull_type_onehot(4) +
-        #   targeted, under_fire, painted, shutdown, crit_heat,
+        #   targeted, under_fire, painted, shutdown, crit_heat, self_hp_norm, self_heat_norm,
         #   incoming_missile, sensor_quality, jam_level, ecm_on, eccm_on, suppressed, ams_cd,
         #   self_vel(3), cooldowns(4), in_zone, vec_to_zone(3), zone_radius,
-        #   my_control, my_score, enemy_score, time_frac, obs_sort_onehot(3), hostile_only = 40
-        self_dim = 40
+        #   my_control, my_score, enemy_score, time_frac, obs_sort_onehot(3), hostile_only = 42
+        self_dim = 42
         telemetry_dim = 16 * 16
         return (
             self.CONTACT_SLOTS * self.CONTACT_DIM
@@ -1403,8 +1412,8 @@ class EchelonEnv:
         self.team_zone_score["red"] = float(self.team_zone_score["red"] + red_tick * dt_act)
 
         # Reward weights (HIGH-6: added combat shaping)
-        W_ZONE_TICK = 0.10
-        W_APPROACH = 0.25
+        W_ZONE_TICK = 0.15  # Bumped: being IN zone should be more valuable than approaching
+        W_APPROACH = 0.05  # Reduced: was causing agents to hover near zone entrance
         W_DAMAGE = 0.005  # Per point of damage dealt
         W_KILL = 1.0  # Per kill
         W_ASSIST = 0.5  # Per assist
