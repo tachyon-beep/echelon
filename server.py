@@ -19,6 +19,7 @@ import json
 import logging
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from echelon.nav.graph import NavGraph
+from echelon.nav.planner import Planner
 from echelon.sim.world import VoxelWorld
 
 # --- Configuration ---
@@ -43,6 +45,8 @@ class Settings(BaseSettings):
     SSE_CLIENT_TIMEOUT_S: float = 60.0  # Disconnect idle clients after N seconds
     SSE_MAX_CLIENTS: int = 64  # Maximum concurrent SSE clients
     SSE_MAX_BROADCAST_BYTES: int = 25 * 1024 * 1024  # Max replay size
+    SSE_MAX_LATEST_CHANNELS: int = 8  # Max channels to cache latest replay for
+    SSE_RECENT_EVENTS_MAX: int = 100  # Max recent event IDs to track (not full data)
 
     # Replay settings
     REPLAYS_LIST_LIMIT: int = 200
@@ -117,6 +121,16 @@ class SSEEvent:
     timestamp: float = field(default_factory=time.time)
 
 
+@dataclass
+class SSEEventRef:
+    """Lightweight reference to a past event (no data stored)."""
+
+    event_id: int
+    event_type: str
+    channel: str | None
+    timestamp: float
+
+
 class SSEManager:
     """
     Manages SSE client connections with robustness features.
@@ -135,12 +149,11 @@ class SSEManager:
         self._event_counter_lock = asyncio.Lock()
         self._shutdown = False
 
-        # Recent events buffer for Last-Event-ID resumption
-        self._recent_events: list[SSEEvent] = []
-        self._recent_events_max = 100
+        # Recent event refs for Last-Event-ID tracking (lightweight, no data)
+        self._recent_events: list[SSEEventRef] = []
 
-        # Latest replay per channel for new connections
-        self._latest_by_channel: dict[str, SSEEvent] = {}
+        # Latest replay per channel for new connections (LRU-ordered)
+        self._latest_by_channel: OrderedDict[str, SSEEvent] = OrderedDict()
 
     async def _next_event_id(self) -> int:
         async with self._event_counter_lock:
@@ -197,15 +210,27 @@ class SSEManager:
             channel=channel,
         )
 
-        # Store in recent events for resumption
+        # Store lightweight ref for resumption tracking (no data)
+        event_ref = SSEEventRef(
+            event_id=event_id,
+            event_type=event_type,
+            channel=channel,
+            timestamp=time.time(),
+        )
         async with self.lock:
-            self._recent_events.append(event)
-            if len(self._recent_events) > self._recent_events_max:
-                self._recent_events = self._recent_events[-self._recent_events_max :]
+            self._recent_events.append(event_ref)
+            if len(self._recent_events) > settings.SSE_RECENT_EVENTS_MAX:
+                self._recent_events = self._recent_events[-settings.SSE_RECENT_EVENTS_MAX :]
 
-            # Update latest for channel
+            # Update latest for channel with LRU eviction
             effective_channel = channel or "default"
+            # Move to end if exists (LRU touch)
+            if effective_channel in self._latest_by_channel:
+                self._latest_by_channel.move_to_end(effective_channel)
             self._latest_by_channel[effective_channel] = event
+            # Evict oldest if over limit
+            while len(self._latest_by_channel) > settings.SSE_MAX_LATEST_CHANNELS:
+                self._latest_by_channel.popitem(last=False)
 
         # Broadcast to matching clients
         notified = 0
@@ -236,10 +261,18 @@ class SSEManager:
 
         return event_id, notified
 
-    async def get_missed_events(self, client: SSEClient) -> list[SSEEvent]:
-        """Get events missed since client's last_event_id."""
+    async def get_missed_event_count(self, client: SSEClient) -> int:
+        """Get count of events missed since client's last_event_id.
+
+        Note: We only track event refs, not full data. This is used to
+        update client.last_event_id to avoid duplicate sends.
+        """
         async with self.lock:
-            return [e for e in self._recent_events if e.event_id > client.last_event_id]
+            missed = [e for e in self._recent_events if e.event_id > client.last_event_id]
+            if missed:
+                # Update client to latest event ID to prevent stale resumption
+                client.last_event_id = missed[-1].event_id
+            return len(missed)
 
     async def get_latest_for_channel(self, channel: str | None) -> SSEEvent | None:
         """Get the latest event for a channel (for new connections)."""
@@ -252,6 +285,11 @@ class SSEManager:
             if self._latest_by_channel:
                 return max(self._latest_by_channel.values(), key=lambda e: e.event_id)
             return None
+
+    @property
+    def is_shutdown(self) -> bool:
+        """Check if the manager is shutting down."""
+        return self._shutdown
 
     async def shutdown(self) -> None:
         """Gracefully shutdown all client connections."""
@@ -315,7 +353,9 @@ class ReplayManager:
         if not root.exists():
             return []
 
-        items: list[tuple[float, Path]] = []
+        # Use (mtime, path_str, Path) tuples to avoid comparing Path objects
+        # when mtimes are equal (Path doesn't define ordering in Python 3)
+        items: list[tuple[float, str, Path]] = []
         for p in root.rglob("*.json"):
             try:
                 resolved = p.resolve()
@@ -325,14 +365,16 @@ class ReplayManager:
             except OSError:
                 continue
 
+            path_str = str(p)
             if len(items) < limit:
-                heapq.heappush(items, (mtime, p))
+                heapq.heappush(items, (mtime, path_str, p))
             elif mtime > items[0][0]:
-                heapq.heapreplace(items, (mtime, p))
+                heapq.heapreplace(items, (mtime, path_str, p))
 
         items.sort(key=lambda t: t[0], reverse=True)
         return [
-            {"name": p.relative_to(root).as_posix(), "path": p.relative_to(root).as_posix()} for _, p in items
+            {"name": p.relative_to(root).as_posix(), "path": p.relative_to(root).as_posix()}
+            for _, _, p in items
         ]
 
 
@@ -340,6 +382,7 @@ class ReplayManager:
 
 sse_manager = SSEManager()
 replay_manager = ReplayManager()
+_server_start_time: float = time.time()
 
 
 @asynccontextmanager
@@ -368,13 +411,14 @@ async def sse_event_generator(client: SSEClient):
     - Graceful disconnect on client cancel or shutdown
     """
     try:
-        # Send any missed events first (resumption)
-        missed = await sse_manager.get_missed_events(client)
-        if missed:
-            for event in missed:
-                yield f"id: {event.event_id}\nevent: {event.event_type}\ndata: {event.data}\n\n"
-                client.last_event_id = event.event_id
-        elif client.last_event_id == 0:
+        # Check for missed events (updates client.last_event_id)
+        missed_count = await sse_manager.get_missed_event_count(client)
+        if missed_count > 0:
+            # We don't store full event data, just log that events were missed
+            # Client will receive new events going forward
+            logger.debug(f"Client {client.client_id} missed {missed_count} events, resuming from latest")
+
+        if client.last_event_id == 0 or missed_count > 0:
             # New connection - send latest replay for channel
             latest = await sse_manager.get_latest_for_channel(client.channel)
             if latest:
@@ -382,7 +426,7 @@ async def sse_event_generator(client: SSEClient):
                 client.last_event_id = latest.event_id
 
         # Main event loop with keep-alive
-        while not client.is_cancelled and not sse_manager._shutdown:
+        while not client.is_cancelled and not sse_manager.is_shutdown:
             try:
                 # Wait for event with timeout for keep-alive
                 event_id, event_type, data = await asyncio.wait_for(
@@ -454,8 +498,7 @@ async def health_check():
     return {
         "status": "ok",
         "clients": len(sse_manager.clients),
-        "uptime_s": time.time()
-        - (min((c.connected_at for c in sse_manager.clients.values()), default=time.time())),
+        "uptime_s": time.time() - _server_start_time,
     }
 
 
@@ -516,9 +559,7 @@ async def push_replay(
         text, nbytes = replay_manager.encode(replay)
     except Exception as e:
         logger.error(f"Encoding failed: {e}")
-        return ReplayPushResponse(
-            status="error", bytes=0, summary={}, channel=channel, event_id=0, clients_notified=0
-        )
+        raise HTTPException(status_code=500, detail=f"Encoding failed: {e}") from e
 
     summary = replay_manager.summarize(replay)
 
@@ -548,32 +589,38 @@ async def push_replay(
     )
 
 
-# --- Nav Endpoints (unchanged) ---
+# --- Nav Endpoints ---
+
+
+def _build_world_from_data(world_data: dict[str, Any]) -> tuple[VoxelWorld, int]:
+    """Build a VoxelWorld from world data dict.
+
+    Returns (world, clearance_z).
+    Raises HTTPException if world is too large.
+    """
+    sx, sy, sz = world_data["size"]
+    if sx > 256 or sy > 256 or sz > 64:
+        raise HTTPException(status_code=400, detail="World size too large")
+
+    voxels = np.zeros((sz, sy, sx), dtype=np.uint8)
+    for w in world_data.get("walls", []):
+        if len(w) >= 3:
+            x, y, z = w[:3]
+            t = w[3] if len(w) >= 4 else 1
+            if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz:
+                voxels[z, y, x] = t
+
+    world = VoxelWorld(voxels=voxels, voxel_size_m=world_data.get("voxel_size_m", 5.0))
+    clearance = world_data.get("meta", {}).get("validator", {}).get("clearance_z", 4)
+    return world, clearance
 
 
 @app.post("/nav/build")
 async def build_nav_graph(world_data: dict[str, Any]):
     """Computes a NavGraph for the provided world data."""
     try:
-        sx, sy, sz = world_data["size"]
-
-        if sx > 256 or sy > 256 or sz > 64:
-            raise HTTPException(status_code=400, detail="World size too large for nav build")
-
-        voxels = np.zeros((sz, sy, sx), dtype=np.uint8)
-
-        for w in world_data.get("walls", []):
-            if len(w) >= 3:
-                x, y, z = w[:3]
-                t = w[3] if len(w) >= 4 else 1
-                if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz:
-                    voxels[z, y, x] = t
-
-        world = VoxelWorld(voxels=voxels, voxel_size_m=world_data.get("voxel_size_m", 5.0))
-
-        clearance = world_data.get("meta", {}).get("validator", {}).get("clearance_z", 4)
+        world, clearance = _build_world_from_data(world_data)
         graph = await asyncio.to_thread(NavGraph.build, world, clearance_z=clearance)
-
         return graph.to_dict()
     except HTTPException:
         raise
@@ -592,23 +639,8 @@ class PathRequest(BaseModel):
 async def plan_path(req: PathRequest):
     """Computes an A* path through the nav graph."""
     try:
-        sx, sy, sz = req.world["size"]
-        if sx > 256 or sy > 256 or sz > 64:
-            raise HTTPException(status_code=400, detail="World size too large")
-
-        voxels = np.zeros((sz, sy, sx), dtype=np.uint8)
-        for w in req.world.get("walls", []):
-            if len(w) >= 3:
-                x, y, z = w[:3]
-                t = w[3] if len(w) >= 4 else 1
-                if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz:
-                    voxels[z, y, x] = t
-        world = VoxelWorld(voxels=voxels, voxel_size_m=req.world.get("voxel_size_m", 5.0))
-        clearance = req.world.get("meta", {}).get("validator", {}).get("clearance_z", 4)
+        world, clearance = _build_world_from_data(req.world)
         graph = await asyncio.to_thread(NavGraph.build, world, clearance_z=clearance)
-
-        from echelon.nav.planner import Planner
-
         planner = Planner(graph)
 
         start_node = graph.get_nearest_node(tuple(req.start_pos))  # type: ignore

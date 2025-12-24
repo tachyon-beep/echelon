@@ -103,6 +103,37 @@
         let eventSource = null;
         let connectionStatus = 'disconnected';
 
+        // Helper to properly dispose Three.js objects (prevents GPU memory leaks)
+        function disposeObject(obj) {
+            if (!obj) return;
+
+            // Dispose children recursively
+            if (obj.children) {
+                while (obj.children.length > 0) {
+                    disposeObject(obj.children[0]);
+                    obj.remove(obj.children[0]);
+                }
+            }
+
+            // Dispose geometry
+            if (obj.geometry) {
+                obj.geometry.dispose();
+            }
+
+            // Dispose material(s)
+            if (obj.material) {
+                if (Array.isArray(obj.material)) {
+                    obj.material.forEach(mat => {
+                        if (mat.map) mat.map.dispose();
+                        mat.dispose();
+                    });
+                } else {
+                    if (obj.material.map) obj.material.map.dispose();
+                    obj.material.dispose();
+                }
+            }
+        }
+
         init();
         animate();
 
@@ -332,28 +363,71 @@
 	        function setupReplay() {
 	            if (!replayData || !replayData.frames || replayData.frames.length === 0) return;
 
-	            // Clean up old scene
+	            // Clean up old scene with proper disposal to prevent GPU memory leaks
 	            if (window.worldMeshes) {
-                    window.worldMeshes.forEach(m => scene.remove(m));
+                    window.worldMeshes.forEach(m => {
+                        scene.remove(m);
+                        disposeObject(m);
+                    });
                     window.worldMeshes = [];
                 }
-	            if (captureZoneMesh) scene.remove(captureZoneMesh);
-	            Object.values(mechMeshes).forEach(m => scene.remove(m));
+	            if (captureZoneMesh) {
+                    scene.remove(captureZoneMesh);
+                    disposeObject(captureZoneMesh);
+                    captureZoneMesh = null;
+                }
+	            Object.values(mechMeshes).forEach(m => {
+                    scene.remove(m);
+                    disposeObject(m);
+                });
 	            mechMeshes = {};
-	            Object.values(statusBars).forEach(sb => scene.remove(sb.group));
+	            Object.values(statusBars).forEach(sb => {
+                    scene.remove(sb.group);
+                    disposeObject(sb.group);
+                });
 	            statusBars = {};
-	            laserLines.forEach(l => scene.remove(l));
+	            laserLines.forEach(l => {
+                    scene.remove(l);
+                    if (l.geometry) l.geometry.dispose();
+                    // Don't dispose material - it may be cached
+                });
 	            laserLines = [];
-	            missileMeshes.forEach(m => scene.remove(m));
+	            missileMeshes.forEach(m => {
+                    scene.remove(m);
+                    disposeObject(m);
+                });
 	            missileMeshes = [];
-	            Object.values(paintHelpers).forEach(h => scene.remove(h));
+	            Object.values(paintHelpers).forEach(h => {
+                    scene.remove(h);
+                    disposeObject(h);
+                });
 	            paintHelpers = {};
-	            floaters.forEach(f => scene.remove(f.mesh));
+	            floaters.forEach(f => {
+                    scene.remove(f.mesh);
+                    f.mesh.material.dispose();
+                    if (f.text !== undefined && f.colorHex !== undefined) {
+                        releaseFloaterTexture(f.text, f.colorHex);
+                    }
+                });
 	            floaters = [];
-                Object.values(ewarMeshes).forEach(m => scene.remove(m));
+                Object.values(ewarMeshes).forEach(m => {
+                    scene.remove(m);
+                    disposeObject(m);
+                });
                 ewarMeshes = {};
+                // Clear nav/path groups with disposal
+                navGroup.children.forEach(c => disposeObject(c));
                 navGroup.clear();
+                pathGroup.children.forEach(c => disposeObject(c));
                 pathGroup.clear();
+                // Clear smoke meshes
+                if (window.smokeMeshes) {
+                    window.smokeMeshes.forEach(m => {
+                        scene.remove(m);
+                        disposeObject(m);
+                    });
+                    window.smokeMeshes = [];
+                }
 
 	            // Parse World
 	            if (replayData.world) {
@@ -908,9 +982,13 @@
 
             // Events (Lasers/Missiles)
             const recentEvents = frame.events || [];
-            
-            // Clear old ephemeral FX
-            laserLines.forEach(l => scene.remove(l));
+
+            // Clear old ephemeral FX - only dispose geometry (materials are cached)
+            laserLines.forEach(l => {
+                scene.remove(l);
+                if (l.geometry) l.geometry.dispose();
+                // Don't dispose material - it's cached and reused
+            });
             laserLines = [];
             
 	            // Rebuild
@@ -1007,9 +1085,44 @@
             });
         }
 
-        // --- FX Helpers ---
+        // --- FX Helpers with Material Caching ---
+        // Cache materials to avoid creating new ones every frame
+        const fxMaterialCache = {
+            lines: new Map(), // key: "color|width" -> LineBasicMaterial
+            meshes: new Map(), // key: "color" -> MeshBasicMaterial
+        };
+
+        // Reusable geometry pools (spheres by size)
+        const fxGeometryCache = {
+            spheres: new Map(), // key: size -> SphereGeometry
+        };
+
+        function getLineMaterial(color, width) {
+            const key = `${color}|${width}`;
+            if (!fxMaterialCache.lines.has(key)) {
+                fxMaterialCache.lines.set(key, new THREE.LineBasicMaterial({ color, linewidth: width }));
+            }
+            return fxMaterialCache.lines.get(key);
+        }
+
+        function getMeshMaterial(color) {
+            if (!fxMaterialCache.meshes.has(color)) {
+                fxMaterialCache.meshes.set(color, new THREE.MeshBasicMaterial({ color }));
+            }
+            return fxMaterialCache.meshes.get(color);
+        }
+
+        function getSphereGeometry(size) {
+            const radius = size * 0.5;
+            if (!fxGeometryCache.spheres.has(radius)) {
+                fxGeometryCache.spheres.set(radius, new THREE.SphereGeometry(radius, 8, 8));
+            }
+            return fxGeometryCache.spheres.get(radius);
+        }
+
         function drawBeam(p1, p2, color, width) {
-            const mat = new THREE.LineBasicMaterial({ color: color, linewidth: width });
+            const mat = getLineMaterial(color, width);
+            // Geometry must be unique per line (different points), so create new
             const geo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
             const line = new THREE.Line(geo, mat);
             scene.add(line);
@@ -1021,20 +1134,16 @@
                 drawBeam(p1, p2, color, width);
                 return;
             }
-            // Dashed line look for kinetics? Or just a thick short line?
-            // ThreeJS lines are solid.
-            // Let's draw a shorter line segment at the end (impact) to simulate a tracer arriving.
             const dir = new THREE.Vector3().subVectors(p2, p1).normalize();
             const start = new THREE.Vector3().subVectors(p2, dir.multiplyScalar(10)); // 10m tail
-            // Clamp start to p1 if too close
             if (start.distanceTo(p2) > p1.distanceTo(p2)) start.copy(p1);
-            
             drawBeam(start, p2, color, width);
         }
 
         function drawFlash(pos, color, size) {
-            const geo = new THREE.SphereGeometry(size * 0.5, 8, 8);
-            const mat = new THREE.MeshBasicMaterial({ color: color });
+            // Use cached geometry and material (cloning mesh is cheaper than new geo/mat)
+            const geo = getSphereGeometry(size);
+            const mat = getMeshMaterial(color);
             const mesh = new THREE.Mesh(geo, mat);
             mesh.position.copy(pos);
             scene.add(mesh);
@@ -1050,25 +1159,61 @@
             laserLines.push(mesh);
         }
 
-        function spawnFloater(pos, text, colorHex) {
+        // Floater texture cache to avoid creating new canvases/textures per damage number
+        const floaterTextureCache = new Map(); // key: "text|color" -> {texture, refCount}
+
+        function getFloaterTexture(text, colorHex) {
+            const key = `${text}|${colorHex}`;
+            if (floaterTextureCache.has(key)) {
+                const entry = floaterTextureCache.get(key);
+                entry.refCount++;
+                return entry.texture;
+            }
+
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
-            canvas.width = 128; 
+            canvas.width = 128;
             canvas.height = 64;
             ctx.font = "bold 48px sans-serif";
             ctx.fillStyle = "#" + colorHex.toString(16).padStart(6, '0');
             ctx.textAlign = "center";
             ctx.fillText(text, 64, 48);
-            
-            const tex = new THREE.CanvasTexture(canvas);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            floaterTextureCache.set(key, { texture, refCount: 1 });
+
+            // Limit cache size to prevent unbounded growth
+            if (floaterTextureCache.size > 100) {
+                // Evict oldest entries with refCount 0
+                for (const [k, v] of floaterTextureCache) {
+                    if (v.refCount <= 0) {
+                        v.texture.dispose();
+                        floaterTextureCache.delete(k);
+                        if (floaterTextureCache.size <= 50) break;
+                    }
+                }
+            }
+
+            return texture;
+        }
+
+        function releaseFloaterTexture(text, colorHex) {
+            const key = `${text}|${colorHex}`;
+            if (floaterTextureCache.has(key)) {
+                floaterTextureCache.get(key).refCount--;
+            }
+        }
+
+        function spawnFloater(pos, text, colorHex) {
+            const tex = getFloaterTexture(text, colorHex);
             const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
             const sprite = new THREE.Sprite(mat);
             sprite.position.copy(pos);
             sprite.position.z += 2; // Above head
             sprite.scale.set(4, 2, 1); // Size in world units
-            
+
             scene.add(sprite);
-            floaters.push({ mesh: sprite, life: 1.0 });
+            floaters.push({ mesh: sprite, life: 1.0, text, colorHex });
         }
 
         function animate() {
@@ -1082,6 +1227,11 @@
                 f.mesh.material.opacity = f.life;
                 if (f.life <= 0) {
                     scene.remove(f.mesh);
+                    // Dispose material (texture is cached and ref-counted)
+                    f.mesh.material.dispose();
+                    if (f.text !== undefined && f.colorHex !== undefined) {
+                        releaseFloaterTexture(f.text, f.colorHex);
+                    }
                     floaters.splice(i, 1);
                 }
             }
