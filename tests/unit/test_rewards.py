@@ -98,3 +98,79 @@ class TestRewardPolarity:
                 break
 
         assert kill_occurred, "Victim should have been killed during test"
+
+
+class TestRewardAttribution:
+    """Verify rewards go to the correct agent."""
+
+    def test_damage_reward_to_shooter_not_victim(self, reward_env):
+        """Damage reward goes to shooter, not victim."""
+        env = reward_env
+
+        # Clear setup - position mechs far from zone to isolate combat rewards
+        shooter = env.sim.mechs["blue_0"]
+        target = env.sim.mechs["red_0"]
+
+        # Position for combat far from zone to minimize zone influence
+        shooter.pos[0], shooter.pos[1] = 5.0, 5.0
+        target.pos[0], target.pos[1] = 15.0, 5.0
+        shooter.yaw = 0.0  # Facing +x toward target
+
+        # Move everyone else far away to isolate the test
+        for aid in env.agents:
+            if aid not in ["blue_0", "red_0"]:
+                m = env.sim.mechs[aid]
+                m.pos[0], m.pos[1] = 35.0, 35.0
+
+        # Get baseline rewards before combat
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, baseline_rewards, _, _, _ = env.step(actions)
+        baseline_shooter = baseline_rewards["blue_0"]
+        baseline_target = baseline_rewards["red_0"]
+
+        # Now fire weapon
+        actions["blue_0"][4] = 1.0  # Fire laser
+        target_hp_before = float(target.hp)
+        _, combat_rewards, _, _, _ = env.step(actions)
+
+        # Check if damage was dealt
+        damage_dealt = target_hp_before - float(target.hp)
+
+        if damage_dealt > 0:
+            # The shooter should get a damage reward (W_DAMAGE * damage)
+            # This should make their reward delta more positive than the victim's
+            shooter_delta = combat_rewards["blue_0"] - baseline_shooter
+            target_delta = combat_rewards["red_0"] - baseline_target
+
+            assert (
+                shooter_delta > target_delta
+            ), f"Shooter reward delta ({shooter_delta}) should exceed victim delta ({target_delta}) when damage dealt"
+
+    def test_zone_reward_only_to_team_in_zone(self, reward_env):
+        """Zone control reward only goes to team actually in zone."""
+        env = reward_env
+
+        zone_cx, zone_cy, _ = capture_zone_params(
+            env.world.meta, size_x=env.world.size_x, size_y=env.world.size_y
+        )
+
+        # Blue in zone, red far away
+        for aid in env.agents:
+            m = env.sim.mechs[aid]
+            if m.team == "blue":
+                m.pos[0], m.pos[1] = zone_cx, zone_cy
+            else:
+                m.pos[0], m.pos[1] = 5.0, 5.0
+            m.vel[:] = 0.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, rewards, _, _, _ = env.step(actions)
+
+        # All blue agents should get zone reward
+        # All red agents should NOT get zone reward
+        blue_rewards = [rewards[aid] for aid in env.agents if "blue" in aid]
+        red_rewards = [rewards[aid] for aid in env.agents if "red" in aid]
+
+        assert sum(blue_rewards) > sum(
+            red_rewards
+        ), f"Blue (in zone) should get more reward: blue={sum(blue_rewards)}, red={sum(red_rewards)}"
