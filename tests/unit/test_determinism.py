@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from echelon import EchelonEnv, EnvConfig
 from echelon.config import WorldConfig
@@ -90,3 +91,105 @@ def test_debris_deterministic_across_rng(make_mech):
     sim2._spawn_debris(mech2)
 
     np.testing.assert_array_equal(world1.voxels, world2.voxels)
+
+
+class TestDeterminismExtended:
+    """Extended determinism verification."""
+
+    @pytest.mark.parametrize("seed", [0, 42, 12345, 999999, 2**30])
+    def test_determinism_multiple_seeds(self, seed: int) -> None:
+        """Determinism holds for various seeds."""
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=15),
+            num_packs=1,
+            seed=seed,
+            max_episode_seconds=5.0,
+        )
+
+        # Run 1
+        env1 = EchelonEnv(cfg)
+        obs1, _ = env1.reset(seed=seed)
+        trajectory1 = [obs1["blue_0"].copy()]
+
+        for _ in range(20):
+            actions = {aid: np.zeros(env1.ACTION_DIM, dtype=np.float32) for aid in env1.agents}
+            obs1, _, terms, truncs, _ = env1.step(actions)
+            trajectory1.append(obs1["blue_0"].copy())
+            if all(terms.values()) or all(truncs.values()):
+                break
+
+        # Run 2
+        env2 = EchelonEnv(cfg)
+        obs2, _ = env2.reset(seed=seed)
+        trajectory2 = [obs2["blue_0"].copy()]
+
+        for _ in range(20):
+            actions = {aid: np.zeros(env2.ACTION_DIM, dtype=np.float32) for aid in env2.agents}
+            obs2, _, terms, truncs, _ = env2.step(actions)
+            trajectory2.append(obs2["blue_0"].copy())
+            if all(terms.values()) or all(truncs.values()):
+                break
+
+        # Compare trajectories
+        assert len(trajectory1) == len(trajectory2), "Trajectory lengths should match"
+        for i, (o1, o2) in enumerate(zip(trajectory1, trajectory2, strict=True)):
+            assert np.allclose(o1, o2), f"Observations differ at step {i}"
+
+    def test_reset_restores_initial_state(self) -> None:
+        """reset(seed=X) after steps equals fresh env(seed=X)."""
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=15),
+            num_packs=1,
+            seed=42,
+            max_episode_seconds=10.0,
+        )
+
+        env = EchelonEnv(cfg)
+
+        # First reset
+        obs1, _ = env.reset(seed=42)
+        initial_obs = obs1["blue_0"].copy()
+
+        # Run some steps
+        for _ in range(10):
+            actions = {aid: np.random.uniform(-1, 1, env.ACTION_DIM).astype(np.float32) for aid in env.agents}
+            env.step(actions)
+
+        # Reset with same seed
+        obs2, _ = env.reset(seed=42)
+
+        # Should match initial state
+        assert np.allclose(obs2["blue_0"], initial_obs), "Reset should restore initial state"
+
+    def test_determinism_with_combat(self) -> None:
+        """Combat outcomes are deterministic."""
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            seed=123,
+            max_episode_seconds=5.0,
+        )
+
+        def run_combat() -> list[float]:
+            env = EchelonEnv(cfg)
+            env.reset(seed=123)
+            assert env.sim is not None
+
+            # Position for combat
+            env.sim.mechs["blue_0"].pos[:] = [10, 15, 1]
+            env.sim.mechs["blue_0"].yaw = 0.0
+            env.sim.mechs["red_0"].pos[:] = [20, 15, 1]
+
+            hp_history = []
+            for _ in range(20):
+                actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+                actions["blue_0"][4] = 1.0  # Fire laser
+                env.step(actions)
+                hp_history.append(float(env.sim.mechs["red_0"].hp))
+
+            return hp_history
+
+        hp1 = run_combat()
+        hp2 = run_combat()
+
+        assert hp1 == hp2, f"Combat outcomes should be deterministic: {hp1} vs {hp2}"
