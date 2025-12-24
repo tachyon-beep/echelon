@@ -787,13 +787,12 @@ def main() -> None:
         win_rate_blue = recent_outcomes.count("blue") / n_out if n_out > 0 else 0.0
         win_rate_red = recent_outcomes.count("red") / n_out if n_out > 0 else 0.0
 
-        if update % 10 == 0 or update == start_update:
-            print(
-                f"update {update:05d} | steps {global_step} | episodes {episodes} | "
-                f"ret {avg_return:.1f} | len {avg_len:.1f} | "
-                f"win_blue {win_rate_blue:.2f} | win_red {win_rate_red:.2f} | "
-                f"loss {loss:.3f} | sps {sps}"
-            )
+        print(
+            f"update {update:05d} | steps {global_step} | episodes {episodes} | "
+            f"ret {avg_return:.1f} | len {avg_len:.1f} | "
+            f"win_blue {win_rate_blue:.2f} | win_red {win_rate_red:.2f} | "
+            f"loss {loss:.3f} | sps {sps}"
+        )
 
         # Evaluation
         eval_stats: dict[str, Any] | None = None
