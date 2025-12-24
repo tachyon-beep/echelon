@@ -160,7 +160,8 @@ class EchelonEnv:
     CONTACT_SLOTS = 5
     # rel(3) + rel_vel(3) + yaw(2) + hp/heat(2) + stab/fallen/legged(3)
     # + relation_onehot(3) + class_onehot(4) + painted(1) + visible(1) + lead_pitch(1)
-    CONTACT_DIM = 25  # Added closing_rate and crossing_angle for targeting prediction
+    # + closing_rate(1) + crossing_angle(1) = 25
+    CONTACT_DIM = 25
 
     BASE_ACTION_DIM = ACTION_DIM_CONST
     OBS_SORT_DIM = 3
@@ -961,6 +962,20 @@ class EchelonEnv:
                 np.clip(1.0 - (viewer.stability / max(1.0, viewer.max_stability)), 0.0, 1.0)
             )
 
+            # Damage direction: where recent damage came from (in local frame)
+            # Enables evasive maneuver learning
+            if viewer.last_damage_dir is not None:
+                # Rotate to local frame (viewer-relative)
+                cos_y, sin_y = math.cos(-viewer.yaw), math.sin(-viewer.yaw)
+                dx = float(viewer.last_damage_dir[0])
+                dy = float(viewer.last_damage_dir[1])
+                damage_dir_local = np.array(
+                    [dx * cos_y - dy * sin_y, dx * sin_y + dy * cos_y, float(viewer.last_damage_dir[2])],
+                    dtype=np.float32,
+                )
+            else:
+                damage_dir_local = np.zeros(3, dtype=np.float32)
+
             incoming_missile = 0.0
             for p in sim.projectiles:
                 if not getattr(p, "alive", False):
@@ -1032,6 +1047,9 @@ class EchelonEnv:
                         self_heat_norm,
                         heat_headroom,
                         stability_risk,
+                        damage_dir_local[0],
+                        damage_dir_local[1],
+                        damage_dir_local[2],
                         incoming_missile,
                         sensor_quality_norm,
                         jam_norm,
@@ -1077,11 +1095,11 @@ class EchelonEnv:
         # self features =
         #   acoustic_quadrants(4) + hull_type_onehot(4) +
         #   targeted, under_fire, painted, shutdown, crit_heat, self_hp_norm, self_heat_norm,
-        #   heat_headroom, stability_risk, incoming_missile, sensor_quality, jam_level,
-        #   ecm_on, eccm_on, suppressed, ams_cd, self_vel(3), cooldowns(4), in_zone,
+        #   heat_headroom, stability_risk, damage_dir_local(3), incoming_missile, sensor_quality,
+        #   jam_level, ecm_on, eccm_on, suppressed, ams_cd, self_vel(3), cooldowns(4), in_zone,
         #   vec_to_zone(3), zone_radius, my_control, my_score, enemy_score, time_frac,
-        #   obs_sort_onehot(3), hostile_only = 44
-        self_dim = 44
+        #   obs_sort_onehot(3), hostile_only = 47
+        self_dim = 47
         telemetry_dim = 16 * 16
         return (
             self.CONTACT_SLOTS * self.CONTACT_DIM
@@ -1454,6 +1472,7 @@ class EchelonEnv:
         W_KILL = 1.0  # Per kill
         W_ASSIST = 0.5  # Per assist
         W_DEATH = -0.5  # Death penalty (negative)
+        W_COHESION = 0.01  # Pack cohesion: reward tactical spacing with packmates
 
         # Count teammates in zone for scaled breadcrumb decay (HIGH-7)
         teammates_in_zone: dict[str, int] = {"blue": 0, "red": 0}
@@ -1496,6 +1515,18 @@ class EchelonEnv:
             r += W_ASSIST * step_assists.get(aid, 0)
             if step_deaths.get(aid, False):
                 r += W_DEATH
+
+            # (4) Pack cohesion reward: encourage tactical spacing (10-30 voxels from pack center)
+            pack_ids = self._packmates.get(aid, [])
+            alive_packmates = [pid for pid in pack_ids if sim.mechs[pid].alive and pid != aid]
+            if len(alive_packmates) >= 1 and m.alive:
+                pack_positions = [sim.mechs[pid].pos for pid in alive_packmates]
+                pack_center = np.mean(pack_positions, axis=0)
+                dist_to_pack = float(np.linalg.norm(m.pos - pack_center))
+                if 10.0 < dist_to_pack < 30.0:
+                    r += W_COHESION  # Good tactical spacing
+                elif dist_to_pack > 50.0:
+                    r -= W_COHESION * 0.5  # Straggler penalty
 
             rewards[aid] = float(r)
 

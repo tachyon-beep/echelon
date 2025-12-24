@@ -27,8 +27,21 @@ class Glicko2Rating:
     rd: float = 350.0
     vol: float = 0.06
 
+    @property
+    def conservative_rating(self) -> float:
+        """Rating minus 2 standard deviations (95% lower bound).
+
+        Use this for matchmaking to avoid overrating uncertain players.
+        """
+        return float(self.rating) - 2.0 * float(self.rd)
+
     def as_dict(self) -> dict[str, float]:
-        return {"rating": float(self.rating), "rd": float(self.rd), "vol": float(self.vol)}
+        return {
+            "rating": float(self.rating),
+            "rd": float(self.rd),
+            "vol": float(self.vol),
+            "conservative_rating": self.conservative_rating,
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> Glicko2Rating:

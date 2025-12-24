@@ -210,3 +210,42 @@ class NavGraph:
                 {"id": list(nid), "pos": list(node.pos), "edges": [list(e[0]) for e in node.edges]}
             )
         return {"voxel_size": self.voxel_size, "clearance_z": self.clearance_z, "nodes": out_nodes}
+
+    def compute_stats(self) -> dict[str, float]:
+        """
+        Compute graph quality metrics for validation and curriculum learning.
+
+        Returns:
+            num_nodes: Total walkable positions
+            num_edges: Total connections between positions
+            edge_density: Average edges per node (higher = more connected)
+            connectivity_ratio: Fraction of nodes reachable from largest component (1.0 = fully connected)
+        """
+        num_nodes = len(self.nodes)
+        num_edges = sum(len(n.edges) for n in self.nodes.values())
+        edge_density = num_edges / max(1, num_nodes)
+
+        # Check connectivity via BFS from first node
+        connectivity_ratio = 0.0
+        if num_nodes > 0:
+            start = next(iter(self.nodes.keys()))
+            visited: set[NodeID] = set()
+            queue = [start]
+            while queue:
+                current = queue.pop(0)
+                if current in visited:
+                    continue
+                visited.add(current)
+                node = self.nodes.get(current)
+                if node:
+                    for neighbor_id, _ in node.edges:
+                        if neighbor_id not in visited and neighbor_id in self.nodes:
+                            queue.append(neighbor_id)
+            connectivity_ratio = len(visited) / num_nodes
+
+        return {
+            "num_nodes": float(num_nodes),
+            "num_edges": float(num_edges),
+            "edge_density": float(edge_density),
+            "connectivity_ratio": float(connectivity_ratio),
+        }

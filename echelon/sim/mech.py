@@ -51,6 +51,7 @@ class MechState:
     kills: int = 0
     died: bool = False
     was_hit: bool = False
+    last_damage_dir: np.ndarray | None = None  # Direction to attacker (for evasion learning)
 
     @property
     def is_legged(self) -> bool:
@@ -62,6 +63,7 @@ class MechState:
         self.kills = 0
         self.died = False
         self.was_hit = False
+        self.last_damage_dir = None
 
     @property
     def half_size(self) -> np.ndarray:

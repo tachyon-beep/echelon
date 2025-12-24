@@ -711,6 +711,11 @@ class Sim:
             target.was_hit = True
             shooter.dealt_damage += final_dmg
             target.took_damage += final_dmg
+            # Record damage direction for evasion learning
+            dmg_vec = shooter.pos - target.pos
+            dmg_dist = float(np.linalg.norm(dmg_vec))
+            if dmg_dist > 0.1:
+                target.last_damage_dir = (dmg_vec / dmg_dist).astype(np.float32)
 
             all_events.append(
                 {
@@ -1088,6 +1093,12 @@ class Sim:
                 m.was_hit = True
                 m.took_damage += raw_dmg
 
+                # Record damage direction from explosion center
+                dmg_vec = pos - m.pos
+                dmg_dist = float(np.linalg.norm(dmg_vec))
+                if dmg_dist > 0.1:
+                    m.last_damage_dir = (dmg_vec / dmg_dist).astype(np.float32)
+
                 shooter = self.mechs.get(proj.shooter_id)
                 if shooter:
                     shooter.dealt_damage += raw_dmg
@@ -1303,7 +1314,13 @@ class Sim:
                         m.suppressed_time = max(float(m.suppressed_time), float(SUPPRESS_DURATION_S))
                     m.was_hit = True
                     m.took_damage += final_dmg
+                    # Record damage direction for evasion learning
                     shooter = self.mechs.get(p.shooter_id)
+                    if shooter is not None:
+                        dmg_vec = shooter.pos - m.pos
+                        dmg_dist = float(np.linalg.norm(dmg_vec))
+                        if dmg_dist > 0.1:
+                            m.last_damage_dir = (dmg_vec / dmg_dist).astype(np.float32)
                     if shooter:
                         shooter.dealt_damage += final_dmg
                         event: dict[str, Any] = {

@@ -281,14 +281,15 @@ def test_partial_visibility_is_pack_scoped():
     obs_v = obs[viewer_id]
     contacts_total = int(env.CONTACT_SLOTS * env.CONTACT_DIM)
     contacts = obs_v[:contacts_total].reshape(env.CONTACT_SLOTS, env.CONTACT_DIM)
-    visible = contacts[:, 20]
+    # visible flag is at index 21 in contact features (see _contact_features)
+    visible = contacts[:, 21]
     assert float(visible.sum()) == 0.0
 
     packmate.pos[0], packmate.pos[1] = 22.0, 20.0
     obs2, *_ = env.step({})
     obs_v2 = obs2[viewer_id]
     contacts2 = obs_v2[:contacts_total].reshape(env.CONTACT_SLOTS, env.CONTACT_DIM)
-    visible2 = contacts2[:, 20]
+    visible2 = contacts2[:, 21]
     assert float(visible2.sum()) == 1.0
 
     rel = contacts2[:, 13:16]
@@ -328,7 +329,8 @@ def test_topk_contact_quota_and_repurpose():
     rel = contacts[:, 13:16]
     n_friendly = int((rel[:, 0] > 0.5).sum())
     n_hostile = int((rel[:, 1] > 0.5).sum())
-    n_visible = int((contacts[:, 20] > 0.5).sum())
+    # visible flag is at index 21 in contact features (see _contact_features)
+    n_visible = int((contacts[:, 21] > 0.5).sum())
     assert n_visible == 5
     assert n_hostile == 2
     assert n_friendly == 3
