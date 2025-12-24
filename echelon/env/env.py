@@ -1301,6 +1301,7 @@ class EchelonEnv:
         step_kills: dict[str, int] = dict.fromkeys(self.agents, 0)
         step_assists: dict[str, int] = dict.fromkeys(self.agents, 0)
         step_deaths: dict[str, bool] = dict.fromkeys(self.agents, False)
+        step_shots_fired: dict[str, int] = dict.fromkeys(self.agents, 0)  # Aggression tracking
 
         # Episode stats (for logging/debugging) and per-agent combat tracking (HIGH-6).
         # NOTE: Event dict access uses [] not .get() to fail loudly on schema mismatch.
@@ -1345,6 +1346,7 @@ class EchelonEnv:
                             self._episode_stats.get(f"damage_{shooter.team}", 0.0) + dmg
                         )
                         step_damage_dealt[shooter_id] = step_damage_dealt.get(shooter_id, 0.0) + dmg
+                        step_shots_fired[shooter_id] = step_shots_fired.get(shooter_id, 0) + 1
                         if target_id in step_damage_received:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
                 elif et == "projectile_hit":
@@ -1360,17 +1362,21 @@ class EchelonEnv:
                         if target_id in step_damage_received:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
                 elif et == "missile_launch":
-                    shooter = sim.mechs.get(str(ev["shooter"]))
+                    shooter_id = str(ev["shooter"])
+                    shooter = sim.mechs.get(shooter_id)
                     if shooter is not None:
                         self._episode_stats[f"missile_launches_{shooter.team}"] = float(
                             self._episode_stats.get(f"missile_launches_{shooter.team}", 0.0) + 1.0
                         )
+                        step_shots_fired[shooter_id] = step_shots_fired.get(shooter_id, 0) + 1
                 elif et == "kinetic_fire":
-                    shooter = sim.mechs.get(str(ev["shooter"]))
+                    shooter_id = str(ev["shooter"])
+                    shooter = sim.mechs.get(shooter_id)
                     if shooter is not None:
                         self._episode_stats[f"kinetic_fires_{shooter.team}"] = float(
                             self._episode_stats.get(f"kinetic_fires_{shooter.team}", 0.0) + 1.0
                         )
+                        step_shots_fired[shooter_id] = step_shots_fired.get(shooter_id, 0) + 1
                 elif et == "ams_intercept":
                     defender = sim.mechs.get(str(ev["defender"]))
                     if defender is not None:
@@ -1464,8 +1470,9 @@ class EchelonEnv:
         W_DAMAGE = 0.005  # Per point of damage dealt
         W_KILL = 1.0  # Per kill
         W_ASSIST = 0.5  # Per assist
-        W_DEATH = -0.5  # Death penalty (negative)
+        W_DEATH = -0.1  # Death penalty (reduced: was -0.5, too harsh before learning to fight)
         W_COHESION = 0.01  # Pack cohesion: reward tactical spacing with packmates
+        W_AGGRESSION = 0.02  # Per shot fired at enemy (encourage combat engagement)
 
         # Count teammates in zone for scaled breadcrumb decay (HIGH-7)
         teammates_in_zone: dict[str, int] = {"blue": 0, "red": 0}
@@ -1498,14 +1505,22 @@ class EchelonEnv:
                     phi1 = -float(d1 / max_xy)
                     r += W_APPROACH * (phi1 - phi0) * approach_scale
 
-            # (2) Zone Control Reward: ratio of tonnage.
+            # (2) Zone Control Reward: ratio of tonnage, scaled by proximity.
+            # Agents in zone get full reward; outside zone decays with distance.
             team_tick = blue_tick if m.team == "blue" else red_tick
-            r += W_ZONE_TICK * team_tick
+            if in_zone_by_agent.get(aid, False):
+                zone_proximity_scale = 1.0
+            else:
+                # Scale by how close to zone: 1.0 at edge, 0 at map corner
+                dist_from_edge = max(0.0, dist_to_zone_after.get(aid, max_xy) - zone_r)
+                zone_proximity_scale = max(0.0, 1.0 - dist_from_edge / max_xy)
+            r += W_ZONE_TICK * team_tick * zone_proximity_scale
 
             # (3) Combat shaping rewards (HIGH-6)
             r += W_DAMAGE * step_damage_dealt.get(aid, 0.0)
             r += W_KILL * step_kills.get(aid, 0)
             r += W_ASSIST * step_assists.get(aid, 0)
+            r += W_AGGRESSION * step_shots_fired.get(aid, 0)  # Reward aggression
             if step_deaths.get(aid, False):
                 r += W_DEATH
 

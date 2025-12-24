@@ -154,9 +154,8 @@ class HeuristicPolicy:
 
         dist, target, _delta = best
 
-        heavy_objective = mech.spec.name == "heavy" and zone_center is not None
-        # Ensure heavy units stay relevant by contesting the objective.
-        move_target = zone_center if heavy_objective else target.pos
+        # All mechs prioritize the objective (zone); fall back to enemy if no zone.
+        move_target = zone_center if zone_center is not None else target.pos
 
         # Cohesion Logic: Find squad center
         squad_pos = np.zeros(3, dtype=np.float32)
@@ -166,14 +165,14 @@ class HeuristicPolicy:
                 squad_pos += m.pos
                 squad_count += 1
 
-        if (not heavy_objective) and squad_count > 1:
+        if squad_count > 1:
             centroid = squad_pos / squad_count
             dist_to_squad = float(np.linalg.norm(centroid - mech.pos))
 
-            # If far from squad and safe-ish, move to squad first.
+            # If far from squad and safe-ish, blend toward squad.
             if dist_to_squad > 15.0 and dist > 20.0:
-                # Blend 70% to squad, 30% to enemy.
-                move_target = centroid * 0.7 + target.pos * 0.3
+                # Blend 70% to squad, 30% to objective.
+                move_target = centroid * 0.7 + move_target * 0.3
 
         # Re-calculate delta based on move_target
         move_delta = move_target - mech.pos
@@ -203,7 +202,8 @@ class HeuristicPolicy:
             in_zone = float(np.linalg.norm(mech.pos[:2] - zone_center[:2])) <= zone_radius
 
         # Back off if we're too close, except for heavies holding the zone.
-        if dist < self.desired_range and not (heavy_objective and in_zone):
+        is_heavy_holding = mech.spec.name == "heavy" and in_zone
+        if dist < self.desired_range and not is_heavy_holding:
             forward_throttle = -0.3
             strafe_throttle = float(np.clip(strafe_throttle * 1.0, -1.0, 1.0))
         else:
