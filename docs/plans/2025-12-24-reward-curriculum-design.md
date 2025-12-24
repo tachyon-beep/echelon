@@ -1,8 +1,35 @@
 # Reward Curriculum with Automatic Phase Transitions
 
 **Date:** 2025-12-24
-**Status:** Approved with patches (Gemini + ChatGPT reviews 2025-12-24)
+**Status:** GREEN LIGHT - Ready for Implementation
 **Author:** Brainstorming session with Claude
+**Reviewers:** Gemini, ChatGPT, DRL Expert Agent, Simulation Systems Specialist
+
+---
+
+## Review Summary (2025-12-24)
+
+All blocking issues from specialist reviews have been addressed:
+
+| Issue | Source | Resolution | Section |
+|-------|--------|------------|---------|
+| Reward scale normalization | DRL C1 | Added constant-sum normalization | §3.5 |
+| Phase 4 sparsity cliff | DRL C2 | Added 5% shaping floor | §3.6 |
+| Free-rider credit assignment | DRL C3 | Counterfactual difference rewards | §8.5 |
+| Delayed Brier calibration | DRL H2 | Rolling K-step window | §7.3 |
+| Phase transition noise | DRL H3 | 500-episode windows + significance testing | §8.4 |
+| Suppression semantics mismatch | Sim C1 | Redefined using stability proxy | §4.5.1 |
+| Detection state undefined | Sim C2 | Operational LOS + sensor range check | §4.5.2 |
+| Missing trajectory tracking | Sim H2 | Added visited_nav_nodes to MechState | §4.5.3 |
+| Missing detection timers | Sim H3 | Added detection_timers to MechState | §4.5.3 |
+| NavGraph rebuild cost | Sim H1 | LRU cache by terrain seed | Directive B |
+
+**Remaining Phase 2 Extensions** (not blocking):
+- Zone definitions for Assault/Hold objectives (§4.5.4)
+- Spawn geometry control
+- Force composition flexibility
+
+---
 
 ## Overview
 
@@ -212,6 +239,77 @@ def get_verb_gated_shaping(self, verb: MissionVerb, base_weights: dict) -> dict:
 - `loss_appetite` scales casualty penalties (low = harsh penalty for deaths)
 - `time_pressure` amplifies progress-per-time and penalizes dithering
 
+### 3.5 Reward Normalization Strategy (Critical)
+
+**Problem:** Phase transitions cause reward scale discontinuities that destabilize value function learning. If Phase 1 rewards sum to ~5.0 per step and Phase 2 sums to ~2.0, the value function must re-learn magnitude.
+
+**Solution:** Normalize all reward weights to a constant sum across phases:
+
+```python
+REWARD_BUDGET = 1.0  # Constant total reward weight across all phases
+
+def get_normalized_weights(self, progress: float) -> RewardWeights:
+    """Ensure rewards sum to constant value regardless of phase."""
+    raw_weights = self.get_reward_weights(progress)
+
+    # Compute raw sum
+    raw_sum = (
+        raw_weights.survival + raw_weights.damage_dealt +
+        raw_weights.heat_management + raw_weights.pack_cohesion +
+        raw_weights.zone_control + raw_weights.mission_progress +
+        raw_weights.mission_success
+    )
+
+    # Scale to constant budget
+    scale = REWARD_BUDGET / max(raw_sum, 1e-8)
+
+    return RewardWeights(
+        survival=raw_weights.survival * scale,
+        damage_dealt=raw_weights.damage_dealt * scale,
+        # ... etc
+    )
+```
+
+**Per-Verb Normalization:** Verb-conditioned gates (Section 3.4) also need normalization to prevent distribution shift:
+
+```python
+def get_verb_gated_shaping(self, verb: MissionVerb, base_weights: dict) -> dict:
+    gates = VERB_SHAPING_GATES.get(verb, {})
+    gated = {k: v * gates.get(k, 1.0) for k, v in base_weights.items()}
+
+    # Re-normalize after gating
+    gate_sum = sum(gated.values())
+    base_sum = sum(base_weights.values())
+    if gate_sum > 1e-8 and base_sum > 1e-8:
+        scale = base_sum / gate_sum
+        gated = {k: v * scale for k, v in gated.items()}
+
+    return gated
+```
+
+### 3.6 Phase 4 Shaping Floor (Critical)
+
+**Problem:** Pure terminal reward (Phase 4) creates sparsity cliff. With ~240 decision steps per episode and reward only at terminal, credit assignment degrades catastrophically.
+
+**Decision:** Keep 5% shaping floor in Phase 4:
+
+```python
+def get_reward_weights(self, progress: float) -> RewardWeights:
+    # Shaping floor: never go below 5% to maintain learning signal
+    SHAPING_FLOOR = 0.05
+
+    # Shaping fades from 1.0 to 0.05 (not 0.0)
+    shaping_weight = max(SHAPING_FLOOR, 1.0 - progress * (1.0 - SHAPING_FLOOR) / 0.75)
+
+    # ... rest unchanged
+```
+
+**Rationale:**
+- 5% shaping provides weak but consistent learning signal
+- Terminal reward still dominates at 95% weight in Phase 4
+- Prevents catastrophic policy collapse when entering Phase 4
+- Alternative: Use Phase 4 as evaluation-only (no training), but this wastes samples
+
 ## 4. Mission Success Criteria
 
 ### 4.1 Core Principle
@@ -310,6 +408,144 @@ def compute_suppression_effect(target: Mech, suppression_events: list) -> float:
     )
     return min(1.0, time_movement_denied / TARGET_SUPPRESS_TIME)
 ```
+
+### 4.5 Simulation Integration (Critical)
+
+This section maps design metrics to actual Echelon simulation state and identifies required state extensions.
+
+#### 4.5.1 Suppression Semantics Decision
+
+**Current Sim State:** `mech.suppressed_time` affects stability regeneration only (sim.py:1413-1414). There is no "movement denied" or "cover state" in the simulation.
+
+**Decision:** Accept current semantics for Phase 1. Redefine suppression success as "target stability kept low":
+
+```python
+def compute_suppression_effect_v1(target: MechState, suppress_duration: float) -> float:
+    """
+    V1: Use stability as proxy for suppression effectiveness.
+
+    Suppression in Echelon debuffs stability regen. A suppressed target
+    that takes additional hits will be knocked down sooner.
+    """
+    # Target was under suppression for this duration
+    # Success = how much stability was degraded during suppression
+    if suppress_duration <= 0:
+        return 0.0
+
+    # Measure: low stability during suppression = good suppression
+    stability_ratio = target.stability / target.spec.max_stability
+    return suppress_duration * (1.0 - stability_ratio)
+```
+
+**Future Extension (Phase 2+):** Add movement penalty to suppressed mechs:
+```python
+# In sim._apply_movement():
+if mech.suppressed_time > 0:
+    move_speed *= SUPPRESS_SPEED_PENALTY  # e.g., 0.5
+```
+
+#### 4.5.2 Detection State Definition
+
+**Current Sim State:** No per-enemy "tracking" persistence. LOS checks are instantaneous.
+
+**Operational Definition:** "Detected" = any enemy has LOS + sensor range to this mech:
+
+```python
+def is_detected(self, mech: MechState) -> bool:
+    """Returns True if any enemy can currently see this mech."""
+    for enemy in self.enemies_of(mech):
+        if not enemy.alive or enemy.shutdown:
+            continue
+
+        # Check LOS
+        if not self.has_los(enemy.pos, mech.pos):
+            continue
+
+        # Check sensor range (degraded by ECM/ECCM)
+        quality = self._sensor_quality(enemy)
+        dist = np.linalg.norm(enemy.pos - mech.pos)
+        effective_range = BASE_SENSOR_RANGE * quality
+
+        if dist <= effective_range:
+            return True
+
+    return False
+
+BASE_SENSOR_RANGE = 150.0  # meters, modified by mech class
+```
+
+#### 4.5.3 Required MechState Extensions
+
+Add these fields to track metrics across episode:
+
+```python
+@dataclass
+class MechState:
+    # ... existing fields ...
+
+    # NEW: Trajectory tracking for coverage metric
+    visited_nav_nodes: set[int] = field(default_factory=set)
+
+    # NEW: Detection timers for confirmed tracking (>2s persistence)
+    detection_timers: dict[str, float] = field(default_factory=dict)
+    # Key = enemy mech_id, Value = continuous seconds of LOS
+
+    # NEW: Individual contribution metrics for counterfactual credit
+    damage_dealt_this_episode: float = 0.0
+    enemies_detected_this_episode: int = 0
+    suppression_time_inflicted: float = 0.0
+```
+
+**Update in Sim per-step:**
+
+```python
+def _update_tracking_state(self, mech: MechState, dt: float) -> None:
+    """Update per-step tracking metrics."""
+
+    # Update visited nodes (O(1) with lookup table)
+    if self._nav_lookup is not None:
+        ix = int(mech.pos[0] / self.voxel_size)
+        iy = int(mech.pos[1] / self.voxel_size)
+        iz = int(mech.pos[2] / self.voxel_size)
+        if 0 <= iz < self._nav_lookup.shape[0]:
+            node_id = self._nav_lookup[iz, iy, ix]
+            if node_id >= 0:
+                mech.visited_nav_nodes.add(node_id)
+
+    # Update detection timers
+    visible_enemies = self._get_visible_enemies(mech)
+    visible_ids = {e.mech_id for e in visible_enemies}
+
+    # Increment timers for visible enemies
+    for enemy_id in visible_ids:
+        if enemy_id in mech.detection_timers:
+            mech.detection_timers[enemy_id] += dt
+        else:
+            mech.detection_timers[enemy_id] = dt
+
+    # Reset timers for enemies that left LOS
+    for enemy_id in list(mech.detection_timers.keys()):
+        if enemy_id not in visible_ids:
+            del mech.detection_timers[enemy_id]
+
+def get_confirmed_detections(self, mech: MechState, min_duration: float = 2.0) -> int:
+    """Count enemies with persistent tracking (>2s continuous LOS)."""
+    return sum(1 for t in mech.detection_timers.values() if t >= min_duration)
+```
+
+#### 4.5.4 Simulation-Reward Coupling Summary
+
+| Metric | Sim State | Cost | Status |
+|--------|-----------|------|--------|
+| survival | `mech.alive` | O(1) | ✅ Direct |
+| damage_dealt | `mech.damage_dealt_this_episode` | O(1) | ✅ Add field |
+| heat_management | `mech.heat / spec.heat_cap` | O(1) | ✅ Direct |
+| pack_cohesion | Distance between pack members | O(pack²) | ✅ Compute |
+| terrain_covered | `mech.visited_nav_nodes` | O(1) per step | ✅ Add field |
+| enemies_detected | `get_confirmed_detections(mech)` | O(enemies) | ✅ Add field |
+| suppression_effect | Stability during `suppressed_time` | O(1) | ✅ Redefine |
+| is_detected | `is_detected(mech)` | O(enemies) | ✅ Add method |
+| zone_control | Distance to objective zone | O(1) | ⚠️ Add zone definition |
 
 ## 5. Scenario Generator
 
@@ -447,9 +683,49 @@ def compute_status_calibration_loss(
 # - mobility: Was agent pinned/suppressed for extended time?
 ```
 
+**Rolling Calibration Window (Critical - addresses delayed credit):**
+
+Terminal-only calibration creates long credit assignment delay (~240 steps). Use rolling K-step window:
+
+```python
+CALIBRATION_WINDOW = 20  # ~5 seconds at 4 decisions/second
+
+class RollingCalibrationTracker:
+    def __init__(self, window_size: int = CALIBRATION_WINDOW):
+        self.status_history: deque[float] = deque(maxlen=window_size)
+        self.window_size = window_size
+
+    def record_status(self, status: float) -> None:
+        self.status_history.append(status)
+
+    def compute_calibration_bonus(self, current_outcome: float) -> float:
+        """
+        Compare status from K steps ago to current outcome.
+
+        current_outcome examples:
+        - Agent still alive? 1.0 else 0.0
+        - Agent under fire? 0.3
+        - Agent advancing toward objective? 0.7
+        """
+        if len(self.status_history) < self.window_size:
+            return 0.0  # Not enough history
+
+        past_status = self.status_history[0]  # K steps ago
+        brier_error = (past_status - current_outcome) ** 2
+        return W_CALIBRATION * (1.0 - brier_error)
+
+W_CALIBRATION = 0.05  # Reduced from 0.1 since computed every step
+```
+
+**Why rolling works:**
+- Agent reports "GREEN" (0.8) at step t
+- At step t+20, agent is under heavy fire (outcome=0.3)
+- Calibration penalty applies at t+20, linked to t's prediction
+- 20-step delay is tractable for credit assignment (vs 240-step)
+
 **Implementation:**
-1. **Phase 1-2:** Auxiliary reward for calibrated status (truth anchor active)
-2. **Phase 3-4:** Fade auxiliary reward, but calibration habit should persist
+1. **Phase 1-2:** Rolling calibration reward active
+2. **Phase 3-4:** Fade calibration reward weight, but habit persists
 
 **Why this works:** The environment pays out for accuracy, not for being reassuring. Even if commander policy changes, honest forecasting remains the winning strategy. This prevents the "everyone lies, then pretends not to know" equilibrium that humans often reach.
 
@@ -502,52 +778,179 @@ def evaluate(self, metrics: PhaseMetrics, current_phase: int) -> int:
     return current_phase
 ```
 
-### 8.4 Phase Stability: Hysteresis and Dwell Time
+### 8.4 Phase Stability: Hysteresis, Dwell Time, and Statistical Significance
 
 **Problem:** Noisy metrics cause phase oscillation (thrashing between phases).
 
-**Solution:** Add stabilizers:
+**Solution:** Add stabilizers with statistical rigor:
 
 ```python
 @dataclass
 class PhaseTransitionConfig:
-    min_dwell_episodes: int = 200      # Minimum episodes before allowing transition
-    advance_threshold_margin: float = 0.1   # Must exceed threshold by this margin to advance
-    regress_threshold_margin: float = 0.3   # Must fall below by this margin to regress
+    # Larger window for statistical power
+    window_size: int = 500             # Increased from 100 for significance
+    min_dwell_episodes: int = 500      # Minimum episodes before allowing transition
 
-    # Hysteresis: advance threshold is HIGHER than regress threshold
-    # This creates a "sticky" zone where neither transition occurs
+    # Hysteresis margins
+    advance_threshold_margin: float = 0.1   # Must exceed threshold by this margin
+    regress_threshold_margin: float = 0.3   # Must fall below by this margin
+
+    # Statistical significance
+    min_effect_size: float = 0.1       # Cohen's d minimum
+    confidence_level: float = 0.95      # 95% confidence required
 ```
 
-**Example:**
-- Advance from Phase 2 requires `mission_completion_rate > 0.6` (0.5 + 0.1 margin)
-- Regress to Phase 1 requires `mission_completion_rate < 0.35` (0.5 - 0.15 margin)
-- Between 0.35 and 0.6: stay in current phase
-
-### 8.5 Credit Assignment: Squad vs Individual
-
-**Decision:** Use shared squad-level rewards with tiny individual shaping in early phases.
-
-**Rationale:** Per-agent rewards for damage/survival create selfish play that harms mission outcomes. "Soldier agents" need collective success.
+**Statistical Significance Testing:**
 
 ```python
-def compute_squad_reward(squad_agents: list[Agent], mission_outcome: MissionOutcome) -> float:
-    """Shared reward for all squad members."""
-    return evaluate_mission_success(mission_outcome)
+from scipy import stats
 
-def compute_individual_shaping(agent: Agent, shaping_weight: float) -> float:
-    """Tiny individual shaping, fades with curriculum progress."""
-    # Only active in Phase 1-2, scaled by shaping_weight
-    return shaping_weight * (
-        agent.survival_bonus +
-        agent.positioning_bonus
+def is_transition_significant(
+    metrics: PhaseMetrics,
+    threshold: float,
+    direction: str,  # "advance" or "regress"
+    config: PhaseTransitionConfig
+) -> bool:
+    """Require statistical significance for phase transitions."""
+    if len(metrics.recent_values) < config.window_size:
+        return False
+
+    # Compute 95% confidence interval
+    mean = np.mean(metrics.recent_values)
+    sem = stats.sem(metrics.recent_values)
+    ci_low, ci_high = stats.t.interval(
+        config.confidence_level,
+        len(metrics.recent_values) - 1,
+        loc=mean,
+        scale=sem
     )
 
-# Final reward per agent:
-# reward = squad_reward + individual_shaping * (1.0 - progress)
+    if direction == "advance":
+        # Lower bound of CI must exceed threshold + margin
+        target = threshold + config.advance_threshold_margin
+        return ci_low > target
+    else:  # regress
+        # Upper bound of CI must be below threshold - margin
+        target = threshold - config.regress_threshold_margin
+        return ci_high < target
 ```
 
-**Alternative (if needed):** Difference rewards or counterfactual credit if agents learn to free-ride on squad success.
+**Why 500 episodes?**
+- 100 episodes → high variance, frequent false transitions
+- 500 episodes → stable mean estimates, ~2-3% SEM on binary outcomes
+- 1000 episodes → very stable but slow curriculum progression
+
+**Example with significance:**
+- Phase 2 threshold: `mission_completion_rate = 0.5`
+- Advance target: `0.6` (threshold + 0.1 margin)
+- Current mean: `0.62`, 95% CI: `[0.58, 0.66]`
+- Decision: No advance (CI lower bound 0.58 < 0.6 target)
+- After more training: mean `0.65`, CI: `[0.62, 0.68]`
+- Decision: Advance (CI lower bound 0.62 > 0.6 target)
+
+### 8.5 Credit Assignment: Counterfactual Difference Rewards (Critical)
+
+**Problem:** Shared squad rewards create free-rider problem. With 10 agents sharing reward:
+- Individual gradient signal is 1/10th strength
+- Agents learn to hide behind teammates
+- No incentive to take personal risk for team benefit
+
+**Solution:** Counterfactual difference rewards from start (not "if needed later"):
+
+```python
+def compute_counterfactual_reward(
+    agent: Agent,
+    squad_agents: list[Agent],
+    mission_outcome: MissionOutcome,
+    counterfactual_baseline: str = "leave_one_out"
+) -> float:
+    """
+    Difference reward: How much did THIS agent contribute?
+
+    R_i = R(team) - R(team without agent_i)
+    """
+    team_reward = evaluate_mission_success(mission_outcome)
+
+    if counterfactual_baseline == "leave_one_out":
+        # Compute what would have happened without this agent
+        # Option 1: Agent contributes nothing (dies at start)
+        # Option 2: Agent takes no actions (stands still)
+        # Option 3: Agent replaced by mean policy
+
+        # For Echelon, use agent's individual contribution metrics:
+        counterfactual_reward = compute_team_reward_without_agent(
+            agent, squad_agents, mission_outcome
+        )
+    elif counterfactual_baseline == "mean_action":
+        # What if agent took average actions?
+        counterfactual_reward = compute_mean_action_baseline(
+            agent, squad_agents, mission_outcome
+        )
+
+    return team_reward - counterfactual_reward
+
+def compute_team_reward_without_agent(
+    agent: Agent,
+    squad_agents: list[Agent],
+    mission_outcome: MissionOutcome
+) -> float:
+    """
+    Estimate team reward if agent had not contributed.
+
+    Uses agent's individual metrics to estimate counterfactual:
+    - damage_dealt: If agent did 20% of team damage, counterfactual
+      assumes that 20% less damage was dealt
+    - enemies_detected: Agent's detections subtracted from total
+    - suppression_effect: Agent's suppression subtracted
+    """
+    # Compute agent's fractional contribution
+    team_damage = sum(a.damage_dealt for a in squad_agents)
+    agent_damage_frac = safe_div(agent.damage_dealt, team_damage, 0.0)
+
+    team_detections = sum(a.enemies_detected for a in squad_agents)
+    agent_detect_frac = safe_div(agent.enemies_detected, team_detections, 0.0)
+
+    # Estimate mission outcome without agent's contribution
+    modified_outcome = MissionOutcome(
+        objective_captured=mission_outcome.objective_captured,
+        enemies_detected=int(mission_outcome.enemies_detected * (1 - agent_detect_frac)),
+        damage_dealt=mission_outcome.damage_dealt * (1 - agent_damage_frac),
+        # ... other fields
+    )
+
+    return evaluate_mission_success(modified_outcome)
+```
+
+**Blended Reward Formula:**
+
+```python
+def compute_agent_reward(
+    agent: Agent,
+    squad_agents: list[Agent],
+    mission_outcome: MissionOutcome,
+    progress: float
+) -> float:
+    """Final reward with fading individual shaping."""
+
+    # Base: counterfactual difference reward (always active)
+    counterfactual = compute_counterfactual_reward(agent, squad_agents, mission_outcome)
+
+    # Individual shaping (fades with curriculum)
+    shaping_weight = max(0.05, 1.0 - progress * 1.27)  # 5% floor
+    individual_shaping = shaping_weight * (
+        agent.survival_bonus * 0.3 +
+        agent.positioning_bonus * 0.2 +
+        agent.heat_management_bonus * 0.1
+    )
+
+    return counterfactual + individual_shaping
+```
+
+**Why counterfactual from start:**
+- Prevents free-rider learning before it becomes entrenched
+- 10 agents with difference rewards ≈ 10 independent learners (gradient-wise)
+- Team coordination still emerges because counterfactual measures *contribution*
+- Agent hiding behind teammates gets low counterfactual (team does fine without them)
 
 ## 9. Integration with EchelonEnv
 
@@ -650,7 +1053,7 @@ reward += calibration_bonus  # w_calibration ≈ 0.1 (small but persistent)
 # WRONG: Do NOT modify PPO loss function directly
 ```
 
-### Directive B: NavGraph Coverage Lookup
+### Directive B: NavGraph Coverage Lookup and Caching
 
 Computing `terrain_covered` via NavGraph spatial search is expensive. Pre-bake node IDs at map generation:
 
@@ -665,6 +1068,46 @@ def get_node_at_pos(self, pos: Vec3) -> int:
         return self.node_lookup[iz, iy, ix]
     return -1
 ```
+
+**NavGraph Caching Strategy (Critical for Scenario Generator):**
+
+Scenario generator may modify terrain per-episode, requiring NavGraph rebuild. This is O(voxels) ~10-50ms per map. At scale (1000s of parallel envs), this becomes a bottleneck.
+
+```python
+class NavGraphCache:
+    """LRU cache for NavGraphs keyed by terrain seed."""
+
+    def __init__(self, max_size: int = 100):
+        self._cache: OrderedDict[int, NavGraph] = OrderedDict()
+        self._max_size = max_size
+
+    def get_or_build(self, world: VoxelWorld, seed: int) -> NavGraph:
+        """Return cached NavGraph or build and cache new one."""
+        if seed in self._cache:
+            # Move to end (most recently used)
+            self._cache.move_to_end(seed)
+            return self._cache[seed]
+
+        # Build new NavGraph
+        graph = NavGraph.build(world)
+
+        # Add to cache
+        self._cache[seed] = graph
+        if len(self._cache) > self._max_size:
+            self._cache.popitem(last=False)  # Remove oldest
+
+        return graph
+
+# Usage in EchelonEnv:
+class EchelonEnv:
+    _nav_cache = NavGraphCache(max_size=100)  # Class-level, shared across instances
+
+    def reset(self, seed=None, options=None):
+        # ... world generation ...
+        self._nav_graph = self._nav_cache.get_or_build(self.world, seed)
+```
+
+**Alternative: Lazy NavGraph construction** - Only build NavGraph on first access during episode. Many reward metrics don't need it (survival, damage, heat).
 
 ### Directive C: SafeDiv Helper
 
