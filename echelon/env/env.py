@@ -184,7 +184,7 @@ class EchelonEnv:
 
     def __init__(self, config: EnvConfig):
         self.config = config
-        self.comm_dim = int(max(0, int(getattr(config, "comm_dim", 0))))
+        self.comm_dim = int(max(0, config.comm_dim))
         self.ACTION_DIM = int(self.COMM_START + self.comm_dim)
         self.mech_classes = default_mech_classes()
 
@@ -509,9 +509,7 @@ class EchelonEnv:
         - _cached_occupancy_2d: 2D occupancy grid (Z-collapsed) for local maps
         """
         # MED-12: Compute 2D occupancy once for all agents' local maps
-        clearance_z = int(
-            max(1, min(getattr(self.config.world, "connectivity_clearance_z", 4), world.size_z))
-        )
+        clearance_z = int(max(1, min(self.config.world.connectivity_clearance_z, world.size_z)))
         solid_slice = world.voxels[:clearance_z, :, :]
         self._cached_occupancy_2d = np.any(
             (solid_slice == VoxelWorld.SOLID) | (solid_slice == VoxelWorld.SOLID_DEBRIS),
@@ -978,13 +976,13 @@ class EchelonEnv:
 
             incoming_missile = 0.0
             for p in sim.projectiles:
-                if not getattr(p, "alive", False):
+                if not p.alive:
                     continue
-                if getattr(p, "weapon", None) != MISSILE.name:
+                if p.weapon != MISSILE.name:
                     continue
-                if getattr(p, "guidance", None) != "homing":
+                if p.guidance != "homing":
                     continue
-                if getattr(p, "target_id", None) == viewer.mech_id:
+                if p.target_id == viewer.mech_id:
                     incoming_missile = 1.0
                     break
 
@@ -1094,7 +1092,7 @@ class EchelonEnv:
         return obs
 
     def _obs_dim(self) -> int:
-        comm_dim = PACK_SIZE * int(max(0, int(getattr(self.config, "comm_dim", 0))))
+        comm_dim = PACK_SIZE * int(max(0, self.config.comm_dim))
         # self features =
         #   acoustic_quadrants(4) + hull_type_onehot(4) +
         #   targeted, under_fire, painted, shutdown, crit_heat, self_hp_norm, self_heat_norm,
@@ -1175,7 +1173,7 @@ class EchelonEnv:
                 m.eccm_on = False
                 continue
 
-            if bool(getattr(self.config, "enable_target_selection", True)):
+            if self.config.enable_target_selection:
                 # Target selection is an argmax over the last-observed contact slots.
                 prefs = a[self.TARGET_START : self.TARGET_START + self.TARGET_DIM]
                 focus_id: str | None = None
@@ -1193,7 +1191,7 @@ class EchelonEnv:
             else:
                 m.focus_target_id = None
 
-            if bool(getattr(self.config, "enable_ewar", True)):
+            if self.config.enable_ewar:
                 # Scout: SECONDARY slot toggles EWAR.
                 # > 0.5: ECCM, (0.0, 0.5]: ECM, <= 0: Off
                 ewar_val = float(a[ActionIndex.SECONDARY])
@@ -1215,7 +1213,7 @@ class EchelonEnv:
                 m.eccm_on = False
 
         # Update per-mech observation controls from the chosen action (applies to returned obs).
-        if bool(getattr(self.config, "enable_obs_control", True)):
+        if self.config.enable_obs_control:
             for aid in self.agents:
                 a = act[aid]
                 sort_pref = a[self.OBS_CTRL_START : self.OBS_CTRL_START + self.OBS_SORT_DIM]
@@ -1305,22 +1303,23 @@ class EchelonEnv:
         step_deaths: dict[str, bool] = dict.fromkeys(self.agents, False)
 
         # Episode stats (for logging/debugging) and per-agent combat tracking (HIGH-6).
+        # NOTE: Event dict access uses [] not .get() to fail loudly on schema mismatch.
         if events:
             for ev in events:
-                et = ev.get("type")
+                et = ev["type"]
                 if et == "kill":
-                    shooter_id = str(ev.get("shooter"))
-                    victim_id = str(ev.get("victim", ""))
+                    shooter_id = str(ev["shooter"])
+                    target_id = str(ev["target"])
                     shooter = sim.mechs.get(shooter_id)
                     if shooter is not None:
                         self._episode_stats[f"kills_{shooter.team}"] = float(
                             self._episode_stats.get(f"kills_{shooter.team}", 0.0) + 1.0
                         )
                         step_kills[shooter_id] = step_kills.get(shooter_id, 0) + 1
-                    if victim_id in step_deaths:
-                        step_deaths[victim_id] = True
+                    if target_id in step_deaths:
+                        step_deaths[target_id] = True
                 elif et == "assist":
-                    painter_id = str(ev.get("painter"))
+                    painter_id = str(ev["painter"])
                     painter = sim.mechs.get(painter_id)
                     if painter is not None:
                         self._episode_stats[f"assists_{painter.team}"] = float(
@@ -1328,20 +1327,20 @@ class EchelonEnv:
                         )
                         step_assists[painter_id] = step_assists.get(painter_id, 0) + 1
                 elif et == "paint":
-                    shooter = sim.mechs.get(str(ev.get("shooter")))
+                    shooter = sim.mechs.get(str(ev["shooter"]))
                     if shooter is not None:
                         self._episode_stats[f"paints_{shooter.team}"] = float(
                             self._episode_stats.get(f"paints_{shooter.team}", 0.0) + 1.0
                         )
                 elif et == "laser_hit":
-                    shooter_id = str(ev.get("shooter"))
-                    target_id = str(ev.get("target", ""))
+                    shooter_id = str(ev["shooter"])
+                    target_id = str(ev["target"])
                     shooter = sim.mechs.get(shooter_id)
                     if shooter is not None:
                         self._episode_stats[f"laser_hits_{shooter.team}"] = float(
                             self._episode_stats.get(f"laser_hits_{shooter.team}", 0.0) + 1.0
                         )
-                        dmg = float(ev.get("damage", 0.0) or 0.0)
+                        dmg = float(ev["damage"])
                         self._episode_stats[f"damage_{shooter.team}"] = float(
                             self._episode_stats.get(f"damage_{shooter.team}", 0.0) + dmg
                         )
@@ -1349,40 +1348,31 @@ class EchelonEnv:
                         if target_id in step_damage_received:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
                 elif et == "projectile_hit":
-                    shooter_id = str(ev.get("shooter"))
-                    target_id = str(ev.get("target", ""))
+                    shooter_id = str(ev["shooter"])
+                    target_id = str(ev["target"])
                     shooter = sim.mechs.get(shooter_id)
                     if shooter is not None:
-                        dmg = float(ev.get("damage", 0.0) or 0.0)
+                        dmg = float(ev["damage"])
                         self._episode_stats[f"damage_{shooter.team}"] = float(
                             self._episode_stats.get(f"damage_{shooter.team}", 0.0) + dmg
                         )
                         step_damage_dealt[shooter_id] = step_damage_dealt.get(shooter_id, 0.0) + dmg
                         if target_id in step_damage_received:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
-                elif et == "missile_hit":
-                    shooter_id = str(ev.get("shooter"))
-                    target_id = str(ev.get("target", ""))
-                    shooter = sim.mechs.get(shooter_id)
-                    if shooter is not None:
-                        dmg = float(ev.get("damage", 0.0) or 0.0)
-                        step_damage_dealt[shooter_id] = step_damage_dealt.get(shooter_id, 0.0) + dmg
-                        if target_id in step_damage_received:
-                            step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
                 elif et == "missile_launch":
-                    shooter = sim.mechs.get(str(ev.get("shooter")))
+                    shooter = sim.mechs.get(str(ev["shooter"]))
                     if shooter is not None:
                         self._episode_stats[f"missile_launches_{shooter.team}"] = float(
                             self._episode_stats.get(f"missile_launches_{shooter.team}", 0.0) + 1.0
                         )
                 elif et == "kinetic_fire":
-                    shooter = sim.mechs.get(str(ev.get("shooter")))
+                    shooter = sim.mechs.get(str(ev["shooter"]))
                     if shooter is not None:
                         self._episode_stats[f"kinetic_fires_{shooter.team}"] = float(
                             self._episode_stats.get(f"kinetic_fires_{shooter.team}", 0.0) + 1.0
                         )
                 elif et == "ams_intercept":
-                    defender = sim.mechs.get(str(ev.get("defender")))
+                    defender = sim.mechs.get(str(ev["defender"]))
                     if defender is not None:
                         self._episode_stats[f"ams_intercepts_{defender.team}"] = float(
                             self._episode_stats.get(f"ams_intercepts_{defender.team}", 0.0) + 1.0
@@ -1413,7 +1403,7 @@ class EchelonEnv:
 
         # Update comm buffers after the sim step (dead mechs do not broadcast).
         if self.comm_dim > 0:
-            if not bool(getattr(self.config, "enable_comm", True)):
+            if not self.config.enable_comm:
                 for aid in self.agents:
                     self._comm_last[aid].fill(0.0)
             else:
@@ -1694,7 +1684,7 @@ class EchelonEnv:
             world_data["seed"] = int(seed)
         if self._spawn_clear is not None:
             world_data["spawn_clear"] = int(self._spawn_clear)
-        if getattr(world, "meta", None):
+        if world.meta:
             world_data["meta"] = dict(world.meta)
 
         idx_zyx = np.argwhere(world.voxels > 0)

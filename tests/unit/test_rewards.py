@@ -60,16 +60,34 @@ class TestRewardPolarity:
         assert rewards["blue_0"] > 0, f"Blue in zone should get positive reward, got {rewards['blue_0']}"
 
     def test_death_gives_negative_reward(self, reward_env):
-        """Dying gives negative reward to the victim.
+        """Dying gives negative reward to the victim (W_DEATH=-0.5)."""
+        env = reward_env
 
-        NOTE: This test currently exposes a bug - env.py looks for ev.get("victim")
-        but sim.py emits ev["target"], so death penalty is never applied.
-        Test is written for the intended behavior (W_DEATH=-0.5).
-        """
-        pytest.skip(
-            "Bug: env.py line 1313 uses ev.get('victim') but sim.py line 566 uses 'target', "
-            "so death penalty is never applied. Fix: change line 1313 to ev.get('target', '')"
-        )
+        # Setup: position killer and victim
+        victim = env.sim.mechs["red_0"]
+        victim.hp = 1.0  # One-shot kill
+
+        killer = env.sim.mechs["blue_0"]
+        killer.pos[0], killer.pos[1] = victim.pos[0] - 5.0, victim.pos[1]
+        killer.yaw = 0.0  # Facing +x toward victim
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        actions["blue_0"][4] = 1.0  # Fire laser
+
+        death_occurred = False
+        for _ in range(10):
+            was_alive = victim.alive
+            _, rewards, _, _, _ = env.step(actions)
+            # Check if death happened this step
+            if was_alive and not victim.alive and victim.died:
+                # Death occurred - W_DEATH = -0.5
+                assert (
+                    rewards["red_0"] < 0
+                ), f"Victim should get negative reward on death, got {rewards['red_0']}"
+                death_occurred = True
+                break
+
+        assert death_occurred, "Victim should have died during test"
 
     def test_kill_gives_positive_reward(self, reward_env):
         """Getting a kill gives positive reward to the killer."""

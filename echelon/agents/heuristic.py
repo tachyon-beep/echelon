@@ -281,11 +281,11 @@ class HeuristicPolicy:
         a[ActionIndex.SPECIAL] = 0.0  # Smoke not used by heuristic yet
 
         # Target selection: focus our chosen target if it exists in the last-observed contact slots.
-        slots = getattr(env, "_last_contact_slots", {}).get(mech_id)
-        if isinstance(slots, list):
-            for i, oid in enumerate(slots[: getattr(env, "CONTACT_SLOTS", 0)]):
+        slots = env._last_contact_slots.get(mech_id)
+        if slots is not None:
+            for i, oid in enumerate(slots[: env.CONTACT_SLOTS]):
                 if oid == target.mech_id:
-                    a[getattr(env, "TARGET_START", 0) + int(i)] = 1.0
+                    a[env.TARGET_START + int(i)] = 1.0
                     break
 
         # EWAR logic
@@ -305,7 +305,7 @@ class HeuristicPolicy:
                 or float(a[ActionIndex.SPECIAL]) > 0.0
                 or (mech.spec.name != "scout" and float(a[ActionIndex.SECONDARY]) > 0.0)
             )
-            if wants_fire and float(getattr(env, "rng", np.random).random()) > self.weapon_fire_prob:
+            if wants_fire and float(env.rng.random()) > self.weapon_fire_prob:
                 a[ActionIndex.PRIMARY] = 0.0
                 a[ActionIndex.TERTIARY] = 0.0
                 a[ActionIndex.SPECIAL] = 0.0
@@ -313,8 +313,8 @@ class HeuristicPolicy:
                     a[ActionIndex.SECONDARY] = 0.0
 
         # Observation controls: keep the contact table hostile-focused and sorted by closest.
-        a[getattr(env, "OBS_CTRL_START", 0) + 0] = 1.0  # closest
-        a[getattr(env, "OBS_CTRL_START", 0) + 1] = 0.0
-        a[getattr(env, "OBS_CTRL_START", 0) + 2] = 0.0
-        a[getattr(env, "OBS_CTRL_START", 0) + 3] = 1.0  # hostile-only
+        a[env.OBS_CTRL_START + 0] = 1.0  # closest
+        a[env.OBS_CTRL_START + 1] = 0.0
+        a[env.OBS_CTRL_START + 2] = 0.0
+        a[env.OBS_CTRL_START + 3] = 1.0  # hostile-only
         return a
