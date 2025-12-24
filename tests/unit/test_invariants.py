@@ -207,3 +207,42 @@ class TestPositionInvariants:
         for _ in range(50):
             sim.step({"m": action}, num_substeps=1)
             assert mech.pos[2] >= 0.0, f"Mech fell through floor: z={mech.pos[2]}"
+
+
+class TestDamageConservation:
+    """Damage dealt must equal damage taken."""
+
+    def test_laser_damage_conservation(self, make_mech):
+        """Laser damage dealt equals damage taken by target."""
+        world = VoxelWorld.generate(WorldConfig(size_x=30, size_y=30, size_z=10), np.random.default_rng(0))
+        world.voxels.fill(VoxelWorld.AIR)
+        sim = Sim(world, dt_sim=0.05, rng=np.random.default_rng(0))
+
+        # Two mechs facing each other
+        shooter = make_mech("shooter", "blue", [5.0, 15.0, 1.0], "heavy")
+        shooter.yaw = 0.0  # Facing +x
+        target = make_mech("target", "red", [15.0, 15.0, 1.0], "medium")
+        sim.reset({"shooter": shooter, "target": target})
+
+        initial_hp = float(target.hp)
+
+        # Fire laser
+        action_fire = np.zeros(ACTION_DIM, dtype=np.float32)
+        action_fire[4] = 1.0  # PRIMARY (laser)
+        action_noop = np.zeros(ACTION_DIM, dtype=np.float32)
+
+        events = sim.step({"shooter": action_fire, "target": action_noop}, num_substeps=1)
+
+        # Check damage conservation
+        hp_lost = initial_hp - float(target.hp)
+
+        # Find damage dealt in events
+        damage_dealt = 0.0
+        for ev in events:
+            if ev.get("type") == "damage" and ev.get("target") == "target":
+                damage_dealt += float(ev.get("amount", 0.0))
+
+        if hp_lost > 0:
+            assert (
+                abs(hp_lost - damage_dealt) < 1e-3
+            ), f"Damage mismatch: HP lost={hp_lost}, damage events={damage_dealt}"
