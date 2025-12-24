@@ -9,6 +9,7 @@ These tests verify fundamental constraints of the simulation:
 
 import numpy as np
 
+from echelon import EchelonEnv, EnvConfig
 from echelon.actions import ACTION_DIM
 from echelon.config import WorldConfig
 from echelon.sim.sim import Sim
@@ -158,3 +159,51 @@ class TestDeadMechInvariants:
 
         # Dead mechs shouldn't move
         assert np.allclose(mech.vel, 0.0), f"Dead mech has non-zero velocity: {mech.vel}"
+
+
+class TestPositionInvariants:
+    """Position and world bounds invariants."""
+
+    def test_positions_within_world_bounds(self):
+        """All mech positions stay within world boundaries."""
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=15, obstacle_fill=0.1),
+            num_packs=1,
+            seed=42,
+            max_episode_seconds=10.0,
+        )
+        env = EchelonEnv(cfg)
+        obs, _ = env.reset(seed=42)
+        assert env.sim is not None
+        assert env.world is not None
+
+        # Run episode with random actions
+        for _ in range(100):
+            actions = {aid: np.random.uniform(-1, 1, env.ACTION_DIM).astype(np.float32) for aid in obs}
+            obs, _, terms, truncs, _ = env.step(actions)
+
+            # Check all mech positions
+            for aid in env.agents:
+                m = env.sim.mechs[aid]
+                if m.alive:
+                    assert 0 <= m.pos[0] <= env.world.size_x, f"{aid} x={m.pos[0]} out of bounds"
+                    assert 0 <= m.pos[1] <= env.world.size_y, f"{aid} y={m.pos[1]} out of bounds"
+                    assert 0 <= m.pos[2] <= env.world.size_z, f"{aid} z={m.pos[2]} out of bounds"
+
+            if all(terms.values()) or all(truncs.values()):
+                break
+
+    def test_mech_doesnt_fall_through_floor(self, make_mech):
+        """Mech doesn't fall through the floor (z >= 0)."""
+        world = VoxelWorld.generate(WorldConfig(size_x=20, size_y=20, size_z=10), np.random.default_rng(0))
+        world.voxels.fill(VoxelWorld.AIR)
+        world.voxels[0, :, :] = VoxelWorld.SOLID  # Floor
+        sim = Sim(world, dt_sim=0.1, rng=np.random.default_rng(0))
+
+        mech = make_mech("m", "blue", [10.0, 10.0, 5.0], "heavy")
+        sim.reset({"m": mech})
+
+        action = np.zeros(ACTION_DIM, dtype=np.float32)
+        for _ in range(50):
+            sim.step({"m": action}, num_substeps=1)
+            assert mech.pos[2] >= 0.0, f"Mech fell through floor: z={mech.pos[2]}"
