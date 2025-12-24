@@ -1380,15 +1380,19 @@ class Sim:
                         mech.fallen_time = FALLEN_DURATION_S
                         mech.vel[:] = 0.0
                     else:
-                        regen = STABILITY_REGEN_PER_S * self.dt
+                        # Stability regen with additive penalties (prevents near-zero regen
+                        # when multiple conditions stack). Floor at 10% of base regen.
+                        base_regen = STABILITY_REGEN_PER_S * self.dt
+                        penalty = 0.0
                         max_stab = mech.max_stability
                         if mech.is_legged:
-                            regen *= LEGGED_STABILITY_MULT
+                            penalty += 1.0 - LEGGED_STABILITY_MULT
                             max_stab *= LEGGED_STABILITY_MULT
                         if np.linalg.norm(mech.vel) > 1.0:
-                            regen *= MOVING_STABILITY_MULT
+                            penalty += 1.0 - MOVING_STABILITY_MULT
                         if mech.suppressed_time > 0.0:
-                            regen *= SUPPRESS_REGEN_SCALE
+                            penalty += 1.0 - SUPPRESS_REGEN_SCALE
+                        regen = base_regen * max(0.1, 1.0 - penalty)
                         mech.stability = min(max_stab, mech.stability + regen)
                 self._apply_vent(mech, actions.get(mech.mech_id, zero_action))
                 self._dissipate(mech)

@@ -102,6 +102,21 @@ You understand that voxel systems often integrate with:
 - **Multi-Agent Simulation**: Shared mutable state, conflict resolution, observation partitioning
 - **Tactical Gameplay**: Cover systems, line-of-sight, verticality advantages, destructible fortifications
 
+## Companion Skills
+
+When your work intersects with these domains, invoke the appropriate skill for deeper expertise:
+
+| Skill | When to Use |
+|-------|-------------|
+| `yzmir-simulation-foundations:using-simulation-foundations` | ODEs for physics simulation (heat diffusion, fluid pressure), state-space models, numerical stability, chaos/stochastic systems |
+| `bravos-simulation-tactics:using-simulation-tactics` | Combat modeling, tactical AI behavior, engagement simulation, weapon/armor interactions |
+| `yzmir-systems-thinking:using-systems-thinking` | Feedback loops (erosion ↔ drainage), emergent behavior analysis, system archetypes, leverage points for balancing |
+
+**Examples:**
+- Designing heat propagation through voxels → invoke `simulation-foundations` for diffusion equation numerics
+- Modeling structural collapse cascades → invoke `systems-thinking` for feedback loop analysis
+- Implementing cover effectiveness calculations → invoke `simulation-tactics` for tactical modeling
+
 ## Response Format
 
 Structure your responses with:

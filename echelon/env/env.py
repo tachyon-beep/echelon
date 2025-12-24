@@ -26,8 +26,11 @@ from ..config import (
     ECCM_WEIGHT,
     ECM_RADIUS_VOX,
     ECM_WEIGHT,
+    GAUSS,
+    LASER,
     MISSILE,
     PAINT_LOCK_MIN_QUALITY,
+    PAINTER,
     SENSOR_QUALITY_MAX,
     SENSOR_QUALITY_MIN,
     SUPPRESS_DURATION_S,
@@ -157,7 +160,7 @@ class EchelonEnv:
     CONTACT_SLOTS = 5
     # rel(3) + rel_vel(3) + yaw(2) + hp/heat(2) + stab/fallen/legged(3)
     # + relation_onehot(3) + class_onehot(4) + painted(1) + visible(1) + lead_pitch(1)
-    CONTACT_DIM = 23
+    CONTACT_DIM = 25  # Added closing_rate and crossing_angle for targeting prediction
 
     BASE_ACTION_DIM = ACTION_DIM_CONST
     OBS_SORT_DIM = 3
@@ -613,6 +616,29 @@ class EchelonEnv:
         else:
             feat[22] = 0.0
 
+        # Closing rate: positive = approaching, negative = separating
+        # Helps agents predict interception timing
+        rel_vec_raw = other.pos - viewer.pos
+        rel_vel_raw = other.vel - viewer.vel
+        dist = float(np.linalg.norm(rel_vec_raw))
+        if dist > 0.1:
+            # Rate of change of distance (negative dot product = closing)
+            closing = float(-np.dot(rel_vel_raw, rel_vec_raw) / dist)
+            feat[23] = float(np.clip(closing / 10.0, -1.0, 1.0))
+        else:
+            feat[23] = 0.0
+
+        # Crossing angle: 0 = moving parallel to LOS, 1 = moving perpendicular
+        # Perpendicular targets are harder to hit with projectiles
+        other_speed = float(np.linalg.norm(other.vel))
+        if dist > 0.1 and other_speed > 0.5:
+            los_dir = rel_vec_raw / dist
+            vel_dir = other.vel / other_speed
+            cos_angle = float(np.dot(los_dir, vel_dir))
+            feat[24] = 1.0 - abs(cos_angle)  # 0 = parallel, 1 = perpendicular
+        else:
+            feat[24] = 0.0
+
         return feat
 
     def _ewar_levels(self, viewer: MechState) -> tuple[float, float, float]:
@@ -926,6 +952,14 @@ class EchelonEnv:
             # proper vent timing and risk assessment, not just binary flags).
             self_hp_norm = float(np.clip(viewer.hp / max(1.0, viewer.spec.hp), 0.0, 1.0))
             self_heat_norm = float(np.clip(viewer.heat / max(1.0, viewer.spec.heat_cap), 0.0, 2.0))
+            # Heat headroom: how much heat budget remains before capacity (1.0 = cool, 0.0 = at cap)
+            heat_headroom = float(
+                np.clip((viewer.spec.heat_cap - viewer.heat) / max(1.0, viewer.spec.heat_cap), 0.0, 1.0)
+            )
+            # Stability risk: how close to knockdown (0.0 = stable, 1.0 = about to fall)
+            stability_risk = float(
+                np.clip(1.0 - (viewer.stability / max(1.0, viewer.max_stability)), 0.0, 1.0)
+            )
 
             incoming_missile = 0.0
             for p in sim.projectiles:
@@ -952,12 +986,11 @@ class EchelonEnv:
             # Self kinematics (needed for jump jets and movement control).
             self_vel = (viewer.vel / 10.0).astype(np.float32, copy=False)
 
-            # Ability cooldowns (normalized); 5s is a safe upper bound for current weapons.
-            cd_scale = 5.0
-            laser_cd = float(np.clip(viewer.laser_cooldown / cd_scale, 0.0, 1.0))
-            missile_cd = float(np.clip(viewer.missile_cooldown / cd_scale, 0.0, 1.0))
-            kinetic_cd = float(np.clip(viewer.kinetic_cooldown / cd_scale, 0.0, 1.0))
-            painter_cd = float(np.clip(viewer.painter_cooldown / cd_scale, 0.0, 1.0))
+            # Ability cooldowns (normalized to each weapon's actual max cooldown).
+            laser_cd = float(np.clip(viewer.laser_cooldown / LASER.cooldown_s, 0.0, 1.0))
+            missile_cd = float(np.clip(viewer.missile_cooldown / MISSILE.cooldown_s, 0.0, 1.0))
+            kinetic_cd = float(np.clip(viewer.kinetic_cooldown / GAUSS.cooldown_s, 0.0, 1.0))
+            painter_cd = float(np.clip(viewer.painter_cooldown / PAINTER.cooldown_s, 0.0, 1.0))
 
             # Objective features (zone vector is in world frame).
             in_zone = 0.0
@@ -997,6 +1030,8 @@ class EchelonEnv:
                         crit_heat,
                         self_hp_norm,
                         self_heat_norm,
+                        heat_headroom,
+                        stability_risk,
                         incoming_missile,
                         sensor_quality_norm,
                         jam_norm,
@@ -1042,10 +1077,11 @@ class EchelonEnv:
         # self features =
         #   acoustic_quadrants(4) + hull_type_onehot(4) +
         #   targeted, under_fire, painted, shutdown, crit_heat, self_hp_norm, self_heat_norm,
-        #   incoming_missile, sensor_quality, jam_level, ecm_on, eccm_on, suppressed, ams_cd,
-        #   self_vel(3), cooldowns(4), in_zone, vec_to_zone(3), zone_radius,
-        #   my_control, my_score, enemy_score, time_frac, obs_sort_onehot(3), hostile_only = 42
-        self_dim = 42
+        #   heat_headroom, stability_risk, incoming_missile, sensor_quality, jam_level,
+        #   ecm_on, eccm_on, suppressed, ams_cd, self_vel(3), cooldowns(4), in_zone,
+        #   vec_to_zone(3), zone_radius, my_control, my_score, enemy_score, time_frac,
+        #   obs_sort_onehot(3), hostile_only = 44
+        self_dim = 44
         telemetry_dim = 16 * 16
         return (
             self.CONTACT_SLOTS * self.CONTACT_DIM

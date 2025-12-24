@@ -38,6 +38,7 @@ Thumbs.db
 runs/
 mutants/
 .mutmut-cache/
+full-run-v1/
 
 # Temporary
 *.log
