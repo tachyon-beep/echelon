@@ -999,7 +999,10 @@ class EchelonEnv:
             ams_cd_norm = float(np.clip(viewer.ams_cooldown / max(1e-6, float(AMS_COOLDOWN_S)), 0.0, 1.0))
 
             # Self kinematics (needed for jump jets and movement control).
-            self_vel = (viewer.vel / 10.0).astype(np.float32, copy=False)
+            if viewer.shutdown:
+                self_vel = np.zeros(3, dtype=np.float32)
+            else:
+                self_vel = (viewer.vel / 10.0).astype(np.float32, copy=False)
 
             # Ability cooldowns (normalized to each weapon's actual max cooldown).
             laser_cd = float(np.clip(viewer.laser_cooldown / LASER.cooldown_s, 0.0, 1.0))

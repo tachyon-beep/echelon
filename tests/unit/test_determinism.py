@@ -2,6 +2,8 @@ import numpy as np
 
 from echelon import EchelonEnv, EnvConfig
 from echelon.config import WorldConfig
+from echelon.sim.sim import Sim
+from echelon.sim.world import VoxelWorld
 
 
 def test_sim_determinism():
@@ -66,3 +68,25 @@ def test_sim_determinism():
             assert m1.heat == m2.heat, f"Step {step}: Heat mismatch for {mid}"
 
     print(f"Determinism passed for {steps} steps.")
+
+
+def test_debris_deterministic_across_rng(make_mech):
+    cfg = WorldConfig(size_x=10, size_y=10, size_z=6, obstacle_fill=0.0, ensure_connectivity=False)
+
+    world1 = VoxelWorld.generate(cfg, np.random.default_rng(0))
+    world2 = VoxelWorld.generate(cfg, np.random.default_rng(1))
+    world1.voxels.fill(VoxelWorld.AIR)
+    world2.voxels.fill(VoxelWorld.AIR)
+
+    sim1 = Sim(world1, 0.05, np.random.default_rng(0))
+    sim2 = Sim(world2, 0.05, np.random.default_rng(123))
+
+    mech1 = make_mech("blue_0", "blue", [5.0, 5.0, 2.0], "heavy")
+    mech2 = make_mech("blue_0", "blue", [5.0, 5.0, 2.0], "heavy")
+    sim1.reset({"blue_0": mech1})
+    sim2.reset({"blue_0": mech2})
+
+    sim1._spawn_debris(mech1)
+    sim2._spawn_debris(mech2)
+
+    np.testing.assert_array_equal(world1.voxels, world2.voxels)

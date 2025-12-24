@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -485,8 +486,10 @@ class Sim:
         p_solid = probs.get(mech.spec.name, 0.5)
 
         # Roll once for the whole wreck or per-voxel?
-        # Whole wreck is cleaner tactically.
-        is_solid_wreck = self.rng.random() < p_solid
+        # Whole wreck is cleaner tactically and deterministic across RNG state.
+        seed_str = f"{mech.mech_id}:{mech.spec.name}:{min_ix}:{min_iy}:{min_iz}:{max_ix}:{max_iy}:{max_iz}"
+        roll = (zlib.crc32(seed_str.encode("utf-8")) & 0xFFFFFFFF) / 2**32
+        is_solid_wreck = roll < p_solid
         voxel_type = VoxelWorld.SOLID_DEBRIS if is_solid_wreck else VoxelWorld.DEBRIS_FIELD
 
         # Avoid embedding living mechs

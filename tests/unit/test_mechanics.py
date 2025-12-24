@@ -243,6 +243,38 @@ def test_pack_comm_is_pack_scoped():
     assert np.allclose(comm_other_pack, 0.0)
 
 
+def test_shutdown_zeroes_observed_velocity():
+    cfg = EnvConfig(
+        world=WorldConfig(size_x=20, size_y=20, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+        num_packs=1,
+        observation_mode="full",
+        comm_dim=0,
+        seed=0,
+        max_episode_seconds=5.0,
+    )
+    env = EchelonEnv(cfg)
+    env.reset(seed=0)
+
+    viewer_id = "blue_0"
+    viewer = env.sim.mechs[viewer_id]
+    viewer.heat = float(viewer.spec.heat_cap + 1.0)
+    viewer.vel[:] = np.array([3.0, -2.0, 1.0], dtype=np.float32)
+
+    obs = env._obs()
+    obs_v = obs[viewer_id]
+    contacts_total = int(env.CONTACT_SLOTS * env.CONTACT_DIM)
+    comm_total = PACK_SIZE * int(cfg.comm_dim)
+    telemetry_dim = 16 * 16
+    offset = contacts_total + comm_total + int(env.LOCAL_MAP_DIM) + telemetry_dim
+
+    self_features = obs_v[offset:]
+    assert self_features.size >= 30
+
+    self_vel_offset = 27  # acoustic(4) + hull(4) + 19 slots before self_vel
+    self_vel = self_features[self_vel_offset : self_vel_offset + 3]
+    assert np.allclose(self_vel, 0.0)
+
+
 def test_partial_visibility_is_pack_scoped():
     cfg = EnvConfig(
         world=WorldConfig(size_x=40, size_y=40, size_z=20, obstacle_fill=0.0, ensure_connectivity=False),
