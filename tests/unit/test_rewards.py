@@ -210,3 +210,129 @@ class TestRewardGradients:
         # For now, verify the constant exists and is positive
         W_DAMAGE = 0.005  # From env.py
         assert W_DAMAGE > 0, "Damage reward weight should be positive"
+
+
+class TestTerminalRewards:
+    """Verify terminal reward distribution."""
+
+    def test_winner_gets_positive_terminal_reward(self):
+        """Winning team gets positive terminal reward (W_WIN=5.0)."""
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+        assert env.sim is not None
+
+        # Kill all red to trigger blue win
+        for aid in env.agents:
+            if "red" in aid:
+                env.sim.mechs[aid].alive = False
+                env.sim.mechs[aid].hp = 0.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, rewards, terms, _, _ = env.step(actions)
+
+        # Episode should be over
+        assert all(terms.values()), "Episode should terminate on team elimination"
+
+        # Blue (winner) should get W_WIN=5.0
+        for aid in env.agents:
+            if "blue" in aid:
+                assert rewards[aid] >= 5.0, f"Winner {aid} should get W_WIN>=5.0, got {rewards[aid]}"
+
+    def test_loser_gets_negative_terminal_reward(self):
+        """Losing team gets negative terminal reward (W_LOSE=-5.0)."""
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+        assert env.sim is not None
+
+        # Kill all blue to trigger red win
+        for aid in env.agents:
+            if "blue" in aid:
+                env.sim.mechs[aid].alive = False
+                env.sim.mechs[aid].hp = 0.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, rewards, _terms, _, _ = env.step(actions)
+
+        # Blue (loser) should get W_LOSE=-5.0
+        for aid in env.agents:
+            if "blue" in aid:
+                assert rewards[aid] <= -5.0, f"Loser {aid} should get W_LOSE<=-5.0, got {rewards[aid]}"
+
+    def test_draw_gives_zero_terminal_reward(self):
+        """Draw gives zero terminal reward (W_DRAW=0.0)."""
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            seed=0,
+            max_episode_seconds=0.5,  # Very short to force timeout
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+        assert env.sim is not None
+
+        # Run until timeout with equal zone control (no one in zone)
+        for aid in env.agents:
+            m = env.sim.mechs[aid]
+            m.pos[0], m.pos[1] = 5.0, 5.0
+            m.vel[:] = 0.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        done = False
+        final_rewards = None
+        for _ in range(100):
+            _, rewards, _terms, truncs, infos = env.step(actions)
+            if all(truncs.values()):
+                done = True
+                final_rewards = rewards
+                # Check if it's actually a draw
+                outcome = infos.get("blue_0", {}).get("outcome", {})
+                if outcome.get("winner") == "draw":
+                    break
+
+        if done and final_rewards:
+            # Draw terminal rewards should be ~0 (W_DRAW=0.0)
+            # But there may be small per-step rewards, so we check the magnitude is small
+            for aid in env.agents:
+                assert abs(final_rewards[aid]) < 1.0, f"Draw reward should be ~0, got {final_rewards[aid]}"
+
+    def test_dead_agents_get_terminal_reward(self):
+        """Dead agents also receive terminal reward (for learning)."""
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+        assert env.sim is not None
+
+        # Kill blue_0, then end episode with blue win
+        env.sim.mechs["blue_0"].alive = False
+        env.sim.mechs["blue_0"].hp = 0.0
+
+        # Kill all red
+        for aid in env.agents:
+            if "red" in aid:
+                env.sim.mechs[aid].alive = False
+                env.sim.mechs[aid].hp = 0.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, rewards, _, _, _ = env.step(actions)
+
+        # Dead blue_0 should still get winner reward
+        assert (
+            rewards["blue_0"] >= 5.0
+        ), f"Dead agent on winning team should get W_WIN, got {rewards['blue_0']}"
