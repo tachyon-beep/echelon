@@ -3,9 +3,10 @@
 """PPO training script for Echelon.
 
 Usage:
+    uv run python scripts/train_ppo.py --total-steps 1000000 --num-envs 8
     uv run python scripts/train_ppo.py --size 100 --updates 200
     uv run python scripts/train_ppo.py --wandb --wandb-run-name "experiment-01"
-    uv run python scripts/train_ppo.py --resume latest --updates 200
+    uv run python scripts/train_ppo.py --resume latest --total-steps 500000
 """
 
 from __future__ import annotations
@@ -200,7 +201,10 @@ def parse_args() -> argparse.Namespace:
 
     # PPO hyperparameters
     parser.add_argument("--rollout-steps", type=int, default=512)
-    parser.add_argument("--updates", type=int, default=200)
+    parser.add_argument("--total-steps", type=int, default=None, help="Total env steps (overrides --updates)")
+    parser.add_argument(
+        "--updates", type=int, default=200, help="PPO update cycles (ignored if --total-steps set)"
+    )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
@@ -457,16 +461,26 @@ def main() -> None:
     next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
     next_done = torch.zeros(batch_size, device=device)
 
+    # Compute number of updates from total_steps if specified
+    steps_per_update = ppo_cfg.rollout_steps * num_envs * batch_size_per_env
+    if args.total_steps is not None:
+        num_updates = max(1, args.total_steps // steps_per_update)
+        print(
+            f"--total-steps {args.total_steps:,} → {num_updates} updates ({steps_per_update:,} steps/update)"
+        )
+    else:
+        num_updates = args.updates
+
     if resume_ckpt is not None:
         global_step = int(resume_ckpt.get("global_step", 0))
         episodes = int(resume_ckpt.get("episodes", 0))
         start_update = int(resume_ckpt.get("update", 0)) + 1
-        end_update = start_update + args.updates - 1
+        end_update = start_update + num_updates - 1
     else:
         global_step = 0
         episodes = 0
         start_update = 1
-        end_update = args.updates
+        end_update = num_updates
 
     # Training metrics
     start_time = time.time()
@@ -584,7 +598,7 @@ def main() -> None:
         except (ValueError, TypeError):
             pass
 
-    print(f"Starting {args.updates} training updates...")
+    print(f"Starting {num_updates} training updates...")
 
     # ====================================================================
     # Training Loop

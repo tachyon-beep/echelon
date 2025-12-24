@@ -121,13 +121,13 @@ def _team_ids(num_packs: int) -> tuple[list[str], list[str]]:
 
 
 def _roster_for_index(i: int) -> str:
-    # Pack structure (10 mechs): 1 Heavy, 5 Medium, 3 Light, 1 Scout
+    # Pack structure (5 mechs): 1 Heavy, 2 Medium, 1 Light, 1 Scout
     idx_in_pack = i % PACK_SIZE
-    if idx_in_pack < 1:
+    if idx_in_pack == 0:
         return "heavy"
-    elif idx_in_pack < 6:  # 1+5 = 6
+    elif idx_in_pack <= 2:  # 1, 2
         return "medium"
-    elif idx_in_pack < 9:  # 1+5+3 = 9
+    elif idx_in_pack == 3:
         return "light"
     else:
         return "scout"
