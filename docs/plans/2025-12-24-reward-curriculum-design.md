@@ -12,7 +12,7 @@ Key insight: **Win = Mission Success, not Team-vs-Team outcome.** Both teams can
 
 ## 1. Mission Embedding Structure
 
-### 1.1 Squad-Level Mission Verbs (6 types)
+### 1.1 Squad-Level Mission Verbs (7 types)
 
 | Verb | Description | Success Metric |
 |------|-------------|----------------|
@@ -22,6 +22,18 @@ Key insight: **Win = Mission Success, not Team-vs-Team outcome.** Both teams can
 | **Flank** | Maneuver to enemy side/rear | Achieve angle + remain undetected until engagement |
 | **Suppress** | Pin enemies, prevent movement | Enemy movement denied + ammo efficiency |
 | **Scout** | Locate and report enemy positions | % enemies found / % terrain covered |
+| **Stage** | Move to position, maintain readiness | Transition speed to follow-on mission + resources preserved |
+
+**Stage** is the Warning Order (WARNO) verb - "go here, be ready for something toward there." The agent doesn't know what mission is coming or when.
+
+**Retroactive Evaluation:** Stage success is measured when the follow-on order arrives:
+- Time from "GO" to first contact (Assault follow-on)
+- Time from "GO" to coverage start (Scout follow-on)
+- Time from "GO" to new position (any movement follow-on)
+- Resources available at transition (ammo %, heat headroom, cooldowns ready)
+- Formation cohesion at transition (did the squad stay together?)
+
+This creates the right incentive: staging isn't about looking busy, it's about being *actually ready* when the real order comes.
 
 ### 1.2 Mission Parameters (4 continuous values)
 
@@ -47,7 +59,7 @@ spatial_context = [
 
 **Note on terrain_complexity:** Use voxel density in target zone as a cheap proxy (0.0 = open field, 1.0 = dense urban maze). Don't over-engineer a full LOS analysis for this single float.
 
-### 1.4 Full Embedding (14 dimensions)
+### 1.4 Full Embedding (15 dimensions)
 
 ```python
 @dataclass
@@ -61,8 +73,8 @@ class MissionSpec:
     terrain_complexity: float            # 0.0 - 1.0 (voxel density proxy)
 
     def to_embedding(self, agent_pos: np.ndarray) -> np.ndarray:
-        """14-dimensional mission embedding for observation."""
-        verb_onehot = np.zeros(6)
+        """15-dimensional mission embedding for observation."""
+        verb_onehot = np.zeros(7)  # 7 verbs including Stage
         verb_onehot[self.verb.value] = 1.0
 
         params = np.array([
@@ -172,20 +184,22 @@ def get_reward_weights(self, progress: float) -> RewardWeights:
 
 **Solution:** Gate shaping components by mission verb:
 
-| Component | Assault | Hold | Overwatch | Flank | Suppress | Scout |
-|-----------|---------|------|-----------|-------|----------|-------|
-| damage_dealt | 1.0 | 0.5 | 0.7 | 0.3 | 0.2 | 0.0 |
-| survival | 0.5 | 1.0 | 0.8 | 0.7 | 0.5 | 1.0 |
-| stealth | 0.0 | 0.0 | 0.3 | 1.0 | 0.0 | 0.8 |
-| detection | 0.0 | 0.3 | 0.5 | 0.2 | 0.3 | 1.0 |
-| suppression_effect | 0.2 | 0.3 | 0.8 | 0.0 | 1.0 | 0.0 |
-| zone_progress | 1.0 | 0.0 | 0.0 | 0.5 | 0.0 | 0.3 |
+| Component | Assault | Hold | Overwatch | Flank | Suppress | Scout | Stage |
+|-----------|---------|------|-----------|-------|----------|-------|-------|
+| damage_dealt | 1.0 | 0.5 | 0.7 | 0.3 | 0.2 | 0.0 | 0.0 |
+| survival | 0.5 | 1.0 | 0.8 | 0.7 | 0.5 | 1.0 | 1.0 |
+| stealth | 0.0 | 0.0 | 0.3 | 1.0 | 0.0 | 0.8 | 0.5 |
+| detection | 0.0 | 0.3 | 0.5 | 0.2 | 0.3 | 1.0 | 0.3 |
+| suppression_effect | 0.2 | 0.3 | 0.8 | 0.0 | 1.0 | 0.0 | 0.0 |
+| zone_progress | 1.0 | 0.0 | 0.0 | 0.5 | 0.0 | 0.3 | 0.8 |
+| resource_preservation | 0.3 | 0.5 | 0.4 | 0.6 | 0.3 | 0.7 | 1.0 |
 
 ```python
 VERB_SHAPING_GATES = {
     MissionVerb.SCOUT: {"damage_dealt": 0.0, "stealth": 0.8, "detection": 1.0},
     MissionVerb.FLANK: {"damage_dealt": 0.3, "stealth": 1.0, "zone_progress": 0.5},
     MissionVerb.SUPPRESS: {"damage_dealt": 0.2, "suppression_effect": 1.0},
+    MissionVerb.STAGE: {"damage_dealt": 0.0, "zone_progress": 0.8, "resource_preservation": 1.0},
     # ... etc
 }
 
@@ -342,6 +356,7 @@ class ScenarioGenerator:
 | Overwatch | 0-1.0 packs | 0.3-0.8 packs | Patience vs Response |
 | Flank | 0.8-1.5 packs | 0.4-0.8 packs | Speed vs Detection |
 | Suppress | 0.5-1.2 packs | 0.5-1.0 packs | Ammo vs Effect |
+| Stage | 0-1.0 packs | 0.3-1.0 packs | Readiness vs Exposure |
 
 ## 6. Scenario Levers
 
@@ -578,7 +593,7 @@ class EchelonEnv:
 ### 9.2 Observation Space Additions
 
 ```python
-"mission_embedding": Box(low=-1, high=1, shape=(14,))  # sin/cos can be negative
+"mission_embedding": Box(low=-1, high=1, shape=(15,))  # 7 verbs + 4 params + 4 spatial (sin/cos can be negative)
 ```
 
 ### 9.3 Action Space Additions
