@@ -619,7 +619,52 @@ echelon/
 6. **env.py integration** - Wire curriculum into environment
 7. **Training script updates** - Checkpoint curriculum state
 
-## 12. Future Extensions
+## 12. Implementation Directives
+
+**Critical notes for implementation to prevent common DRL coding errors:**
+
+### Directive A: Status Report as Auxiliary Reward
+
+The Brier score calibration (Section 7.3) must be implemented as an **auxiliary reward**, not a loss function modification (which breaks Stable Baselines 3 compatibility):
+
+```python
+# CORRECT: Add to reward
+calibration_bonus = w_calibration * (1.0 - (reported_status - actual_outcome) ** 2)
+reward += calibration_bonus  # w_calibration ≈ 0.1 (small but persistent)
+
+# WRONG: Do NOT modify PPO loss function directly
+```
+
+### Directive B: NavGraph Coverage Lookup
+
+Computing `terrain_covered` via NavGraph spatial search is expensive. Pre-bake node IDs at map generation:
+
+```python
+# At map generation time:
+self.node_lookup: np.ndarray  # shape (z, y, x), dtype=int32, -1 for no node
+
+def get_node_at_pos(self, pos: Vec3) -> int:
+    """O(1) lookup instead of spatial search."""
+    ix, iy, iz = int(pos.x / voxel_size), int(pos.y / voxel_size), int(pos.z / voxel_size)
+    if 0 <= iz < self.node_lookup.shape[0] and ...:
+        return self.node_lookup[iz, iy, ix]
+    return -1
+```
+
+### Directive C: SafeDiv Helper
+
+DRL runs millions of steps. If a denominator *can* be zero, it *will* be zero. Use universally:
+
+```python
+def safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:
+    """Safe division that handles zero denominators."""
+    return numerator / denominator if denominator > 1e-8 else default
+
+# Usage:
+enemy_score = safe_div(enemies_detected, total_enemies, default=1.0)  # Empty room = success
+```
+
+## 13. Future Extensions
 
 - **Trait System:** Personality modifiers (Aggressive, Cautious, Coward) via reward function adjustments
 - **Hierarchical Command:** Platoon/Company level orders decomposed to squad missions
