@@ -1472,7 +1472,8 @@ class EchelonEnv:
         W_ASSIST = 0.5  # Per assist
         W_DEATH = -0.1  # Death penalty (reduced: was -0.5, too harsh before learning to fight)
         W_COHESION = 0.01  # Pack cohesion: reward tactical spacing with packmates
-        W_AGGRESSION = 0.02  # Per shot fired at enemy (encourage combat engagement)
+        # NOTE: W_AGGRESSION removed - incentivized spam firing (reward hacking).
+        # W_DAMAGE already rewards successful combat outcomes.
 
         # Count teammates in zone for scaled breadcrumb decay (HIGH-7)
         teammates_in_zone: dict[str, int] = {"blue": 0, "red": 0}
@@ -1505,22 +1506,19 @@ class EchelonEnv:
                     phi1 = -float(d1 / max_xy)
                     r += W_APPROACH * (phi1 - phi0) * approach_scale
 
-            # (2) Zone Control Reward: ratio of tonnage, scaled by proximity.
-            # Agents in zone get full reward; outside zone decays with distance.
+            # (2) Zone Control Reward: only agents IN the zone get credit for control.
+            # This is proper credit assignment - if you're not in the zone, you're not
+            # contributing to control. The approach reward (above) provides the gradient
+            # to get there. Previous proximity scaling violated potential-based shaping
+            # and gave distant agents zero gradient signal.
             team_tick = blue_tick if m.team == "blue" else red_tick
             if in_zone_by_agent.get(aid, False):
-                zone_proximity_scale = 1.0
-            else:
-                # Scale by how close to zone: 1.0 at edge, 0 at map corner
-                dist_from_edge = max(0.0, dist_to_zone_after.get(aid, max_xy) - zone_r)
-                zone_proximity_scale = max(0.0, 1.0 - dist_from_edge / max_xy)
-            r += W_ZONE_TICK * team_tick * zone_proximity_scale
+                r += W_ZONE_TICK * team_tick
 
             # (3) Combat shaping rewards (HIGH-6)
             r += W_DAMAGE * step_damage_dealt.get(aid, 0.0)
             r += W_KILL * step_kills.get(aid, 0)
             r += W_ASSIST * step_assists.get(aid, 0)
-            r += W_AGGRESSION * step_shots_fired.get(aid, 0)  # Reward aggression
             if step_deaths.get(aid, False):
                 r += W_DEATH
 
