@@ -1,7 +1,7 @@
 # Reward Curriculum with Automatic Phase Transitions
 
 **Date:** 2025-12-24
-**Status:** Approved with minor patches (Gemini review 2025-12-24)
+**Status:** Approved with patches (Gemini + ChatGPT reviews 2025-12-24)
 **Author:** Brainstorming session with Claude
 
 ## Overview
@@ -32,19 +32,22 @@ Key insight: **Win = Mission Success, not Team-vs-Team outcome.** Both teams can
 | **time_pressure** | 0.0-1.0 | Urgency (0=take your time, 1=immediate) |
 | **grouping** | 0.0-1.0 | Formation tightness (0=dispersed, 1=concentrated) |
 
-### 1.3 Spatial Context (3 values)
+### 1.3 Spatial Context (4 values)
 
 ```python
 spatial_context = [
     objective_distance,      # Normalized distance to objective
-    objective_bearing,       # Angle to objective (-1 to 1)
+    objective_bearing_sin,   # sin(theta) - no discontinuity at wrap
+    objective_bearing_cos,   # cos(theta) - no discontinuity at wrap
     terrain_complexity       # LOS complexity of AO (see note below)
 ]
 ```
 
+**Note on bearing:** Using `(sin(θ), cos(θ))` instead of `atan2/π` avoids the ±π discontinuity that creates unnecessary learning tax.
+
 **Note on terrain_complexity:** Use voxel density in target zone as a cheap proxy (0.0 = open field, 1.0 = dense urban maze). Don't over-engineer a full LOS analysis for this single float.
 
-### 1.4 Full Embedding (13 dimensions)
+### 1.4 Full Embedding (14 dimensions)
 
 ```python
 @dataclass
@@ -55,9 +58,10 @@ class MissionSpec:
     time_pressure: float                 # 0.0 - 1.0
     grouping: float                      # 0.0 - 1.0
     objective_pos: tuple[float, float, float]
+    terrain_complexity: float            # 0.0 - 1.0 (voxel density proxy)
 
     def to_embedding(self, agent_pos: np.ndarray) -> np.ndarray:
-        """13-dimensional mission embedding for observation."""
+        """14-dimensional mission embedding for observation."""
         verb_onehot = np.zeros(6)
         verb_onehot[self.verb.value] = 1.0
 
@@ -68,12 +72,14 @@ class MissionSpec:
             self.grouping
         ])
 
-        # Relative spatial context
+        # Relative spatial context (sin/cos avoids bearing discontinuity)
         delta = np.array(self.objective_pos) - agent_pos
         distance = np.linalg.norm(delta) / 200.0  # Normalize by max range
-        bearing = np.arctan2(delta[1], delta[0]) / np.pi  # -1 to 1
+        theta = np.arctan2(delta[1], delta[0])
+        bearing_sin = np.sin(theta)
+        bearing_cos = np.cos(theta)
 
-        spatial = np.array([distance, bearing, self.terrain_complexity])
+        spatial = np.array([distance, bearing_sin, bearing_cos, self.terrain_complexity])
 
         return np.concatenate([verb_onehot, params, spatial])
 ```
@@ -136,8 +142,15 @@ def get_reward_weights(self, progress: float) -> RewardWeights:
     # Shaping fades from 1.0 to 0.0 at 75% progress (Phase 4 start)
     shaping_weight = max(0.0, 1.0 - progress * 1.33)
 
-    # Objective ramps up then slightly down
-    objective_weight = min(1.0, progress * 2.0) * max(0.3, 1.0 - progress)
+    # Objective: triangle peaking at 50%, hitting 0 at 75% (Phase 4 = terminal only)
+    if progress < 0.25:
+        objective_weight = progress * 4.0  # Ramp up
+    elif progress < 0.5:
+        objective_weight = 1.0  # Peak
+    elif progress < 0.75:
+        objective_weight = (0.75 - progress) * 4.0  # Fade to 0
+    else:
+        objective_weight = 0.0  # Phase 4: terminal only
 
     # Terminal kicks in at 50%, full strength at 100%
     terminal_weight = max(0.0, (progress - 0.5) * 2.0)
@@ -152,6 +165,38 @@ def get_reward_weights(self, progress: float) -> RewardWeights:
         mission_success=1.0 * terminal_weight
     )
 ```
+
+### 3.4 Verb-Conditioned Shaping (Critical)
+
+**Problem:** Generic "damage_dealt" rewards poison Scout/Flank behavior early by teaching "combat is always good."
+
+**Solution:** Gate shaping components by mission verb:
+
+| Component | Assault | Hold | Overwatch | Flank | Suppress | Scout |
+|-----------|---------|------|-----------|-------|----------|-------|
+| damage_dealt | 1.0 | 0.5 | 0.7 | 0.3 | 0.2 | 0.0 |
+| survival | 0.5 | 1.0 | 0.8 | 0.7 | 0.5 | 1.0 |
+| stealth | 0.0 | 0.0 | 0.3 | 1.0 | 0.0 | 0.8 |
+| detection | 0.0 | 0.3 | 0.5 | 0.2 | 0.3 | 1.0 |
+| suppression_effect | 0.2 | 0.3 | 0.8 | 0.0 | 1.0 | 0.0 |
+| zone_progress | 1.0 | 0.0 | 0.0 | 0.5 | 0.0 | 0.3 |
+
+```python
+VERB_SHAPING_GATES = {
+    MissionVerb.SCOUT: {"damage_dealt": 0.0, "stealth": 0.8, "detection": 1.0},
+    MissionVerb.FLANK: {"damage_dealt": 0.3, "stealth": 1.0, "zone_progress": 0.5},
+    MissionVerb.SUPPRESS: {"damage_dealt": 0.2, "suppression_effect": 1.0},
+    # ... etc
+}
+
+def get_verb_gated_shaping(self, verb: MissionVerb, base_weights: dict) -> dict:
+    gates = VERB_SHAPING_GATES.get(verb, {})
+    return {k: v * gates.get(k, 1.0) for k, v in base_weights.items()}
+```
+
+**Additionally, modulate by mission parameters:**
+- `loss_appetite` scales casualty penalties (low = harsh penalty for deaths)
+- `time_pressure` amplifies progress-per-time and penalizes dithering
 
 ## 4. Mission Success Criteria
 
@@ -212,6 +257,44 @@ MISSION_EVALUATORS = {
 ```python
 # Final reward is symmetric around 0
 terminal_reward = 2.0 * mission_success - 1.0  # Maps [0,1] to [-1,1]
+```
+
+### 4.4 Anti-Cheese Metric Definitions (Critical)
+
+**Problem:** Loosely defined metrics get exploited:
+- "Coverage" by spinning in place while sensor raycasts tick cells
+- "Suppression" by shooting walls near enemies to trigger flags
+- "Undetected" by kiting detection thresholds without doing task
+
+**Solution:** Define metrics in terms of world-state-changes that are hard to fake:
+
+| Metric | Exploitable Definition | Hardened Definition |
+|--------|------------------------|---------------------|
+| **terrain_covered** | LOS raycast hit count | NavGraph nodes physically visited (agent position must enter cell) |
+| **enemies_detected** | Any sensor ping | Confirmed track ID with persistence (>2s continuous tracking) |
+| **suppression_effect** | Bullets near enemy | Enemy action constraint: reduced move speed OR forced cover state |
+| **position_retained** | Still in zone | Zone control percentage weighted by time; contested time penalized |
+| **undetected** | Below detection threshold | No enemy acquired tracking (not just "haven't shot yet") |
+
+```python
+# Example: Hardened coverage metric
+def compute_terrain_covered(agent_trajectory: list[Vec3], nav_graph: NavGraph) -> float:
+    """Count unique navmesh nodes agent physically entered."""
+    visited_nodes = set()
+    for pos in agent_trajectory:
+        node = nav_graph.get_nearest_node(pos)
+        if node and distance(pos, node.pos) < VISIT_RADIUS:
+            visited_nodes.add(node.id)
+    return len(visited_nodes) / len(nav_graph.nodes)
+
+# Example: Hardened suppression metric
+def compute_suppression_effect(target: Mech, suppression_events: list) -> float:
+    """Measure actual movement denial, not just bullets-near."""
+    time_movement_denied = sum(
+        e.duration for e in suppression_events
+        if e.target == target and e.caused_cover_state
+    )
+    return min(1.0, time_movement_denied / TARGET_SUPPRESS_TIME)
 ```
 
 ## 5. Scenario Generator
@@ -325,9 +408,35 @@ class StatusLevel(Enum):
     RED = 0.0     # "Combat ineffective / Pinned"
 ```
 
-Added to action space as continuous output [0, 1]. Agent learns honest reporting because:
-- Lying "GREEN" when pinned → Commander sends no help → death
-- Honest "RED" → Commander adapts → survival
+Added to action space as continuous output [0, 1].
+
+### 7.3 Truth Anchor: Proper Scoring Rules (Critical)
+
+**Problem:** Without external truth anchor, co-trained agents will drift into "preference falsification" - a shared fiction where "GREEN" means whatever equilibrium they settle into. This mirrors real-world "zero-defects mentality" where bad news stops flowing because reporting problems is punished.
+
+**Solution:** Treat status as a probabilistic forecast and score with a proper scoring rule:
+
+```python
+def compute_status_calibration_loss(
+    reported_status: float,      # Agent's output [0, 1]
+    actual_outcome: float,       # Ground truth from episode end
+) -> float:
+    """Brier score: rewards calibrated forecasts, penalizes overconfidence."""
+    # If status = 0.8 (confident), and outcome = 0.2 (bad), heavy penalty
+    # If status = 0.3 (pessimistic), and outcome = 0.2, small penalty
+    return (reported_status - actual_outcome) ** 2
+
+# Ground truth signals to forecast:
+# - survival_odds: Did this agent survive the episode?
+# - mission_progress: How much objective progress was made?
+# - mobility: Was agent pinned/suppressed for extended time?
+```
+
+**Implementation:**
+1. **Phase 1-2:** Auxiliary reward for calibrated status (truth anchor active)
+2. **Phase 3-4:** Fade auxiliary reward, but calibration habit should persist
+
+**Why this works:** The environment pays out for accuracy, not for being reassuring. Even if commander policy changes, honest forecasting remains the winning strategy. This prevents the "everyone lies, then pretends not to know" equilibrium that humans often reach.
 
 ## 8. Phase Transition Logic
 
@@ -378,6 +487,53 @@ def evaluate(self, metrics: PhaseMetrics, current_phase: int) -> int:
     return current_phase
 ```
 
+### 8.4 Phase Stability: Hysteresis and Dwell Time
+
+**Problem:** Noisy metrics cause phase oscillation (thrashing between phases).
+
+**Solution:** Add stabilizers:
+
+```python
+@dataclass
+class PhaseTransitionConfig:
+    min_dwell_episodes: int = 200      # Minimum episodes before allowing transition
+    advance_threshold_margin: float = 0.1   # Must exceed threshold by this margin to advance
+    regress_threshold_margin: float = 0.3   # Must fall below by this margin to regress
+
+    # Hysteresis: advance threshold is HIGHER than regress threshold
+    # This creates a "sticky" zone where neither transition occurs
+```
+
+**Example:**
+- Advance from Phase 2 requires `mission_completion_rate > 0.6` (0.5 + 0.1 margin)
+- Regress to Phase 1 requires `mission_completion_rate < 0.35` (0.5 - 0.15 margin)
+- Between 0.35 and 0.6: stay in current phase
+
+### 8.5 Credit Assignment: Squad vs Individual
+
+**Decision:** Use shared squad-level rewards with tiny individual shaping in early phases.
+
+**Rationale:** Per-agent rewards for damage/survival create selfish play that harms mission outcomes. "Soldier agents" need collective success.
+
+```python
+def compute_squad_reward(squad_agents: list[Agent], mission_outcome: MissionOutcome) -> float:
+    """Shared reward for all squad members."""
+    return evaluate_mission_success(mission_outcome)
+
+def compute_individual_shaping(agent: Agent, shaping_weight: float) -> float:
+    """Tiny individual shaping, fades with curriculum progress."""
+    # Only active in Phase 1-2, scaled by shaping_weight
+    return shaping_weight * (
+        agent.survival_bonus +
+        agent.positioning_bonus
+    )
+
+# Final reward per agent:
+# reward = squad_reward + individual_shaping * (1.0 - progress)
+```
+
+**Alternative (if needed):** Difference rewards or counterfactual credit if agents learn to free-ride on squad success.
+
 ## 9. Integration with EchelonEnv
 
 ### 9.1 Modified Environment
@@ -400,8 +556,9 @@ class EchelonEnv:
         # Configure world and spawn forces
         self._spawn_forces(self.current_scenario)
 
-        # Add mission embedding to observation
-        obs["mission_embedding"] = self.current_scenario.mission.to_embedding()
+        # Add mission embedding to observation (per-agent, uses agent position)
+        for agent_id, agent in self.agents.items():
+            obs[agent_id]["mission_embedding"] = self.current_scenario.mission.to_embedding(agent.pos)
         return obs, {}
 
     def step(self, actions):
@@ -409,8 +566,11 @@ class EchelonEnv:
         reward = self._compute_reward(weights)
 
         if done:
-            mission_success = self.curriculum.compute_terminal_reward(...)
-            reward += weights.terminal * mission_success
+            mission_outcome = self._get_mission_outcome()
+            success = self.curriculum.compute_terminal_reward(
+                self.current_scenario.mission, mission_outcome
+            )
+            reward += weights.mission_success * success
 
         return obs, reward, done, truncated, info
 ```
@@ -418,7 +578,7 @@ class EchelonEnv:
 ### 9.2 Observation Space Additions
 
 ```python
-"mission_embedding": Box(low=0, high=1, shape=(13,))
+"mission_embedding": Box(low=-1, high=1, shape=(14,))  # sin/cos can be negative
 ```
 
 ### 9.3 Action Space Additions
