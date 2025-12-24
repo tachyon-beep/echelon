@@ -209,6 +209,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--update-epochs", type=int, default=4)
+    parser.add_argument("--num-minibatches", type=int, default=8, help="TBPTT minibatches per epoch")
+    parser.add_argument("--tbptt-chunk-length", type=int, default=0, help="TBPTT chunk length (0=auto)")
 
     # Evaluation
     parser.add_argument("--eval-every", type=int, default=50)
@@ -314,6 +316,8 @@ def build_ppo_config(args: argparse.Namespace) -> PPOConfig:
         max_grad_norm=args.max_grad_norm,
         update_epochs=args.update_epochs,
         rollout_steps=args.rollout_steps,
+        num_minibatches=args.num_minibatches,
+        tbptt_chunk_length=args.tbptt_chunk_length,
     )
 
 
