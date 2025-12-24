@@ -119,3 +119,42 @@ class TestStabilityInvariants:
 
         # After recovery, stability should be restored
         assert mech.stability > 0.0, "Mech should recover some stability after knockdown"
+
+
+class TestDeadMechInvariants:
+    """Dead mech behavior invariants."""
+
+    def test_dead_mechs_stay_dead(self, make_mech):
+        """Once dead, a mech stays dead for the episode."""
+        world = VoxelWorld.generate(WorldConfig(size_x=20, size_y=20, size_z=10), np.random.default_rng(0))
+        world.voxels.fill(VoxelWorld.AIR)
+        sim = Sim(world, dt_sim=0.1, rng=np.random.default_rng(0))
+
+        mech = make_mech("m", "blue", [5.0, 5.0, 1.0], "heavy")
+        mech.hp = 0.0
+        mech.alive = False
+        sim.reset({"m": mech})
+
+        action = np.zeros(ACTION_DIM, dtype=np.float32)
+        for _ in range(10):
+            sim.step({"m": action}, num_substeps=1)
+            assert not mech.alive, "Dead mech should stay dead"
+
+    def test_dead_mechs_have_zero_velocity(self, make_mech):
+        """Dead mechs should have zero velocity."""
+        world = VoxelWorld.generate(WorldConfig(size_x=20, size_y=20, size_z=10), np.random.default_rng(0))
+        world.voxels.fill(VoxelWorld.AIR)
+        sim = Sim(world, dt_sim=0.1, rng=np.random.default_rng(0))
+
+        mech = make_mech("m", "blue", [5.0, 5.0, 1.0], "heavy")
+        mech.hp = 0.0
+        mech.alive = False
+        mech.vel[:] = 0.0
+        sim.reset({"m": mech})
+
+        action = np.zeros(ACTION_DIM, dtype=np.float32)
+        action[0] = 1.0  # Try to move forward
+        sim.step({"m": action}, num_substeps=1)
+
+        # Dead mechs shouldn't move
+        assert np.allclose(mech.vel, 0.0), f"Dead mech has non-zero velocity: {mech.vel}"
