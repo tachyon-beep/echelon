@@ -1,4 +1,13 @@
+#!/usr/bin/env python
 # ruff: noqa: E402
+"""PPO training script for Echelon.
+
+Usage:
+    uv run python scripts/train_ppo.py --size 100 --updates 200
+    uv run python scripts/train_ppo.py --wandb --wandb-run-name "experiment-01"
+    uv run python scripts/train_ppo.py --resume latest --updates 200
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -16,11 +25,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from echelon.training.evaluation import evaluate_vs_heuristic
-from echelon.training.ppo import PPOConfig, PPOTrainer
-from echelon.training.rollout import RolloutBuffer
-from echelon.training.vec_env import VectorEnv
-
+# Add project root to path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -29,25 +34,24 @@ from echelon import EchelonEnv, EnvConfig, WorldConfig
 from echelon.arena.glicko2 import GameResult
 from echelon.arena.league import League, LeagueEntry
 from echelon.arena.match import play_match
-from echelon.constants import PACK_SIZE
 from echelon.rl.model import ActorCriticLSTM, LSTMState
+from echelon.training import PPOConfig, PPOTrainer, RolloutBuffer, VectorEnv, evaluate_vs_heuristic
+
+# ====================================================================
+# Arena Self-Play Utilities
+# ====================================================================
 
 
 class LRUModelCache:
-    """
-    LRU cache for opponent models to prevent OOM (HIGH-10).
-
-    Evicts least-recently-used models when cache exceeds max_size.
-    """
+    """LRU cache for opponent models to prevent OOM (HIGH-10)."""
 
     def __init__(self, max_size: int = 10):
         self.max_size = max(1, max_size)
         self._cache: dict[str, ActorCriticLSTM] = {}
-        self._order: list[str] = []  # Most recently used at end
+        self._order: list[str] = []
 
     def get(self, key: str) -> ActorCriticLSTM | None:
         if key in self._cache:
-            # Move to end (most recently used)
             self._order.remove(key)
             self._order.append(key)
             return self._cache[key]
@@ -57,10 +61,9 @@ class LRUModelCache:
         if key in self._cache:
             self._order.remove(key)
         elif len(self._cache) >= self.max_size:
-            # Evict least recently used with proper GPU memory cleanup
             evict_key = self._order.pop(0)
             evicted = self._cache.pop(evict_key)
-            evicted.cpu()  # Move to CPU to free GPU memory
+            evicted.cpu()
             del evicted
         self._cache[key] = model
         self._order.append(key)
@@ -72,27 +75,35 @@ class LRUModelCache:
         return len(self._cache)
 
 
+# ====================================================================
+# Utility Functions
+# ====================================================================
+
+
 def stack_obs(obs: dict[str, np.ndarray], ids: list[str]) -> np.ndarray:
+    """Stack observations for given agent IDs into a single array."""
     return np.stack([obs[aid] for aid in ids], axis=0)
 
 
 def stack_obs_many(obs_list: list[dict[str, np.ndarray]], ids: list[str]) -> np.ndarray:
+    """Stack observations from multiple environments."""
     if not obs_list:
         raise ValueError("obs_list must be non-empty")
     return np.concatenate([stack_obs(obs, ids) for obs in obs_list], axis=0)
 
 
 def resolve_devices(device_arg: str) -> list[torch.device]:
+    """Parse device argument into list of torch devices."""
     if device_arg == "auto":
         if torch.cuda.is_available():
             return [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
         return [torch.device("cpu")]
-
     parts = [s.strip() for s in device_arg.split(",")]
     return [torch.device(p) for p in parts]
 
 
 def find_latest_checkpoint(run_dir: Path) -> Path:
+    """Find the latest checkpoint in run directory."""
     best: tuple[int, Path] | None = None
     for path in run_dir.glob("ckpt_*.pt"):
         try:
@@ -107,27 +118,20 @@ def find_latest_checkpoint(run_dir: Path) -> Path:
 
 
 def optimizer_to_device(optimizer: torch.optim.Optimizer, device: torch.device) -> None:
+    """Move optimizer state tensors to device."""
     for state in optimizer.state.values():
         for key, value in state.items():
             if isinstance(value, torch.Tensor):
                 state[key] = value.to(device)
 
 
-def set_seed(seed: int) -> None:
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
 def git_info(repo_root: Path) -> dict[str, Any]:
+    """Gather git repository provenance information."""
+
     def _run(args: list[str]) -> str | None:
         try:
             p = subprocess.run(
-                args,
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
+                args, cwd=str(repo_root), capture_output=True, text=True, timeout=2, check=False
             )
         except Exception:
             return None
@@ -155,71 +159,46 @@ def git_info(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def _parse_csv_list(value: str | None) -> list[str] | None:
-    if value is None:
-        return None
-    parts = [p.strip() for p in value.split(",")]
-    parts = [p for p in parts if p]
-    return parts or None
-
-
-def _read_wandb_run_id(run_dir: Path) -> str | None:
-    try:
-        value = (run_dir / "wandb_run_id.txt").read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    return value or None
-
-
-def _write_wandb_run_id(run_dir: Path, run_id: str) -> None:
-    (run_dir / "wandb_run_id.txt").write_text(f"{run_id}\n", encoding="utf-8")
-
-
 def push_replay(url: str, replay: dict) -> None:
+    """Push replay JSON to server."""
     if not url:
         return
     try:
-        import requests
+        import requests  # type: ignore[import-untyped]
 
         requests.post(url, json=replay, timeout=5)
     except Exception as e:
         print(f"Failed to push replay: {e}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
+# ====================================================================
+# Argument Parsing
+# ====================================================================
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description=__doc__)
+
+    # Environment config
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", type=str, default="auto", help="auto | cpu | cuda | cuda:0 ...")
-    parser.add_argument(
-        "--num-envs",
-        type=int,
-        default=1,
-        help="Number of parallel environments for rollout collection (synchronous; increases batch/memory).",
-    )
-    parser.add_argument(
-        "--packs-per-team",
-        type=int,
-        default=2,
-        help="Number of 10-mech packs (1 Heavy, 5 Med, 3 Light, 1 Scout) per team",
-    )
-    parser.add_argument("--size", type=int, default=100)
+    parser.add_argument("--device", type=str, default="auto", help="auto | cpu | cuda | cuda:0,cuda:1")
+    parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel environments")
+    parser.add_argument("--packs-per-team", type=int, default=2, help="Number of 10-mech packs per team")
+    parser.add_argument("--size", type=int, default=100, help="Map size (x/y)")
     parser.add_argument("--mode", type=str, default="full", choices=["full", "partial"])
     parser.add_argument("--dt-sim", type=float, default=0.05)
     parser.add_argument("--decision-repeat", type=int, default=5)
     parser.add_argument("--episode-seconds", type=float, default=60.0)
     parser.add_argument("--comm-dim", type=int, default=8, help="Pack-local comm message size (0 disables)")
-    parser.add_argument(
-        "--disable-target-selection", action="store_true", help="Disable focus-target action fields"
-    )
-    parser.add_argument(
-        "--disable-ewar", action="store_true", help="Disable ECM/ECCM effects (actions ignored)"
-    )
-    parser.add_argument(
-        "--disable-obs-control", action="store_true", help="Disable observation-control action fields"
-    )
-    parser.add_argument(
-        "--disable-comm", action="store_true", help="Disable pack comms (actions ignored; obs zeroed)"
-    )
+
+    # Feature toggles
+    parser.add_argument("--disable-target-selection", action="store_true")
+    parser.add_argument("--disable-ewar", action="store_true")
+    parser.add_argument("--disable-obs-control", action="store_true")
+    parser.add_argument("--disable-comm", action="store_true")
+
+    # PPO hyperparameters
     parser.add_argument("--rollout-steps", type=int, default=512)
     parser.add_argument("--updates", type=int, default=200)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -230,142 +209,64 @@ def main() -> None:
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--update-epochs", type=int, default=4)
+
+    # Evaluation
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument("--eval-episodes", type=int, default=20)
-    parser.add_argument(
-        "--eval-seeds",
-        type=str,
-        default="",
-        help="Optional comma-separated eval seeds (overrides --eval-episodes/seed schedule)",
-    )
-    parser.add_argument(
-        "--save-eval-replay",
-        action="store_true",
-        help="Save one replay JSON from each evaluation to <run-dir>/replays/",
-    )
+    parser.add_argument("--eval-seeds", type=str, default="", help="Comma-separated eval seeds")
+    parser.add_argument("--save-eval-replay", action="store_true")
+
+    # Checkpointing
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--run-dir", type=str, default="runs/train")
-    parser.add_argument(
-        "--resume", type=str, default=None, help="Checkpoint path, or 'latest' (from run-dir)"
-    )
-    parser.add_argument(
-        "--push-url", type=str, default="http://127.0.0.1:8090/push", help="URL to POST replays to"
-    )
-    parser.add_argument(
-        "--train-mode",
-        type=str,
-        default="heuristic",
-        choices=["heuristic", "arena"],
-        help="Opponent for red team during training: heuristic | arena",
-    )
-    parser.add_argument(
-        "--arena-league", type=str, default="runs/arena/league.json", help="League file (arena mode)"
-    )
-    parser.add_argument(
-        "--arena-top-k", type=int, default=20, help="Sample opponents from top-K commanders (arena mode)"
-    )
-    parser.add_argument(
-        "--arena-candidate-k", type=int, default=5, help="Plus K recent candidates (arena mode)"
-    )
-    parser.add_argument(
-        "--arena-refresh-episodes",
-        type=int,
-        default=20,
-        help="Reload league/pool every N episodes (0 disables refresh)",
-    )
-    parser.add_argument(
-        "--arena-submit",
-        action="store_true",
-        help="After training, run Glicko-2 evaluation matches and update the arena league (arena mode)",
-    )
-    parser.add_argument(
-        "--arena-submit-matches", type=int, default=10, help="Matches to play when --arena-submit"
-    )
-    parser.add_argument(
-        "--arena-submit-log", type=str, default=None, help="Optional JSON log path for --arena-submit"
-    )
+    parser.add_argument("--resume", type=str, default=None, help="Checkpoint path or 'latest'")
 
-    # Weights & Biases (W&B)
+    # Training mode
+    parser.add_argument("--push-url", type=str, default="http://127.0.0.1:8090/push")
+    parser.add_argument("--train-mode", type=str, default="heuristic", choices=["heuristic", "arena"])
+    parser.add_argument("--arena-league", type=str, default="runs/arena/league.json")
+    parser.add_argument("--arena-top-k", type=int, default=20)
+    parser.add_argument("--arena-candidate-k", type=int, default=5)
+    parser.add_argument("--arena-refresh-episodes", type=int, default=20)
+    parser.add_argument("--arena-submit", action="store_true")
+    parser.add_argument("--arena-submit-matches", type=int, default=10)
+    parser.add_argument("--arena-submit-log", type=str, default=None)
+
+    # Weights & Biases
+    parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
     parser.add_argument(
-        "--wandb", action="store_true", help="Enable W&B logging (implies --wandb-mode online)"
+        "--wandb-mode", type=str, default="disabled", choices=["disabled", "offline", "online"]
     )
-    parser.add_argument(
-        "--wandb-mode",
-        type=str,
-        default="disabled",
-        choices=["disabled", "offline", "online"],
-        help="W&B mode: disabled | offline | online",
-    )
-    parser.add_argument("--wandb-project", type=str, default=None, help="W&B project (default: echelon)")
-    parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity (user/team)")
-    parser.add_argument("--wandb-run-name", type=str, default=None, help="W&B run name")
-    parser.add_argument("--wandb-group", type=str, default=None, help="W&B group")
-    parser.add_argument("--wandb-tags", type=str, default=None, help="Comma-separated W&B tags")
-    parser.add_argument(
-        "--wandb-id",
-        type=str,
-        default=None,
-        help="W&B run id to resume (defaults to <run-dir>/wandb_run_id.txt if present)",
-    )
-    parser.add_argument(
-        "--wandb-resume",
-        type=str,
-        default="allow",
-        choices=["allow", "must", "never"],
-        help="W&B resume behavior when a run id is provided",
-    )
-    parser.add_argument(
-        "--wandb-watch",
-        type=str,
-        default="off",
-        choices=["off", "gradients", "all"],
-        help="wandb.watch setting (off|gradients|all). Warning: expensive.",
-    )
-    parser.add_argument("--wandb-watch-freq", type=int, default=500, help="wandb.watch log frequency")
-    parser.add_argument(
-        "--wandb-artifacts",
-        type=str,
-        default="best",
-        choices=["none", "best", "all"],
-        help="W&B artifacts to log: none | best | all (includes eval replays)",
-    )
+    parser.add_argument("--wandb-project", type=str, default=None)
+    parser.add_argument("--wandb-entity", type=str, default=None)
+    parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument("--wandb-group", type=str, default=None)
+    parser.add_argument("--wandb-tags", type=str, default=None, help="Comma-separated tags")
+    parser.add_argument("--wandb-id", type=str, default=None)
+    parser.add_argument("--wandb-resume", type=str, default="allow", choices=["allow", "must", "never"])
+    parser.add_argument("--wandb-watch", type=str, default="off", choices=["off", "gradients", "all"])
+    parser.add_argument("--wandb-watch-freq", type=int, default=500)
+    parser.add_argument("--wandb-artifacts", type=str, default="best", choices=["none", "best", "all"])
+
     args = parser.parse_args()
-    if args.wandb_project is not None and not args.wandb_project.strip():
-        args.wandb_project = None
-    if args.wandb_entity is not None and not args.wandb_entity.strip():
-        args.wandb_entity = None
-    if args.wandb_tags is not None and not args.wandb_tags.strip():
-        args.wandb_tags = None
-    if args.wandb_id is not None and not args.wandb_id.strip():
-        args.wandb_id = None
 
+    # Normalize W&B args
     if args.wandb and args.wandb_mode == "disabled":
         args.wandb_mode = "online"
     if args.wandb_project and args.wandb_mode == "disabled":
         args.wandb_mode = "online"
 
-    set_seed(args.seed)
+    return args
 
-    # Suppress noisy CPU-only CUDA warnings, but keep hard CUDA errors.
-    warnings.filterwarnings("ignore", message=r"CUDA initialization:.*", category=UserWarning)
 
-    devices = resolve_devices(args.device)
-    device = devices[0]  # Primary learning device
-    opponent_device = devices[1] if len(devices) > 1 else device
+# ====================================================================
+# Configuration Building
+# ====================================================================
 
-    print(f"devices={devices} cuda_available={torch.cuda.is_available()} torch={torch.__version__}")
-    print(f"learning_device={device} opponent_device={opponent_device}")
 
-    run_dir = Path(args.run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    resume_ckpt = None
-    resume_path: Path | None = None
-    if args.resume:
-        resume_path = find_latest_checkpoint(run_dir) if args.resume == "latest" else Path(args.resume)
-        resume_ckpt = torch.load(
-            resume_path, map_location="cpu", weights_only=False
-        )  # TODO: migrate to weights_only=True after adding safe globals
+def build_env_config(args: argparse.Namespace, resume_ckpt: dict | None) -> EnvConfig:
+    """Build environment configuration from args and optional resume checkpoint."""
+    if resume_ckpt is not None:
         env_cfg_dict = dict(resume_ckpt["env_cfg"])
         world = WorldConfig(**env_cfg_dict["world"])
         env_cfg = EnvConfig(
@@ -376,7 +277,6 @@ def main() -> None:
                 "record_replay": False,
             }
         )
-        print(f"resuming from {resume_path} (update={resume_ckpt.get('update')})")
     else:
         env_cfg = EnvConfig(
             world=WorldConfig(size_x=args.size, size_y=args.size, size_z=20),
@@ -389,42 +289,22 @@ def main() -> None:
             record_replay=False,
             seed=args.seed,
         )
-    # Feature toggles are safe to override even when resuming (no shape changes).
+
+    # Feature toggles (safe to override even when resuming)
     env_cfg = replace(
         env_cfg,
-        enable_target_selection=not bool(args.disable_target_selection),
-        enable_ewar=not bool(args.disable_ewar),
-        enable_obs_control=not bool(args.disable_obs_control),
-        enable_comm=not bool(args.disable_comm),
+        enable_target_selection=not args.disable_target_selection,
+        enable_ewar=not args.disable_ewar,
+        enable_obs_control=not args.disable_obs_control,
+        enable_comm=not args.disable_comm,
     )
 
-    num_envs = int(args.num_envs)
-    if num_envs < 1:
-        raise ValueError("--num-envs must be >= 1")
+    return env_cfg
 
-    print(f"Initializing {num_envs} environments (mode={args.mode}, size={args.size})...")
-    venv = VectorEnv(num_envs, env_cfg)
 
-    # Use one env instance for metadata (ID lists, dimensions)
-    temp_env = EchelonEnv(env_cfg)
-    blue_ids = temp_env.blue_ids
-    red_ids = temp_env.red_ids
-    action_dim = temp_env.ACTION_DIM
-
-    # Run provenance (best-effort; safe to run outside git as well).
-    repo_git = git_info(ROOT)
-
-    env_episode_counts = [0 for _ in range(num_envs)]
-    print("Resetting environments...")
-    next_obs_dicts = venv.reset([int(args.seed) + i * 1_000_000 for i in range(num_envs)])[0]
-    print("Environments ready.")
-
-    obs_dim = int(next(iter(next_obs_dicts[0].values())).shape[0])
-
-    model = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
-
-    # Create PPO trainer with hyperparameters from args
-    ppo_config = PPOConfig(
+def build_ppo_config(args: argparse.Namespace) -> PPOConfig:
+    """Build PPO configuration from args."""
+    return PPOConfig(
         lr=args.lr,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
@@ -435,74 +315,128 @@ def main() -> None:
         update_epochs=args.update_epochs,
         rollout_steps=args.rollout_steps,
     )
-    trainer = PPOTrainer(model, ppo_config, device)
 
-    def _env_signature(env_cfg0: EnvConfig) -> dict:
-        d = asdict(env_cfg0)
-        d.pop("seed", None)
-        d.pop("record_replay", None)
-        return d
 
-    eval_seeds: list[int] | None = None
-    if str(args.eval_seeds).strip():
-        eval_seeds = [int(s.strip()) for s in str(args.eval_seeds).split(",") if s.strip()]
+# ====================================================================
+# W&B Setup
+# ====================================================================
 
-    arena_league_path = Path(args.arena_league)
-    arena_rng = random.Random(int(args.seed) + 13_371)
-    arena_pool: list[LeagueEntry] = []
-    arena_cache = LRUModelCache(max_size=20)  # LRU cache to prevent OOM (HIGH-10)
-    arena_opponent_id: str | None = None
-    arena_opponent: ActorCriticLSTM | None = None
-    arena_lstm_state = None
-    arena_done = torch.zeros(num_envs * len(red_ids), device=opponent_device)
 
-    def _arena_refresh_pool() -> None:
-        nonlocal arena_pool
-        if not arena_league_path.exists():
-            raise FileNotFoundError(f"missing arena league: {arena_league_path}")
-        league = League.load(arena_league_path)
-        sig = _env_signature(env_cfg)
-        if league.env_signature is not None and league.env_signature != sig:
-            raise RuntimeError("training env_cfg does not match league env_signature")
-        pool = league.top_commanders(int(args.arena_top_k)) + league.recent_candidates(
-            int(args.arena_candidate_k)
-        )
-        by_id = {e.entry_id: e for e in pool}
-        arena_pool = list(by_id.values())
-        if not arena_pool:
-            raise RuntimeError("arena league has no eligible opponents (need commanders/candidates)")
+def setup_wandb(args: argparse.Namespace, run_dir: Path, env_cfg: EnvConfig, device: torch.device) -> Any:
+    """Initialize Weights & Biases logging."""
+    if args.wandb_mode == "disabled":
+        return None
 
-    def _arena_load_model(ckpt_path: str) -> ActorCriticLSTM:
-        ckpt = torch.load(
-            ckpt_path, map_location=opponent_device, weights_only=False
-        )  # TODO: migrate to weights_only=True after adding safe globals
-        opp = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(opponent_device)
-        opp.load_state_dict(ckpt["model_state"])
-        opp.eval()
-        return opp
+    try:
+        import wandb
+    except ImportError as e:
+        raise RuntimeError(
+            "W&B logging enabled but `wandb` is not installed. "
+            "Install `wandb` or disable W&B via --wandb-mode disabled."
+        ) from e
 
-    def _arena_sample_opponent(reset_hidden: bool) -> None:
-        nonlocal arena_opponent_id, arena_opponent, arena_lstm_state, arena_done
-        entry = arena_rng.choice(arena_pool)
-        arena_opponent_id = entry.entry_id
-        cached = arena_cache.get(arena_opponent_id)
-        if cached is None:
-            cached = _arena_load_model(entry.ckpt_path)
-            arena_cache.put(arena_opponent_id, cached)
-        arena_opponent = cached
-        if reset_hidden:
-            arena_lstm_state = arena_opponent.initial_state(
-                batch_size=num_envs * len(red_ids), device=opponent_device
-            )
-            arena_done = torch.ones(num_envs * len(red_ids), device=opponent_device)
+    # Read or generate run ID
+    wandb_id = None
+    if args.wandb_resume != "never":
+        wandb_id = args.wandb_id
+        if not wandb_id and (run_dir / "wandb_run_id.txt").exists():
+            wandb_id = (run_dir / "wandb_run_id.txt").read_text(encoding="utf-8").strip() or None
 
-    if args.train_mode == "arena":
-        _arena_refresh_pool()
-        _arena_sample_opponent(reset_hidden=True)
+    wandb_run = wandb.init(
+        project=args.wandb_project or os.environ.get("WANDB_PROJECT") or "echelon",
+        entity=args.wandb_entity,
+        name=args.wandb_run_name,
+        group=args.wandb_group,
+        tags=[t.strip() for t in args.wandb_tags.split(",") if t.strip()] if args.wandb_tags else None,
+        mode=args.wandb_mode,
+        id=wandb_id,
+        resume=args.wandb_resume if wandb_id else None,
+        config={
+            "args": vars(args),
+            "env_cfg": asdict(env_cfg),
+            "git": git_info(ROOT),
+            "device": str(device),
+        },
+        dir=str(run_dir),
+    )
 
+    if getattr(wandb_run, "id", None):
+        (run_dir / "wandb_run_id.txt").write_text(f"{wandb_run.id}\n", encoding="utf-8")
+
+    wandb.define_metric("train/global_step")
+    wandb.define_metric("train/*", step_metric="train/global_step")
+    wandb.define_metric("eval/*", step_metric="train/global_step")
+    wandb.define_metric("arena/*", step_metric="train/global_step")
+
+    return wandb_run
+
+
+# ====================================================================
+# Main Training Loop
+# ====================================================================
+
+
+def main() -> None:
+    args = parse_args()
+
+    # Seed and device setup
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    warnings.filterwarnings("ignore", message=r"CUDA initialization:.*", category=UserWarning)
+
+    devices = resolve_devices(args.device)
+    device = devices[0]
+    opponent_device = devices[1] if len(devices) > 1 else device
+
+    print(f"devices={devices} cuda_available={torch.cuda.is_available()} torch={torch.__version__}")
+    print(f"learning_device={device} opponent_device={opponent_device}")
+
+    run_dir = Path(args.run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resume checkpoint if requested
+    resume_ckpt = None
+    resume_path: Path | None = None
+    if args.resume:
+        resume_path = find_latest_checkpoint(run_dir) if args.resume == "latest" else Path(args.resume)
+        resume_ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
+        print(f"resuming from {resume_path} (update={resume_ckpt.get('update')})")
+
+    # Build configurations
+    env_cfg = build_env_config(args, resume_ckpt)
+    ppo_cfg = build_ppo_config(args)
+
+    # Initialize environments
+    num_envs = args.num_envs
+    if num_envs < 1:
+        raise ValueError("--num-envs must be >= 1")
+
+    print(f"Initializing {num_envs} environments (mode={args.mode}, size={args.size})...")
+    venv = VectorEnv(num_envs, env_cfg)
+
+    # Extract metadata from a temporary environment
+    temp_env = EchelonEnv(env_cfg)
+    blue_ids = temp_env.blue_ids
+    red_ids = temp_env.red_ids
+    action_dim = temp_env.ACTION_DIM
+
+    # Reset environments
+    env_episode_counts = [0] * num_envs
+    print("Resetting environments...")
+    next_obs_dicts = venv.reset([args.seed + i * 1_000_000 for i in range(num_envs)])[0]
+    print("Environments ready.")
+
+    obs_dim = int(next(iter(next_obs_dicts[0].values())).shape[0])
+
+    # Initialize model and trainer
+    model = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
+    trainer = PPOTrainer(model, ppo_cfg, device)
+
+    # Save config
     if not (run_dir / "config.json").exists():
         (run_dir / "config.json").write_text(json.dumps({"env": asdict(env_cfg)}, indent=2), encoding="utf-8")
 
+    # Load checkpoint state
     if resume_ckpt is not None:
         model.load_state_dict(resume_ckpt["model_state"])
         trainer.optimizer.load_state_dict(resume_ckpt["optimizer_state"])
@@ -512,6 +446,7 @@ def main() -> None:
         if "return_rms" in resume_ckpt:
             trainer.return_normalizer.rms.load_state_dict(resume_ckpt["return_rms"])
 
+    # Initialize training state
     batch_size_per_env = len(blue_ids)
     batch_size = batch_size_per_env * num_envs
     lstm_state = model.initial_state(batch_size=batch_size, device=device)
@@ -522,21 +457,23 @@ def main() -> None:
         global_step = int(resume_ckpt.get("global_step", 0))
         episodes = int(resume_ckpt.get("episodes", 0))
         start_update = int(resume_ckpt.get("update", 0)) + 1
-        end_update = start_update + int(args.updates) - 1
+        end_update = start_update + args.updates - 1
     else:
         global_step = 0
         episodes = 0
         start_update = 1
-        end_update = int(args.updates)
+        end_update = args.updates
 
+    # Training metrics
     start_time = time.time()
     start_global_step = global_step
     episodic_returns: list[float] = []
     episodic_lengths: list[int] = []
     episodic_outcomes: list[str] = []
-    current_ep_returns = [0.0 for _ in range(num_envs)]
-    current_ep_lens = [0 for _ in range(num_envs)]
+    current_ep_returns = [0.0] * num_envs
+    current_ep_lens = [0] * num_envs
 
+    # Setup logging
     metrics_f = (run_dir / "metrics.jsonl").open("a", encoding="utf-8")
     metrics_f.write(
         json.dumps(
@@ -546,89 +483,92 @@ def main() -> None:
                 "device": str(device),
                 "cuda_available": bool(torch.cuda.is_available()),
                 "torch": torch.__version__,
-                "git": repo_git,
+                "git": git_info(ROOT),
                 "run_dir": str(run_dir),
-                "resume_path": str(resume_path) if resume_path is not None else None,
-                "resume_update": int(resume_ckpt.get("update")) if resume_ckpt is not None else None,
+                "resume_path": str(resume_path) if resume_path else None,
+                "resume_update": int(resume_ckpt.get("update")) if resume_ckpt else None,
                 "start_update": int(start_update),
                 "end_update": int(end_update),
                 "global_step": int(global_step),
                 "episodes": int(episodes),
                 "obs_dim": int(obs_dim),
                 "action_dim": int(action_dim),
-                "env_signature": _env_signature(env_cfg),
-                "env_constants": {
-                    "PACK_SIZE": int(PACK_SIZE),
-                    "CONTACT_SLOTS": int(getattr(temp_env, "CONTACT_SLOTS", 0)),
-                    "CONTACT_DIM": int(getattr(temp_env, "CONTACT_DIM", 0)),
-                    "LOCAL_MAP_R": int(getattr(temp_env, "LOCAL_MAP_R", 0)),
-                    "LOCAL_MAP_DIM": int(getattr(temp_env, "LOCAL_MAP_DIM", 0)),
-                    "BASE_ACTION_DIM": int(getattr(temp_env, "BASE_ACTION_DIM", 0)),
-                    "TARGET_DIM": int(getattr(temp_env, "TARGET_DIM", 0)),
-                    "OBS_CTRL_DIM": int(getattr(temp_env, "OBS_CTRL_DIM", 0)),
-                    "COMM_DIM": int(getattr(temp_env, "comm_dim", 0)),
-                },
                 "args": vars(args),
                 "env": asdict(env_cfg),
-                "eval_seeds": eval_seeds,
             }
         )
         + "\n"
     )
     metrics_f.flush()
 
-    wandb_run = None
-    wandb_log_best_model = False
-    wandb_log_eval_replays = False
-    if args.wandb_mode != "disabled":
-        try:
-            import wandb  # type: ignore[import-not-found]
-        except ImportError as e:
-            raise RuntimeError(
-                "W&B logging enabled but `wandb` is not installed. "
-                "Install `wandb` or disable W&B via --wandb-mode disabled."
-            ) from e
+    wandb_run = setup_wandb(args, run_dir, env_cfg, device)
+    if wandb_run and args.wandb_watch != "off":
+        import wandb
 
-        wandb_log_best_model = args.wandb_artifacts in {"best", "all"}
-        wandb_log_eval_replays = args.wandb_artifacts == "all"
+        wandb.watch(model, log=args.wandb_watch, log_freq=args.wandb_watch_freq)
 
-        wandb_resume = None
-        wandb_id = None
-        if args.wandb_resume != "never":
-            wandb_id = args.wandb_id or _read_wandb_run_id(run_dir)
-            if wandb_id:
-                wandb_resume = args.wandb_resume
+    # Evaluation seeds
+    eval_seeds: list[int] | None = None
+    if args.eval_seeds.strip():
+        eval_seeds = [int(s.strip()) for s in args.eval_seeds.split(",") if s.strip()]
 
-        wandb_run = wandb.init(
-            project=args.wandb_project or os.environ.get("WANDB_PROJECT") or "echelon",
-            entity=args.wandb_entity,
-            name=args.wandb_run_name,
-            group=args.wandb_group,
-            tags=_parse_csv_list(args.wandb_tags),
-            mode=args.wandb_mode,
-            id=wandb_id,
-            resume=wandb_resume,
-            config={
-                "args": vars(args),
-                "env_cfg": asdict(env_cfg),
-                "git": repo_git,
-                "device": str(device),
-                "env_signature": _env_signature(env_cfg),
-            },
-            dir=str(run_dir),
-        )
+    # Arena setup
+    arena_league_path = Path(args.arena_league)
+    arena_rng = random.Random(args.seed + 13_371)
+    arena_pool: list[LeagueEntry] = []
+    arena_cache = LRUModelCache(max_size=20)
+    arena_opponent_id: str | None = None
+    arena_opponent: ActorCriticLSTM | None = None
+    arena_lstm_state = None
+    arena_done = torch.zeros(num_envs * len(red_ids), device=opponent_device)
 
-        if getattr(wandb_run, "id", None):
-            _write_wandb_run_id(run_dir, str(wandb_run.id))
+    def env_signature(cfg: EnvConfig) -> dict:
+        d = asdict(cfg)
+        d.pop("seed", None)
+        d.pop("record_replay", None)
+        return d
 
-        wandb.define_metric("train/global_step")
-        wandb.define_metric("train/*", step_metric="train/global_step")
-        wandb.define_metric("eval/*", step_metric="train/global_step")
-        wandb.define_metric("arena/*", step_metric="train/global_step")
+    def arena_refresh_pool() -> None:
+        nonlocal arena_pool
+        if not arena_league_path.exists():
+            raise FileNotFoundError(f"missing arena league: {arena_league_path}")
+        league = League.load(arena_league_path)
+        sig = env_signature(env_cfg)
+        if league.env_signature is not None and league.env_signature != sig:
+            raise RuntimeError("training env_cfg does not match league env_signature")
+        pool = league.top_commanders(args.arena_top_k) + league.recent_candidates(args.arena_candidate_k)
+        by_id = {e.entry_id: e for e in pool}
+        arena_pool = list(by_id.values())
+        if not arena_pool:
+            raise RuntimeError("arena league has no eligible opponents")
 
-        if args.wandb_watch != "off":
-            wandb.watch(model, log=args.wandb_watch, log_freq=int(args.wandb_watch_freq))
+    def arena_load_model(ckpt_path: str) -> ActorCriticLSTM:
+        ckpt = torch.load(ckpt_path, map_location=opponent_device, weights_only=False)
+        opp = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(opponent_device)
+        opp.load_state_dict(ckpt["model_state"])
+        opp.eval()
+        return opp
 
+    def arena_sample_opponent(reset_hidden: bool) -> None:
+        nonlocal arena_opponent_id, arena_opponent, arena_lstm_state, arena_done
+        entry = arena_rng.choice(arena_pool)
+        arena_opponent_id = entry.entry_id
+        cached = arena_cache.get(arena_opponent_id)
+        if cached is None:
+            cached = arena_load_model(entry.ckpt_path)
+            arena_cache.put(arena_opponent_id, cached)
+        arena_opponent = cached
+        if reset_hidden:
+            arena_lstm_state = arena_opponent.initial_state(
+                batch_size=num_envs * len(red_ids), device=opponent_device
+            )
+            arena_done = torch.ones(num_envs * len(red_ids), device=opponent_device)
+
+    if args.train_mode == "arena":
+        arena_refresh_pool()
+        arena_sample_opponent(reset_hidden=True)
+
+    # Best model tracking
     best_win_rate = -1.0
     best_mean_hp_margin = float("-inf")
     best_json_path = run_dir / "best.json"
@@ -641,6 +581,11 @@ def main() -> None:
             pass
 
     print(f"Starting {args.updates} training updates...")
+
+    # ====================================================================
+    # Training Loop
+    # ====================================================================
+
     for update in range(start_update, end_update + 1):
         # Create rollout buffer
         buffer = RolloutBuffer.create(
@@ -653,6 +598,7 @@ def main() -> None:
 
         init_state = lstm_state
 
+        # Collect rollout
         for step in range(args.rollout_steps):
             global_step += batch_size
             buffer.obs[step] = next_obs
@@ -669,28 +615,28 @@ def main() -> None:
 
             action_np = action.detach().cpu().numpy()
 
-            # Prepare action dictionaries for all envs
-            all_actions_dicts = [{} for _ in range(num_envs)]
+            # Prepare action dictionaries
+            all_actions_dicts: list[dict[str, np.ndarray]] = [{} for _ in range(num_envs)]
 
-            # (1) Blue team (learning policy)
+            # Blue team (learning policy)
             for env_idx in range(num_envs):
                 off = env_idx * batch_size_per_env
                 blue_act_slice = action_np[off : off + batch_size_per_env]
                 for i, bid in enumerate(blue_ids):
                     all_actions_dicts[env_idx][bid] = blue_act_slice[i]
 
-            # (2) Red team (opponent)
+            # Red team (opponent)
             if args.train_mode == "arena":
-                # Vectorized Arena Opponent
                 obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
                 obs_r_torch = torch.from_numpy(obs_r_many).to(opponent_device)
                 with torch.no_grad():
+                    assert arena_opponent is not None  # Initialized in arena mode
+                    assert arena_lstm_state is not None
                     act_r, _, _, _, arena_lstm_state = arena_opponent.get_action_and_value(
                         obs_r_torch, arena_lstm_state, arena_done
                     )
                 act_r_np = act_r.detach().cpu().numpy()
                 for env_idx in range(num_envs):
-                    off = env_idx * batch_size_per_env
                     for i, rid in enumerate(red_ids):
                         all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
             elif args.train_mode == "heuristic":
@@ -698,7 +644,7 @@ def main() -> None:
                 for env_idx in range(num_envs):
                     all_actions_dicts[env_idx].update(heuristic_acts_list[env_idx])
 
-            # Step all environments in parallel
+            # Step environments
             next_obs_dicts, rewards_list, terminations_list, truncations_list, _infos_list = venv.step(
                 all_actions_dicts
             )
@@ -707,14 +653,13 @@ def main() -> None:
             done_flat = np.zeros(batch_size, dtype=np.float32)
             arena_done_np = np.zeros(num_envs * len(red_ids), dtype=np.float32)
 
-            # Aggregate results and check terminations
             team_alive_list = venv.get_team_alive()
             last_outcomes = venv.get_last_outcomes()
 
             for env_idx in range(num_envs):
                 off = env_idx * batch_size_per_env
 
-                # Learning policy (blue)
+                # Learning policy rewards and dones
                 r_i = np.asarray([rewards_list[env_idx][bid] for bid in blue_ids], dtype=np.float32)
                 rewards_flat[off : off + batch_size_per_env] = r_i
                 current_ep_returns[env_idx] += float(r_i.sum())
@@ -726,14 +671,14 @@ def main() -> None:
                 )
                 done_flat[off : off + batch_size_per_env] = d_i
 
-                # Opponent policy (red)
+                # Opponent dones
                 arena_d_i = np.asarray(
                     [terminations_list[env_idx][rid] or truncations_list[env_idx][rid] for rid in red_ids],
                     dtype=np.float32,
                 )
                 arena_done_np[env_idx * len(red_ids) : (env_idx + 1) * len(red_ids)] = arena_d_i
 
-                # Check if episode is over
+                # Check episode termination
                 blue_alive = team_alive_list[env_idx]["blue"]
                 red_alive = team_alive_list[env_idx]["red"]
                 ep_over = any(truncations_list[env_idx].values()) or (not blue_alive) or (not red_alive)
@@ -752,7 +697,7 @@ def main() -> None:
                             {
                                 "type": "episode",
                                 "time": time.time(),
-                                "episode": int(episodes) + 1,
+                                "episode": episodes + 1,
                                 "env_idx": env_idx,
                                 "return": float(ep_ret),
                                 "len": int(ep_len),
@@ -771,51 +716,41 @@ def main() -> None:
                     episodes += 1
                     env_episode_counts[env_idx] += 1
 
-                    # Reset this env
+                    # Reset environment
                     reset_obs, _ = venv.reset(
-                        [int(args.seed) + env_idx * 1_000_000 + env_episode_counts[env_idx]],
-                        indices=[env_idx],
+                        [args.seed + env_idx * 1_000_000 + env_episode_counts[env_idx]], indices=[env_idx]
                     )
                     next_obs_dicts[env_idx] = reset_obs[0]
 
-                    # Ensure LSTM resets for this env (learning policy)
+                    # Reset LSTM states
                     done_flat[off : off + batch_size_per_env] = 1.0
-
-                    # Ensure LSTM resets for this env (arena opponent)
                     arena_done_np[env_idx * len(red_ids) : (env_idx + 1) * len(red_ids)] = 1.0
 
                     if args.train_mode == "arena":
-                        if (
-                            args.arena_refresh_episodes > 0
-                            and episodes % int(args.arena_refresh_episodes) == 0
-                        ):
-                            _arena_refresh_pool()
-                            _arena_sample_opponent(reset_hidden=True)
+                        if args.arena_refresh_episodes > 0 and episodes % args.arena_refresh_episodes == 0:
+                            arena_refresh_pool()
+                            arena_sample_opponent(reset_hidden=True)
                         else:
-                            # Resample opponent per episode for training diversity (CRIT-5)
-                            _arena_sample_opponent(reset_hidden=False)
+                            arena_sample_opponent(reset_hidden=False)
 
             buffer.rewards[step] = torch.from_numpy(rewards_flat).to(device)
             next_done = torch.from_numpy(done_flat).to(device)
             arena_done = torch.from_numpy(arena_done_np).to(opponent_device)
             next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
 
-        # Compute GAE and run PPO updates via trainer
+        # Compute GAE
         with torch.no_grad():
             detached_state = LSTMState(h=lstm_state.h.detach(), c=lstm_state.c.detach())
             next_value, _ = model.get_value(next_obs, detached_state, next_done)
 
         buffer.compute_gae(
-            next_value=next_value,
-            next_done=next_done,
-            gamma=args.gamma,
-            gae_lambda=args.gae_lambda,
+            next_value=next_value, next_done=next_done, gamma=args.gamma, gae_lambda=args.gae_lambda
         )
 
-        # Run PPO update
+        # PPO update
         metrics = trainer.update(buffer, init_state)
 
-        # Extract metrics for logging
+        # Extract metrics
         pg_loss = metrics["pg_loss"]
         v_loss = metrics["vf_loss"]
         entropy_loss = metrics["entropy"]
@@ -824,19 +759,15 @@ def main() -> None:
 
         sps = int((global_step - start_global_step) / max(1e-6, (time.time() - start_time)))
 
-        # Stats Aggregation
+        # Stats aggregation
         window = 20
         avg_return = float(np.mean(episodic_returns[-window:])) if episodic_returns else 0.0
         avg_len = float(np.mean(episodic_lengths[-window:])) if episodic_lengths else 0.0
 
         recent_outcomes = episodic_outcomes[-window:]
         n_out = len(recent_outcomes)
-        if n_out > 0:
-            win_rate_blue = recent_outcomes.count("blue") / n_out
-            win_rate_red = recent_outcomes.count("red") / n_out
-        else:
-            win_rate_blue = 0.0
-            win_rate_red = 0.0
+        win_rate_blue = recent_outcomes.count("blue") / n_out if n_out > 0 else 0.0
+        win_rate_red = recent_outcomes.count("red") / n_out if n_out > 0 else 0.0
 
         if update % 10 == 0 or update == start_update:
             print(
@@ -846,15 +777,16 @@ def main() -> None:
                 f"loss {loss:.3f} | sps {sps}"
             )
 
-        eval_stats = None
+        # Evaluation
+        eval_stats: dict[str, Any] | None = None
         if args.eval_every > 0 and update % args.eval_every == 0:
             if eval_seeds is not None:
                 seeds_now = list(eval_seeds)
-                seed0 = int(seeds_now[0]) if seeds_now else int(args.seed)
+                seed0 = int(seeds_now[0]) if seeds_now else args.seed
                 eval_episodes = len(seeds_now)
             else:
-                seed0 = int(args.seed + 10_000 + update * 13)
-                eval_episodes = int(args.eval_episodes)
+                seed0 = args.seed + 10_000 + update * 13
+                eval_episodes = args.eval_episodes
                 seeds_now = [seed0 + i for i in range(eval_episodes)]
 
             eval_stats_obj, replay = evaluate_vs_heuristic(
@@ -865,7 +797,6 @@ def main() -> None:
                 device=device,
                 save_replay=(bool(args.push_url) or bool(args.save_eval_replay)),
             )
-            # Convert to dict for backward compatibility with logging
             eval_stats = {
                 "episodes": eval_stats_obj.episodes,
                 "win_rate": eval_stats_obj.win_rate,
@@ -874,6 +805,7 @@ def main() -> None:
                 "seeds": seeds_now,
             }
             print(f"eval vs heuristic: {eval_stats}")
+
             if replay is not None:
                 replay["run"] = {
                     "kind": "eval_vs_heuristic",
@@ -883,8 +815,8 @@ def main() -> None:
                     "episodes": int(episodes),
                     "eval": dict(eval_stats),
                     "eval_seeds": seeds_now,
-                    "git": dict(repo_git),
-                    "env_signature": _env_signature(env_cfg),
+                    "git": dict(git_info(ROOT)),
+                    "env_signature": env_signature(env_cfg),
                 }
                 if args.save_eval_replay:
                     replay_dir = run_dir / "replays"
@@ -892,15 +824,17 @@ def main() -> None:
                     out_path = replay_dir / f"eval_update_{update:05d}_seed_{seed0}.json"
                     out_path.write_text(json.dumps(replay), encoding="utf-8")
                     print(f"saved eval replay: {out_path}")
-                    if wandb_run is not None and wandb_log_eval_replays:
+                    if wandb_run and args.wandb_artifacts == "all":
+                        import wandb
+
                         artifact = wandb.Artifact(
                             name=f"replay-{wandb_run.id}-update-{update:05d}",
                             type="replay",
                             metadata={
-                                "update": int(update),
-                                "global_step": int(global_step),
-                                "seed": int(seed0),
-                                "win_rate": float(eval_stats.get("win_rate", 0.0)),
+                                "update": update,
+                                "global_step": global_step,
+                                "seed": seed0,
+                                "win_rate": eval_stats["win_rate"],
                             },
                         )
                         artifact.add_file(str(out_path))
@@ -908,11 +842,12 @@ def main() -> None:
                 if args.push_url:
                     push_replay(args.push_url, replay)
 
+        # Best model tracking
         best_updated = False
         best_snapshot: str | None = None
         if eval_stats is not None:
-            win_rate = float(eval_stats.get("win_rate", 0.0))
-            mean_hp_margin = float(eval_stats.get("mean_hp_margin", 0.0))
+            win_rate: float = eval_stats["win_rate"]
+            mean_hp_margin: float = eval_stats["mean_hp_margin"]
             improved = (win_rate > best_win_rate + 1e-6) or (
                 abs(win_rate - best_win_rate) <= 1e-6 and mean_hp_margin > best_mean_hp_margin + 1e-6
             )
@@ -930,9 +865,8 @@ def main() -> None:
                     "env_cfg": asdict(env_cfg),
                     "args": vars(args),
                     "eval": eval_stats,
-                    # Model metadata for fast loading (HIGH-9)
-                    "obs_dim": int(obs_dim),
-                    "action_dim": int(action_dim),
+                    "obs_dim": obs_dim,
+                    "action_dim": action_dim,
                 }
                 best_pt = run_dir / "best.pt"
                 torch.save(best_ckpt, best_pt)
@@ -940,11 +874,11 @@ def main() -> None:
                 best_json_path.write_text(
                     json.dumps(
                         {
-                            "update": int(update),
-                            "global_step": int(global_step),
-                            "episodes": int(episodes),
-                            "win_rate": float(win_rate),
-                            "mean_hp_margin": float(mean_hp_margin),
+                            "update": update,
+                            "global_step": global_step,
+                            "episodes": episodes,
+                            "win_rate": win_rate,
+                            "mean_hp_margin": mean_hp_margin,
                         },
                         indent=2,
                     ),
@@ -954,19 +888,23 @@ def main() -> None:
                     f"new best: win_rate={win_rate:.3f} mean_hp_margin={mean_hp_margin:.2f} @ update {update}"
                 )
 
-                if wandb_run is not None and wandb_log_best_model:
+                if wandb_run and args.wandb_artifacts in {"best", "all"}:
+                    import wandb
+
                     artifact = wandb.Artifact(
                         name=f"model-{wandb_run.id}",
                         type="model",
                         metadata={
-                            "update": int(update),
-                            "global_step": int(global_step),
-                            **best_ckpt["eval"],
+                            "update": update,
+                            "global_step": global_step,
+                            "win_rate": win_rate,
+                            "mean_hp_margin": mean_hp_margin,
                         },
                     )
                     artifact.add_file(str(best_pt))
                     wandb_run.log_artifact(artifact, aliases=["best", f"update_{update:05d}"])
 
+        # Periodic checkpointing
         saved_ckpt: str | None = None
         if args.save_every > 0 and update % args.save_every == 0:
             ckpt = {
@@ -978,29 +916,29 @@ def main() -> None:
                 "return_rms": trainer.return_normalizer.rms.state_dict(),
                 "env_cfg": asdict(env_cfg),
                 "args": vars(args),
-                # Model metadata for fast loading (HIGH-9)
-                "obs_dim": int(obs_dim),
-                "action_dim": int(action_dim),
+                "obs_dim": obs_dim,
+                "action_dim": action_dim,
             }
             p = run_dir / f"ckpt_{update:05d}.pt"
             torch.save(ckpt, p)
             saved_ckpt = str(p)
 
+        # Write metrics
         metrics_f.write(
             json.dumps(
                 {
                     "type": "update",
                     "time": time.time(),
-                    "update": int(update),
-                    "global_step": int(global_step),
-                    "episodes": int(episodes),
-                    "avg_return_10": float(avg_return),
-                    "loss": float(loss),
-                    "pg_loss": float(pg_loss),
-                    "v_loss": float(v_loss),
-                    "entropy": float(entropy_loss),
-                    "grad_norm": float(grad_norm),
-                    "sps": int(sps),
+                    "update": update,
+                    "global_step": global_step,
+                    "episodes": episodes,
+                    "avg_return_10": avg_return,
+                    "loss": loss,
+                    "pg_loss": pg_loss,
+                    "v_loss": v_loss,
+                    "entropy": entropy_loss,
+                    "grad_norm": grad_norm,
+                    "sps": sps,
                     "eval": eval_stats,
                     "best_updated": best_updated,
                     "best_snapshot": best_snapshot,
@@ -1011,82 +949,84 @@ def main() -> None:
         )
         metrics_f.flush()
 
+        # W&B logging
         if wandb_run is not None:
+            import wandb
+
             wandb_metrics = {
-                "train/update": int(update),
-                "train/loss": float(loss),
-                "train/pg_loss": float(pg_loss),
-                "train/v_loss": float(v_loss),
-                "train/entropy": float(entropy_loss),
-                "train/grad_norm": float(grad_norm),
-                "train/sps": int(sps),
-                "train/global_step": int(global_step),
-                "train/episodes": int(episodes),
-                "train/avg_return": float(avg_return),
-                "train/avg_len": float(avg_len),
+                "train/update": update,
+                "train/loss": loss,
+                "train/pg_loss": pg_loss,
+                "train/v_loss": v_loss,
+                "train/entropy": entropy_loss,
+                "train/grad_norm": grad_norm,
+                "train/sps": sps,
+                "train/global_step": global_step,
+                "train/episodes": episodes,
+                "train/avg_return": avg_return,
+                "train/avg_len": avg_len,
                 "train/win_rate_blue": win_rate_blue,
                 "train/win_rate_red": win_rate_red,
             }
             if eval_stats:
-                wandb_metrics.update(
-                    {
-                        "eval/win_rate": float(eval_stats.get("win_rate", 0.0)),
-                        "eval/mean_hp_margin": float(eval_stats.get("mean_hp_margin", 0.0)),
-                        "eval/episodes": int(eval_stats.get("episodes", 0)),
-                    }
-                )
-            wandb_run.log(wandb_metrics, step=int(global_step))
+                wandb_metrics["eval/win_rate"] = eval_stats["win_rate"]
+                wandb_metrics["eval/mean_hp_margin"] = eval_stats["mean_hp_margin"]
+                wandb_metrics["eval/episodes"] = eval_stats["episodes"]
+            wandb_run.log(wandb_metrics, step=global_step)
+
+    # ====================================================================
+    # Arena Submission (if requested)
+    # ====================================================================
 
     if args.train_mode == "arena" and args.arena_submit:
-        # Save a snapshot of the final trained model as the tournament candidate.
+        # Save candidate checkpoint
         candidate_path = run_dir / "arena_candidate.pt"
         torch.save(
             {
-                "update": int(end_update),
-                "global_step": int(global_step),
-                "episodes": int(episodes),
+                "update": end_update,
+                "global_step": global_step,
+                "episodes": episodes,
                 "model_state": model.state_dict(),
                 "optimizer_state": trainer.optimizer.state_dict(),
                 "return_rms": trainer.return_normalizer.rms.state_dict(),
                 "env_cfg": asdict(env_cfg),
                 "args": vars(args),
-                # Model metadata for fast loading (HIGH-9)
-                "obs_dim": int(obs_dim),
-                "action_dim": int(action_dim),
+                "obs_dim": obs_dim,
+                "action_dim": action_dim,
             },
             candidate_path,
         )
 
-        # Evaluate candidate vs the league and apply one Glicko-2 rating period.
+        # Load league and validate
         league = League.load(arena_league_path)
-        sig = _env_signature(env_cfg)
+        sig = env_signature(env_cfg)
         if league.env_signature is None:
             league.env_signature = sig
         elif league.env_signature != sig:
             raise RuntimeError("training env_cfg does not match league env_signature")
 
         candidate_entry = league.upsert_checkpoint(candidate_path, kind="candidate")
-        pool = league.top_commanders(int(args.arena_top_k)) + league.recent_candidates(
-            int(args.arena_candidate_k), exclude_id=candidate_entry.entry_id
+        pool = league.top_commanders(args.arena_top_k) + league.recent_candidates(
+            args.arena_candidate_k, exclude_id=candidate_entry.entry_id
         )
         pool = [e for e in pool if e.entry_id != candidate_entry.entry_id]
         if not pool:
-            raise RuntimeError("no opponents available (need commanders/candidates in league)")
+            raise RuntimeError("no opponents available in league")
 
-        candidate_model = _arena_load_model(str(candidate_path))
+        candidate_model = arena_load_model(str(candidate_path))
         match_cfg = replace(env_cfg, record_replay=False)
 
-        matches = int(args.arena_submit_matches)
-        rng = random.Random(int(args.seed) * 1_000_000 + 54321)
+        matches = args.arena_submit_matches
+        rng = random.Random(args.seed * 1_000_000 + 54321)
         results: dict[str, list[GameResult]] = {}
         game_log: list[dict] = []
 
-        seed0 = int(args.seed) * 1_000_000 + 12345
+        seed0 = args.seed * 1_000_000 + 12345
         for i in range(matches):
             opp_entry = rng.choice(pool)
             opp_model = arena_cache.get(opp_entry.entry_id)
             if opp_model is None:
-                opp_model = _arena_load_model(opp_entry.ckpt_path)
+                opp_model = arena_load_model(opp_entry.ckpt_path)
                 arena_cache.put(opp_entry.entry_id, opp_model)
 
             candidate_as_blue = (i % 2) == 0
@@ -1096,7 +1036,7 @@ def main() -> None:
                     env_cfg=match_cfg,
                     blue_policy=candidate_model,
                     red_policy=opp_model,
-                    seed=int(match_seed),
+                    seed=match_seed,
                     device=device,
                 )
                 cand_team = "blue"
@@ -1105,7 +1045,7 @@ def main() -> None:
                     env_cfg=match_cfg,
                     blue_policy=opp_model,
                     red_policy=candidate_model,
-                    seed=int(match_seed),
+                    seed=match_seed,
                     device=device,
                 )
                 cand_team = "red"
@@ -1125,13 +1065,13 @@ def main() -> None:
 
             game_log.append(
                 {
-                    "i": int(i),
-                    "seed": int(match_seed),
+                    "i": i,
+                    "seed": match_seed,
                     "candidate_as": cand_team,
                     "opponent": opp_entry.entry_id,
                     "opponent_name": opp_entry.commander_name,
                     "winner": out.winner,
-                    "candidate_score": float(cand_score),
+                    "candidate_score": cand_score,
                     "hp": out.hp,
                 }
             )
@@ -1141,7 +1081,7 @@ def main() -> None:
             )
 
         league.apply_rating_period(results)
-        promoted = league.promote_if_topk(candidate_entry.entry_id, top_k=int(args.arena_top_k))
+        promoted = league.promote_if_topk(candidate_entry.entry_id, top_k=args.arena_top_k)
         league.save(arena_league_path)
 
         cand_post = league.entries[candidate_entry.entry_id]
@@ -1152,22 +1092,23 @@ def main() -> None:
         )
 
         if wandb_run is not None:
+            import wandb
+
             wandb_run.log(
                 {
-                    "arena/rating": float(cand_post.rating.rating),
-                    "arena/rd": float(cand_post.rating.rd),
-                    "arena/games": int(cand_post.games),
+                    "arena/rating": cand_post.rating.rating,
+                    "arena/rd": cand_post.rating.rd,
+                    "arena/games": cand_post.games,
                     "arena/promoted": int(promoted),
                 },
-                step=int(global_step),
+                step=global_step,
             )
 
         if args.arena_submit_log:
             log_path = Path(args.arena_submit_log)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(
-                json.dumps({"candidate": cand_post.as_dict(), "games": game_log}, indent=2),
-                encoding="utf-8",
+                json.dumps({"candidate": cand_post.as_dict(), "games": game_log}, indent=2), encoding="utf-8"
             )
             print(f"arena_submit wrote log: {log_path}")
 
