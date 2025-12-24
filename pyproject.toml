@@ -52,6 +52,7 @@ dev = [
   "hypothesis>=6.0",
   "mypy>=1.13",
   "pre-commit>=4.0",
+  "pytest-timeout>=2.4.0",
   "pytest>=8.0",
   "pytest-cov>=6.0",
   "ruff>=0.8",
