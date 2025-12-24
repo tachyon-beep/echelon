@@ -97,7 +97,8 @@ def evaluate_vs_heuristic(
                 device=device,
             )
 
-            if any(truncations.values()) or (not blue_alive) or (not red_alive):
+            # Episode ends on: termination (zone win), truncation (time limit), or elimination
+            if any(terminations.values()) or any(truncations.values()) or (not blue_alive) or (not red_alive):
                 outcome = env.last_outcome or {"winner": "draw", "hp": env.team_hp()}
                 winner = outcome.get("winner", "draw")
                 wins[winner] += 1
