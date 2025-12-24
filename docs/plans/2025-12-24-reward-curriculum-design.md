@@ -1,7 +1,7 @@
 # Reward Curriculum with Automatic Phase Transitions
 
 **Date:** 2025-12-24
-**Status:** Design Complete - Ready for Review
+**Status:** Approved with minor patches (Gemini review 2025-12-24)
 **Author:** Brainstorming session with Claude
 
 ## Overview
@@ -38,9 +38,11 @@ Key insight: **Win = Mission Success, not Team-vs-Team outcome.** Both teams can
 spatial_context = [
     objective_distance,      # Normalized distance to objective
     objective_bearing,       # Angle to objective (-1 to 1)
-    terrain_complexity       # LOS complexity of AO
+    terrain_complexity       # LOS complexity of AO (see note below)
 ]
 ```
+
+**Note on terrain_complexity:** Use voxel density in target zone as a cheap proxy (0.0 = open field, 1.0 = dense urban maze). Don't over-engineer a full LOS analysis for this single float.
 
 ### 1.4 Full Embedding (13 dimensions)
 
@@ -131,8 +133,8 @@ class RewardWeights:
 def get_reward_weights(self, progress: float) -> RewardWeights:
     """Smooth interpolation across training."""
 
-    # Shaping fades from 1.0 to 0.0 over first 66% of training
-    shaping_weight = max(0.0, 1.0 - progress * 1.5)
+    # Shaping fades from 1.0 to 0.0 at 75% progress (Phase 4 start)
+    shaping_weight = max(0.0, 1.0 - progress * 1.33)
 
     # Objective ramps up then slightly down
     objective_weight = min(1.0, progress * 2.0) * max(0.3, 1.0 - progress)
@@ -180,11 +182,19 @@ def evaluate_mission_success(mission: MissionSpec, outcome: MissionOutcome) -> f
 ### 4.2 Per-Verb Evaluation
 
 ```python
+def _scout_evaluator(m: MissionSpec, o: MissionOutcome) -> float:
+    """Scout mission: find enemies or confirm area clear."""
+    # Edge case: empty room - confirming 0 enemies is success
+    if o.total_enemies == 0:
+        enemy_score = 1.0  # Success! Confirmed no enemies present.
+    else:
+        enemy_score = o.enemies_detected / o.total_enemies
+
+    terrain_score = o.terrain_covered / o.total_terrain
+    return enemy_score * 0.6 + terrain_score * 0.4
+
 MISSION_EVALUATORS = {
-    MissionVerb.SCOUT: lambda m, o: (
-        o.enemies_detected / max(1, o.total_enemies) * 0.6 +
-        o.terrain_covered / o.total_terrain * 0.4
-    ),
+    MissionVerb.SCOUT: _scout_evaluator,
     MissionVerb.ASSAULT: lambda m, o: (
         float(o.objective_captured) * 0.7 +
         (1.0 - o.casualties / o.initial_strength) * 0.3
@@ -409,8 +419,18 @@ class EchelonEnv:
 
 ```python
 "mission_embedding": Box(low=0, high=1, shape=(13,))
-"status_report": Box(low=0, high=1, shape=(1,))
 ```
+
+### 9.3 Action Space Additions
+
+```python
+# Status report is an OUTPUT (agent tells commander), not an input
+"status_report": Box(low=0, high=1, shape=(1,))  # 0.0=RED, 0.5=YELLOW, 1.0=GREEN
+```
+
+**Why action space?** The agent must learn to *actively communicate* its status. If status were an observation, the agent would passively watch a meter it can't control. By making it an action, the agent learns honest reporting through experience:
+- Lie "GREEN" when pinned → Commander sends no reinforcement → death
+- Report "RED" honestly → Commander adapts → survival
 
 ## 10. File Structure
 
