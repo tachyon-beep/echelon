@@ -35,8 +35,23 @@ from echelon import EchelonEnv, EnvConfig, WorldConfig
 from echelon.arena.glicko2 import GameResult
 from echelon.arena.league import League, LeagueEntry
 from echelon.arena.match import play_match
+from echelon.constants import PACK_SIZE
 from echelon.rl.model import ActorCriticLSTM, LSTMState
 from echelon.training import PPOConfig, PPOTrainer, RolloutBuffer, VectorEnv, evaluate_vs_heuristic
+
+
+def _role_for_agent(agent_id: str) -> str:
+    """Get role name for an agent ID (e.g., 'blue_0' -> 'heavy')."""
+    idx = int(agent_id.split("_")[1]) % PACK_SIZE
+    if idx == 0:
+        return "heavy"
+    elif idx <= 2:
+        return "medium"
+    elif idx == 3:
+        return "light"
+    else:
+        return "scout"
+
 
 # ====================================================================
 # Arena Self-Play Utilities
@@ -160,16 +175,73 @@ def git_info(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def push_replay(url: str, replay: dict) -> None:
-    """Push replay JSON to server."""
+def push_replay(url: str, replay: dict, _world_cache: set[str] | None = None) -> None:
+    """Push replay JSON to server with gzip compression and world deduplication.
+
+    Uses a module-level cache to track which world hashes have been pushed this session.
+    Worlds are deduplicated by content hash - if the same world was already pushed,
+    only send a reference instead of the full ~30MB world data.
+    """
     if not url:
         return
-    try:
-        import requests  # type: ignore[import-untyped]
 
-        requests.post(url, json=replay, timeout=5)
+    import gzip
+    import hashlib
+
+    import requests  # type: ignore[import-untyped]
+
+    # Module-level cache for tracking pushed worlds
+    if _world_cache is None:
+        _world_cache = _pushed_worlds
+
+    try:
+        base_url = url.rsplit("/push", 1)[0]
+
+        # World deduplication: compute hash, push world if new, then reference it
+        world = replay.get("world")
+        if world:
+            # Compute deterministic hash matching server's algorithm
+            canonical = json.dumps(world, sort_keys=True, separators=(",", ":"))
+            world_hash = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+            # Check if world already cached on server (HEAD request)
+            if world_hash not in _world_cache:
+                try:
+                    head_resp = requests.head(f"{base_url}/worlds/{world_hash}", timeout=2)
+                    if head_resp.status_code == 200:
+                        _world_cache.add(world_hash)
+                except Exception:
+                    pass  # Server might not support HEAD, push anyway
+
+            # Push world if not cached
+            if world_hash not in _world_cache:
+                world_data = gzip.compress(json.dumps(world).encode())
+                requests.put(
+                    f"{base_url}/worlds/{world_hash}",
+                    data=world_data,
+                    headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+                    timeout=10,
+                )
+                _world_cache.add(world_hash)
+
+            # Replace world with reference in replay
+            replay = {k: v for k, v in replay.items() if k != "world"}
+            replay["world_ref"] = world_hash
+
+        # Compress and push replay
+        data = gzip.compress(json.dumps(replay).encode())
+        requests.post(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+            timeout=10,
+        )
     except Exception as e:
         print(f"Failed to push replay: {e}")
+
+
+# Track which worlds we've already pushed this session
+_pushed_worlds: set[str] = set()
 
 
 # ====================================================================
@@ -190,7 +262,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", type=str, default="full", choices=["full", "partial"])
     parser.add_argument("--dt-sim", type=float, default=0.05)
     parser.add_argument("--decision-repeat", type=int, default=5)
-    parser.add_argument("--episode-seconds", type=float, default=60.0)
+    parser.add_argument(
+        "--game-length",
+        type=int,
+        default=500,
+        help="Max rounds per game (each agent acts once per round)",
+    )
     parser.add_argument("--comm-dim", type=int, default=8, help="Pack-local comm message size (0 disables)")
 
     # Feature toggles
@@ -199,12 +276,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-obs-control", action="store_true")
     parser.add_argument("--disable-comm", action="store_true")
 
-    # PPO hyperparameters
-    parser.add_argument("--rollout-steps", type=int, default=512)
+    # Training duration (pick ONE: --games, --total-steps, or --updates)
+    parser.add_argument(
+        "--games",
+        type=int,
+        default=None,
+        help="Target completed games. Training runs until this many episodes finish. "
+        "Simplest way to specify duration - ignores PPO internals.",
+    )
     parser.add_argument("--total-steps", type=int, default=None, help="Total env steps (overrides --updates)")
     parser.add_argument(
-        "--updates", type=int, default=200, help="PPO update cycles (ignored if --total-steps set)"
+        "--updates", type=int, default=200, help="PPO update cycles (ignored if --total-steps or --games set)"
     )
+
+    # PPO hyperparameters (you probably don't need to touch these)
+    parser.add_argument("--rollout-steps", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
@@ -217,9 +303,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tbptt-chunk-length", type=int, default=0, help="TBPTT chunk length (0=auto)")
 
     # Evaluation
-    parser.add_argument("--eval-every", type=int, default=50)
-    parser.add_argument("--eval-episodes", type=int, default=20)
-    parser.add_argument("--eval-seeds", type=str, default="", help="Comma-separated eval seeds")
+    # 10 fixed eval seeds for consistent comparison across runs
+    DEFAULT_EVAL_SEEDS = "42,137,256,314,512,777,1024,1337,2048,3141"
+    parser.add_argument(
+        "--eval-after-updates",
+        type=int,
+        default=50,
+        dest="eval_every",
+        help="Run evaluation every N training updates (0 to disable)",
+    )
+    parser.add_argument("--eval-episodes", type=int, default=20, help="Games to play per evaluation")
+    parser.add_argument(
+        "--eval-seeds",
+        type=str,
+        default=DEFAULT_EVAL_SEEDS,
+        help="Comma-separated eval seeds (default: 10 fixed seeds)",
+    )
     parser.add_argument("--save-eval-replay", action="store_true")
 
     # Checkpointing
@@ -237,6 +336,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--arena-submit", action="store_true")
     parser.add_argument("--arena-submit-matches", type=int, default=10)
     parser.add_argument("--arena-submit-log", type=str, default=None)
+
+    # Opponent curriculum (heuristic mode only)
+    parser.add_argument(
+        "--opfor-weapon-start",
+        type=float,
+        default=0.2,
+        help="Initial weapon fire probability for heuristic opponent (0-1)",
+    )
+    parser.add_argument(
+        "--opfor-weapon-end",
+        type=float,
+        default=1.0,
+        help="Final weapon fire probability for heuristic opponent (0-1)",
+    )
+    parser.add_argument(
+        "--opfor-ramp-updates",
+        type=int,
+        default=0,
+        help="Updates to ramp from start to end (0 = instant full lethality)",
+    )
 
     # Weights & Biases
     parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
@@ -284,12 +403,14 @@ def build_env_config(args: argparse.Namespace, resume_ckpt: dict | None) -> EnvC
             }
         )
     else:
+        # Convert game length (rounds) to seconds: rounds * dt_sim * decision_repeat
+        max_episode_seconds = args.game_length * args.dt_sim * args.decision_repeat
         env_cfg = EnvConfig(
             world=WorldConfig(size_x=args.size, size_y=args.size, size_z=20),
             num_packs=args.packs_per_team,
             dt_sim=args.dt_sim,
             decision_repeat=args.decision_repeat,
-            max_episode_seconds=args.episode_seconds,
+            max_episode_seconds=max_episode_seconds,
             observation_mode=args.mode,
             comm_dim=args.comm_dim,
             record_replay=False,
@@ -419,8 +540,16 @@ def main() -> None:
     if num_envs < 1:
         raise ValueError("--num-envs must be >= 1")
 
+    # Determine initial weapon probability for curriculum
+    initial_weapon_prob = args.opfor_weapon_start if args.train_mode == "heuristic" else 0.5
+
     print(f"Initializing {num_envs} environments (mode={args.mode}, size={args.size})...")
-    venv = VectorEnv(num_envs, env_cfg)
+    if args.train_mode == "heuristic" and args.opfor_ramp_updates > 0:
+        print(
+            f"Opponent curriculum: weapon prob {args.opfor_weapon_start:.0%} → "
+            f"{args.opfor_weapon_end:.0%} over {args.opfor_ramp_updates} updates"
+        )
+    venv = VectorEnv(num_envs, env_cfg, initial_weapon_prob=initial_weapon_prob)
 
     # Extract metadata from a temporary environment
     temp_env = EchelonEnv(env_cfg)
@@ -461,9 +590,17 @@ def main() -> None:
     next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
     next_done = torch.zeros(batch_size, device=device)
 
-    # Compute number of updates from total_steps if specified
+    # Compute training duration from --games, --total-steps, or --updates (in priority order)
     steps_per_update = ppo_cfg.rollout_steps * num_envs * batch_size_per_env
-    if args.total_steps is not None:
+    target_games: int | None = None  # If set, stop when this many episodes complete
+
+    if args.games is not None:
+        # User specified target games - run indefinitely until target reached
+        # Set a very high upper bound; early exit happens when episodes >= target_games
+        target_games = args.games
+        num_updates = 1_000_000  # Effectively unlimited; we break when target_games reached
+        print(f"--games {args.games} → training until {args.games} games complete")
+    elif args.total_steps is not None:
         num_updates = max(1, args.total_steps // steps_per_update)
         print(
             f"--total-steps {args.total_steps:,} → {num_updates} updates ({steps_per_update:,} steps/update)"
@@ -490,6 +627,30 @@ def main() -> None:
     episodic_outcomes: list[str] = []
     current_ep_returns = [0.0] * num_envs
     current_ep_lens = [0] * num_envs
+
+    # Per-role reward tracking (for blue team only - the learning policy)
+    ROLES = ["heavy", "medium", "light", "scout"]
+    current_ep_returns_by_role: list[dict[str, float]] = [dict.fromkeys(ROLES, 0.0) for _ in range(num_envs)]
+    episodic_returns_by_role: list[dict[str, float]] = []  # list of per-episode {role: total}
+
+    # Per-component reward tracking (aggregate across all blue agents)
+    COMPONENTS = ["approach", "zone", "damage", "kill", "assist", "death", "terminal"]
+    current_ep_components: list[dict[str, float]] = [dict.fromkeys(COMPONENTS, 0.0) for _ in range(num_envs)]
+    episodic_components: list[dict[str, float]] = []  # list of per-episode {component: total}
+
+    # Per-role action tracking (activation counts for weapon slots)
+    # Action indices: 4=PRIMARY, 5=VENT, 6=SECONDARY, 7=TERTIARY, 8=SPECIAL
+    ACTION_SLOTS = ["primary", "vent", "secondary", "tertiary", "special"]
+    SLOT_INDICES = [4, 5, 6, 7, 8]  # Corresponding action indices
+    # Track activation count and step count per role per slot
+    current_ep_actions: list[dict[str, dict[str, int]]] = [
+        {role: dict.fromkeys(ACTION_SLOTS, 0) for role in ROLES} for _ in range(num_envs)
+    ]
+    current_ep_action_steps: list[dict[str, int]] = [
+        dict.fromkeys(ROLES, 0)
+        for _ in range(num_envs)  # Steps per role
+    ]
+    episodic_actions: list[dict[str, dict[str, float]]] = []  # Per-episode activation rates
 
     # Setup logging
     metrics_f = (run_dir / "metrics.jsonl").open("a", encoding="utf-8")
@@ -598,13 +759,28 @@ def main() -> None:
         except (ValueError, TypeError):
             pass
 
-    print(f"Starting {num_updates} training updates...")
+    if target_games is not None:
+        print(f"Training until {target_games} games complete...")
+    else:
+        print(f"Starting {num_updates} training updates...")
 
     # ====================================================================
     # Training Loop
     # ====================================================================
 
     for update in range(start_update, end_update + 1):
+        episodes_at_update_start = episodes
+
+        # Update opponent curriculum (heuristic mode only)
+        if args.train_mode == "heuristic" and args.opfor_ramp_updates > 0:
+            progress = min(1.0, (update - 1) / args.opfor_ramp_updates)
+            current_weapon_prob = args.opfor_weapon_start + progress * (
+                args.opfor_weapon_end - args.opfor_weapon_start
+            )
+            venv.set_heuristic_weapon_prob(current_weapon_prob)
+        else:
+            current_weapon_prob = args.opfor_weapon_end if args.train_mode == "heuristic" else 1.0
+
         # Create rollout buffer
         buffer = RolloutBuffer.create(
             num_steps=args.rollout_steps,
@@ -642,6 +818,13 @@ def main() -> None:
                 blue_act_slice = action_np[off : off + batch_size_per_env]
                 for i, bid in enumerate(blue_ids):
                     all_actions_dicts[env_idx][bid] = blue_act_slice[i]
+                    # Track action activations per role
+                    role = _role_for_agent(bid)
+                    act = blue_act_slice[i]
+                    for slot_name, slot_idx in zip(ACTION_SLOTS, SLOT_INDICES, strict=True):
+                        if act[slot_idx] > 0:  # Positive value = activation
+                            current_ep_actions[env_idx][role][slot_name] += 1
+                    current_ep_action_steps[env_idx][role] += 1
 
             # Red team (opponent)
             if args.train_mode == "arena":
@@ -663,7 +846,7 @@ def main() -> None:
                     all_actions_dicts[env_idx].update(heuristic_acts_list[env_idx])
 
             # Step environments
-            next_obs_dicts, rewards_list, terminations_list, truncations_list, _infos_list = venv.step(
+            next_obs_dicts, rewards_list, terminations_list, truncations_list, infos_list = venv.step(
                 all_actions_dicts
             )
 
@@ -683,6 +866,18 @@ def main() -> None:
                 current_ep_returns[env_idx] += float(r_i.sum())
                 current_ep_lens[env_idx] += 1
 
+                # Per-role reward accumulation (blue team only)
+                for bid in blue_ids:
+                    role = _role_for_agent(bid)
+                    current_ep_returns_by_role[env_idx][role] += float(rewards_list[env_idx][bid])
+
+                # Per-component reward accumulation
+                env_infos = infos_list[env_idx]
+                for bid in blue_ids:
+                    rc = env_infos.get(bid, {}).get("reward_components", {})
+                    for comp in COMPONENTS:
+                        current_ep_components[env_idx][comp] += float(rc.get(comp, 0.0))
+
                 d_i = np.asarray(
                     [terminations_list[env_idx][bid] or truncations_list[env_idx][bid] for bid in blue_ids],
                     dtype=np.float32,
@@ -697,9 +892,14 @@ def main() -> None:
                 arena_done_np[env_idx * len(red_ids) : (env_idx + 1) * len(red_ids)] = arena_d_i
 
                 # Check episode termination
+                # NOTE: Zone wins set terminations=True (objective achieved).
+                #       Time limits set truncations=True (time ran out).
+                #       Eliminations are detected via team_alive.
                 blue_alive = team_alive_list[env_idx]["blue"]
                 red_alive = team_alive_list[env_idx]["red"]
-                ep_over = any(truncations_list[env_idx].values()) or (not blue_alive) or (not red_alive)
+                has_termination = any(terminations_list[env_idx].values())
+                has_truncation = any(truncations_list[env_idx].values())
+                ep_over = has_termination or has_truncation or (not blue_alive) or (not red_alive)
 
                 if ep_over:
                     ep_ret = float(current_ep_returns[env_idx])
@@ -731,6 +931,27 @@ def main() -> None:
 
                     current_ep_returns[env_idx] = 0.0
                     current_ep_lens[env_idx] = 0
+
+                    # Store and reset per-role/component stats
+                    episodic_returns_by_role.append(dict(current_ep_returns_by_role[env_idx]))
+                    episodic_components.append(dict(current_ep_components[env_idx]))
+                    current_ep_returns_by_role[env_idx] = dict.fromkeys(ROLES, 0.0)
+                    current_ep_components[env_idx] = dict.fromkeys(COMPONENTS, 0.0)
+
+                    # Store action activation rates per role and reset
+                    ep_action_rates: dict[str, dict[str, float]] = {}
+                    for role in ROLES:
+                        steps = current_ep_action_steps[env_idx][role]
+                        if steps > 0:
+                            ep_action_rates[role] = {
+                                slot: current_ep_actions[env_idx][role][slot] / steps for slot in ACTION_SLOTS
+                            }
+                        else:
+                            ep_action_rates[role] = dict.fromkeys(ACTION_SLOTS, 0.0)
+                    episodic_actions.append(ep_action_rates)
+                    current_ep_actions[env_idx] = {role: dict.fromkeys(ACTION_SLOTS, 0) for role in ROLES}
+                    current_ep_action_steps[env_idx] = dict.fromkeys(ROLES, 0)
+
                     episodes += 1
                     env_episode_counts[env_idx] += 1
 
@@ -787,12 +1008,76 @@ def main() -> None:
         win_rate_blue = recent_outcomes.count("blue") / n_out if n_out > 0 else 0.0
         win_rate_red = recent_outcomes.count("red") / n_out if n_out > 0 else 0.0
 
+        # Per-role average rewards (from recent episodes)
+        recent_roles = episodic_returns_by_role[-window:]
+        avg_by_role: dict[str, float] = dict.fromkeys(ROLES, 0.0)
+        if recent_roles:
+            for role in ROLES:
+                avg_by_role[role] = float(np.mean([ep[role] for ep in recent_roles]))
+
+        # Per-component average rewards (from recent episodes)
+        recent_comps = episodic_components[-window:]
+        avg_by_comp: dict[str, float] = dict.fromkeys(COMPONENTS, 0.0)
+        if recent_comps:
+            for c in COMPONENTS:
+                avg_by_comp[c] = float(np.mean([ep[c] for ep in recent_comps]))
+
+        # Compute reward component percentages (of total absolute reward)
+        total_abs = sum(abs(v) for v in avg_by_comp.values())
+        comp_pct: dict[str, float] = {}
+        if total_abs > 1e-6:
+            for c in COMPONENTS:
+                comp_pct[c] = 100.0 * abs(avg_by_comp[c]) / total_abs
+        else:
+            comp_pct = dict.fromkeys(COMPONENTS, 0.0)
+
+        # Per-role action activation rates (from recent episodes)
+        recent_actions = episodic_actions[-window:]
+        avg_actions_by_role: dict[str, dict[str, float]] = {
+            role: dict.fromkeys(ACTION_SLOTS, 0.0) for role in ROLES
+        }
+        if recent_actions:
+            for role in ROLES:
+                for slot in ACTION_SLOTS:
+                    vals = [ep.get(role, {}).get(slot, 0.0) for ep in recent_actions]
+                    avg_actions_by_role[role][slot] = float(np.mean(vals)) if vals else 0.0
+
+        # Print primary line
+        opfor_str = f" | opfor {current_weapon_prob:.0%}" if args.train_mode == "heuristic" else ""
+        episodes_this_update = episodes - episodes_at_update_start
+        episodes_str = f"{episodes} (+{episodes_this_update})" if episodes_this_update > 0 else str(episodes)
         print(
-            f"update {update:05d} | steps {global_step} | episodes {episodes} | "
+            f"update {update:05d} | steps {global_step} | games {episodes_str} | "
             f"ret {avg_return:.1f} | len {avg_len:.1f} | "
             f"win_blue {win_rate_blue:.2f} | win_red {win_rate_red:.2f} | "
-            f"loss {loss:.3f} | sps {sps}"
+            f"loss {loss:.3f} | sps {sps}{opfor_str}"
         )
+
+        # Print per-role rewards (compact)
+        role_str = " | ".join([f"{r[0].upper()}:{avg_by_role[r]:.2f}" for r in ROLES])
+        print(f"         roles: {role_str}")
+
+        # Print reward component breakdown with percentages
+        comp_parts = []
+        for c in COMPONENTS:
+            if abs(avg_by_comp[c]) > 1e-6 or comp_pct[c] > 1.0:
+                comp_parts.append(f"{c[:4]}:{avg_by_comp[c]:.3f}({comp_pct[c]:.0f}%)")
+        if comp_parts:
+            print(f"         comps: {' | '.join(comp_parts)}")
+
+        # Print per-role action activation rates (compact: role -> primary/secondary/tertiary)
+        # Skip vent/special as they're universal and less interesting
+        if recent_actions:
+            action_parts = []
+            for role in ROLES:
+                rates = avg_actions_by_role[role]
+                role_char = role[0].upper()
+                # Show prim/sec/tert as percentages (0-100%)
+                prim_pct = rates["primary"] * 100
+                sec_pct = rates["secondary"] * 100
+                tert_pct = rates["tertiary"] * 100
+                action_parts.append(f"{role_char}:p{prim_pct:.0f}/s{sec_pct:.0f}/t{tert_pct:.0f}")
+            print(f"       actions: {' | '.join(action_parts)}")
 
         # Evaluation
         eval_stats: dict[str, Any] | None = None
@@ -806,6 +1091,7 @@ def main() -> None:
                 eval_episodes = args.eval_episodes
                 seeds_now = [seed0 + i for i in range(eval_episodes)]
 
+            print(f"running eval ({eval_episodes} episodes)...", flush=True)
             eval_stats_obj, replay = evaluate_vs_heuristic(
                 model=model,
                 env_cfg=env_cfg,
@@ -985,11 +1271,30 @@ def main() -> None:
                 "train/win_rate_blue": win_rate_blue,
                 "train/win_rate_red": win_rate_red,
             }
+            # Add per-role rewards
+            for role in ROLES:
+                wandb_metrics[f"train/reward_{role}"] = avg_by_role[role]
+            # Add per-component rewards and percentages
+            for c in COMPONENTS:
+                wandb_metrics[f"reward/{c}"] = avg_by_comp[c]
+                wandb_metrics[f"reward_pct/{c}"] = comp_pct[c]
+            # Add per-role action activation rates
+            for role in ROLES:
+                for slot in ACTION_SLOTS:
+                    wandb_metrics[f"actions/{role}/{slot}"] = avg_actions_by_role[role][slot]
+            # Add opponent curriculum metrics
+            if args.train_mode == "heuristic":
+                wandb_metrics["curriculum/opfor_weapon_prob"] = current_weapon_prob
             if eval_stats:
                 wandb_metrics["eval/win_rate"] = eval_stats["win_rate"]
                 wandb_metrics["eval/mean_hp_margin"] = eval_stats["mean_hp_margin"]
                 wandb_metrics["eval/episodes"] = eval_stats["episodes"]
             wandb_run.log(wandb_metrics, step=global_step)
+
+        # Early exit if target games reached
+        if target_games is not None and episodes >= target_games:
+            print(f"\n✓ Target reached: {episodes} games completed (target: {target_games})")
+            break
 
     # ====================================================================
     # Arena Submission (if requested)
@@ -1129,6 +1434,8 @@ def main() -> None:
             )
             print(f"arena_submit wrote log: {log_path}")
 
+    # Cleanup
+    venv.close()  # Properly shut down worker processes
     metrics_f.close()
     if wandb_run is not None:
         wandb_run.finish()
