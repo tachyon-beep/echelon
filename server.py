@@ -104,6 +104,10 @@ class SSEClient:
 
     def cancel(self) -> None:
         self._cancelled = True
+        # Put poison pill to wake up blocked queue.get()
+        # If queue full, client will process something anyway and see _cancelled flag
+        with suppress(asyncio.QueueFull):
+            self.queue.put_nowait((-1, "_shutdown", ""))
 
     @property
     def is_cancelled(self) -> bool:
@@ -432,6 +436,9 @@ async def sse_event_generator(client: SSEClient):
                 event_id, event_type, data = await asyncio.wait_for(
                     client.queue.get(), timeout=settings.SSE_KEEPALIVE_S
                 )
+                # Check for shutdown poison pill
+                if event_type == "_shutdown":
+                    break
                 yield f"id: {event_id}\nevent: {event_type}\ndata: {data}\n\n"
                 client.last_event_id = event_id
             except TimeoutError:
