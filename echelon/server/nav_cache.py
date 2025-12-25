@@ -32,35 +32,36 @@ class NavGraphCache:
         world_hash: str,
         world_data: dict[str, Any],
     ) -> NavGraph:
-        """Get cached NavGraph or build it."""
-        # Fast path: already cached
+        """Get cached NavGraph or build it. Deduplicates concurrent builds."""
+        # Check if already cached
         async with self._lock:
             if world_hash in self._cache:
                 self._cache.move_to_end(world_hash)
                 return self._cache[world_hash]
 
-            # Check if another task is building
+            # Check if another task is already building
             if world_hash in self._building:
                 event = self._building[world_hash]
+                is_builder = False
             else:
-                # We'll build it - create event for others to wait on
                 event = asyncio.Event()
                 self._building[world_hash] = event
+                is_builder = True
 
         # If we're not the builder, wait for the builder to finish
-        if world_hash in self._building and self._building[world_hash] != event:
-            await self._building[world_hash].wait()
+        if not is_builder:
+            await event.wait()
             async with self._lock:
-                # After waiting, graph should be cached
                 if world_hash in self._cache:
                     self._cache.move_to_end(world_hash)
                     return self._cache[world_hash]
-                # If still not cached after wait, fall through to build ourselves
-                # (This shouldn't happen, but handle it gracefully)
+                # If not in cache after wait, builder must have failed
+                # Fall through to build ourselves (rare recovery path)
+                event = asyncio.Event()
+                self._building[world_hash] = event
 
-        # We are the builder
+        # We're the builder - build outside lock
         try:
-            # Build outside lock (expensive)
             graph = await self._build_graph(world_data)
 
             async with self._lock:
@@ -71,9 +72,8 @@ class NavGraphCache:
                 return graph
         finally:
             async with self._lock:
-                # Signal other waiters and clean up
                 self._building.pop(world_hash, None)
-                event.set()
+            event.set()
 
     async def _build_graph(self, world_data: dict[str, Any]) -> NavGraph:
         """Build NavGraph in thread pool."""
