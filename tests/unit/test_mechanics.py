@@ -70,12 +70,13 @@ def test_paint_lock_is_pack_scoped(make_mech):
     sim = Sim(world, 0.05, np.random.default_rng(0))
 
     heavy = make_mech("blue_0", "blue", [5.0, 10.0, 1.0], "heavy")
-    painter_other_pack = make_mech("blue_10", "blue", [6.0, 10.0, 1.0], "light")
+    # Use blue_11 to be in a different pack (PACK_SIZE=11, so 11/11=1 vs 0/11=0)
+    painter_other_pack = make_mech("blue_11", "blue", [6.0, 10.0, 1.0], "light")
     enemy = make_mech("red_0", "red", [15.0, 10.0, 1.0], "medium")
     enemy.painted_remaining = 5.0
     enemy.last_painter_id = painter_other_pack.mech_id
 
-    sim.reset({"blue_0": heavy, "blue_10": painter_other_pack, "red_0": enemy})
+    sim.reset({"blue_0": heavy, "blue_11": painter_other_pack, "red_0": enemy})
 
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
     fire_action[ActionIndex.SECONDARY] = 1.0
