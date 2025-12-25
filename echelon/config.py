@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -70,7 +70,7 @@ FLAMER = WeaponSpec(
 
 MISSILE = WeaponSpec(
     name="missile",
-    range_vox=35.0,
+    range_vox=50.0,  # Long range ONLY with paint lock from teammate
     damage=40.0,
     stability_damage=15.0,
     heat=45.0,
@@ -81,6 +81,9 @@ MISSILE = WeaponSpec(
     splash_rad_vox=2.5,
     splash_dmg_scale=0.5,
 )
+
+# Onboard painter range for missiles without external paint lock
+MISSILE_ONBOARD_RANGE_VOX = 12.0
 
 SMOKE = WeaponSpec(
     name="smoke",
@@ -97,7 +100,7 @@ SMOKE = WeaponSpec(
 
 GAUSS = WeaponSpec(
     name="gauss",
-    range_vox=60.0,
+    range_vox=20.0,  # Was 60 - heavy sniper but not cross-map
     damage=50.0,
     stability_damage=60.0,  # Huge impact
     heat=15.0,
@@ -111,7 +114,7 @@ GAUSS = WeaponSpec(
 
 AUTOCANNON = WeaponSpec(
     name="autocannon",
-    range_vox=20.0,
+    range_vox=12.0,  # Was 20 - medium range suppression
     damage=8.0,
     stability_damage=5.0,
     heat=6.0,
@@ -124,7 +127,7 @@ AUTOCANNON = WeaponSpec(
 
 PAINTER = WeaponSpec(
     name="painter",
-    range_vox=15.0,
+    range_vox=10.0,  # Was 15 - scout needs to get close
     damage=0.0,
     stability_damage=0.0,
     heat=5.0,
@@ -167,7 +170,7 @@ WATER_SPEED_MULT = 0.6
 
 @dataclass(frozen=True)
 class EnvConfig:
-    world: WorldConfig = WorldConfig()
+    world: WorldConfig = field(default_factory=WorldConfig)
     num_packs: int = 1
     dt_sim: float = 0.05
     decision_repeat: int = 5

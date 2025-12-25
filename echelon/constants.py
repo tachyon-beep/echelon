@@ -4,8 +4,9 @@ from __future__ import annotations
 # Unit Composition
 # ==============================================================================
 
-# A "pack" is the standard deployed unit: 10 mechs (1 Heavy, 5 Medium, 3 Light, 1 Scout).
-PACK_SIZE = 10
+# A "pack" is the standard deployed unit: 5 mechs (1 Heavy, 2 Medium, 1 Light, 1 Scout).
+# Two packs form a squad (10 mechs) with a squad leader who can mix/match composition.
+PACK_SIZE = 5
 
 # ==============================================================================
 # Physics Constants

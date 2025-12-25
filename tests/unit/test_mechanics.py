@@ -226,7 +226,7 @@ def test_pack_comm_is_pack_scoped():
 
     sender = "blue_0"
     same_pack = "blue_1"
-    other_pack = "blue_10"
+    other_pack = f"blue_{PACK_SIZE}"  # First agent in second pack
 
     msg = np.array([0.25, -0.5, 0.9], dtype=np.float32)
     a_sender = np.zeros(env.ACTION_DIM, dtype=np.float32)
@@ -292,7 +292,7 @@ def test_partial_visibility_is_pack_scoped():
 
     viewer_id = "blue_0"
     packmate_id = "blue_1"
-    other_pack_id = "blue_10"
+    other_pack_id = f"blue_{PACK_SIZE}"  # First agent in second pack
 
     viewer = env.sim.mechs[viewer_id]
     packmate = env.sim.mechs[packmate_id]
@@ -331,7 +331,7 @@ def test_partial_visibility_is_pack_scoped():
 def test_topk_contact_quota_and_repurpose():
     cfg = EnvConfig(
         world=WorldConfig(size_x=40, size_y=40, size_z=20, obstacle_fill=0.0, ensure_connectivity=False),
-        num_packs=1,
+        num_packs=2,  # Need enough agents for contact quota test
         observation_mode="full",
         comm_dim=0,
         seed=0,

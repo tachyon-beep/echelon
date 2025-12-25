@@ -230,6 +230,10 @@ class TestRewardGradients:
         assert W_DAMAGE > 0, "Damage reward weight should be positive"
 
 
+@pytest.mark.skip(
+    reason="Terminal rewards (W_WIN/W_LOSE) were removed - they dominated signal (98%) "
+    "and didn't provide gradient information. Mission success is now shaped via zone rewards."
+)
 class TestTerminalRewards:
     """Verify terminal reward distribution."""
 

@@ -28,6 +28,7 @@ from ..config import (
     LAVA_DMG_PER_S,
     LAVA_HEAT_PER_S,
     MISSILE,
+    MISSILE_ONBOARD_RANGE_VOX,
     PAINT_LOCK_MIN_QUALITY,
     PAINTER,
     SENSOR_QUALITY_MAX,
@@ -750,17 +751,25 @@ class Sim:
         if shooter.missile_cooldown > 0.0:
             return []
 
-        def _lock_type(target: MechState) -> str | None:
-            if self.has_los(shooter.pos, target.pos):
-                return "los"
-            if target.painted_remaining > 0.0 and target.last_painter_id:
+        def _lock_type_and_range(target: MechState, dist: float) -> tuple[str, float] | None:
+            """Return (lock_type, effective_range) or None if no valid lock.
+
+            Missiles have two range tiers:
+            - Paint lock (teammate painted target): MISSILE.range_vox (50)
+            - LOS lock (onboard painter): MISSILE_ONBOARD_RANGE_VOX (12)
+            """
+            # Check paint lock first (longer range)
+            if target.painted_remaining > 0.0 and target.last_painter_id and dist <= MISSILE.range_vox:
                 painter = self.mechs.get(target.last_painter_id)
                 if (
                     painter is not None
                     and _same_pack(painter, shooter)
                     and self._sensor_quality(shooter) >= PAINT_LOCK_MIN_QUALITY
                 ):
-                    return "paint"
+                    return ("paint", MISSILE.range_vox)
+            # Check LOS lock (shorter range - onboard painter)
+            if dist <= MISSILE_ONBOARD_RANGE_VOX and self.has_los(shooter.pos, target.pos):
+                return ("los", MISSILE_ONBOARD_RANGE_VOX)
             return None
 
         focus: MechState | None = None
@@ -773,31 +782,31 @@ class Sim:
         if focus is not None:
             delta = focus.pos - shooter.pos
             dist = float(np.linalg.norm(delta))
-            if dist <= MISSILE.range_vox:
-                yaw_delta = _angle_between_yaw(shooter.yaw, delta[:2])
-                if yaw_delta <= math.radians(MISSILE.arc_deg * 0.5):
-                    lt = _lock_type(focus)
-                    if lt is not None:
-                        best = (dist, focus, lt)
+            yaw_delta = _angle_between_yaw(shooter.yaw, delta[:2])
+            if yaw_delta <= math.radians(MISSILE.arc_deg * 0.5):
+                lock_info = _lock_type_and_range(focus, dist)
+                if lock_info is not None:
+                    best = (dist, focus, lock_info[0])
 
         # HIGH-12: Use spatial grid to query only nearby enemies instead of all mechs
+        # Query at max possible range (paint lock range)
         for target in self.enemies_in_range(shooter, MISSILE.range_vox):
             if best is not None and target is focus:
                 continue
             delta = target.pos - shooter.pos
             dist = float(np.linalg.norm(delta))
 
-            # Lock check: Needs LOS OR Painted
+            # Lock check: Needs LOS (within 12 vox) OR Painted (within 50 vox)
             yaw_delta = _angle_between_yaw(shooter.yaw, delta[:2])
             if yaw_delta > math.radians(MISSILE.arc_deg * 0.5):
                 continue
 
-            lt = _lock_type(target)
-            if lt is None:
+            lock_info = _lock_type_and_range(target, dist)
+            if lock_info is None:
                 continue
 
             if best is None or dist < best[0]:
-                best = (dist, target, lt)
+                best = (dist, target, lock_info[0])
 
         if best is None:
             return []
