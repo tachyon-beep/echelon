@@ -2,17 +2,116 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Echelon Replay Viewer</title>
+    <title>Echelon Live</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #111; color: #eee; font-family: sans-serif; }
-        #ui { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 5px; }
-        #controls { margin-top: 10px; }
-        input[type="range"] { width: 300px; }
-        button { cursor: pointer; padding: 5px 10px; background: #333; color: #fff; border: 1px solid #555; }
+        body { margin: 0; overflow: hidden; background: #111; color: #eee; font-family: monospace; }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 100;
+            background: rgba(0,0,0,0.85);
+            padding: 12px;
+            border-radius: 6px;
+            border: 1px solid #333;
+            min-width: 300px;
+        }
+        #header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #444;
+        }
+        #title {
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #0ff;
+            letter-spacing: 1px;
+        }
+        #connectionStatus {
+            font-size: 0.85em;
+            padding: 3px 8px;
+            border-radius: 3px;
+        }
+        #connectionStatus.connected {
+            background: #0a4;
+            color: #0f0;
+        }
+        #connectionStatus.connecting {
+            background: #640;
+            color: #fa0;
+        }
+        #connectionStatus.disconnected {
+            background: #400;
+            color: #f44;
+        }
+        #controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        button {
+            cursor: pointer;
+            padding: 6px 12px;
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
         button:hover { background: #444; }
-        #stats { margin-top: 5px; font-size: 0.9em; color: #aaa; }
+        button:active { background: #222; }
+        #timeSlider {
+            flex: 1;
+            min-width: 200px;
+        }
+        #timeDisplay {
+            font-size: 0.9em;
+            color: #aaa;
+            min-width: 100px;
+        }
+        #speedSelect {
+            padding: 4px 8px;
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        #toggles {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        #progress {
+            padding: 8px;
+            background: rgba(0,50,100,0.3);
+            border-radius: 4px;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+        #progressBar {
+            width: 100%;
+            height: 4px;
+            margin-top: 4px;
+        }
+        #infoPanel {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #444;
+            font-size: 0.85em;
+            line-height: 1.4;
+        }
+        #infoPanel strong { color: #0ff; }
+        .info-row { display: flex; justify-content: space-between; }
+        .info-label { color: #999; }
+        .info-value { color: #fff; font-weight: bold; }
     </style>
-    <!-- Import Three.js -->
     <script type="importmap">
         {
             "imports": {
@@ -24,37 +123,68 @@
 </head>
 <body>
     <div id="ui">
-        <h3>Echelon Replay Viewer <span id="connectionIndicator" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f00;margin-left:8px;vertical-align:middle;" title="Stream: disconnected"></span></h3>
-        <div style="margin-bottom: 10px;">
-            <strong>Local:</strong> <input type="file" id="fileInput" accept=".json">
+        <div id="header">
+            <span id="title">ECHELON LIVE</span>
+            <span id="connectionStatus" class="disconnected">● Disconnected</span>
         </div>
-        <div style="margin-bottom: 10px;">
-            <strong>Server:</strong>
-            <select id="serverFileList">
-                <option value="">-- Select a Replay --</option>
-            </select>
-            <button id="refreshBtn">↻</button>
-            <button id="loadServerBtn">Load</button>
-        </div>
-        <div id="controls" style="display:none;">
+        <div id="controls">
             <button id="playPause">Play</button>
+            <button id="stepBack">◀◀</button>
+            <button id="stepForward">▶▶</button>
             <input type="range" id="timeSlider" min="0" max="100" step="0.1" value="0">
-            <span id="timeDisplay">0.0s</span>
-            <button id="navToggle">Nav</button>
-            <button id="pathToggle">Path</button>
-            <div id="stats"></div>
+            <span id="timeDisplay">0.0s / 0.0s</span>
+            <select id="speedSelect">
+                <option value="0.5">0.5x</option>
+                <option value="1" selected>1x</option>
+                <option value="2">2x</option>
+            </select>
         </div>
-        <div id="infoPanel" style="margin-top: 10px; border-top: 1px solid #555; padding-top: 5px; font-size: 0.9em; display: none;">
+        <div id="toggles">
+            <button id="navToggle">Nav Graph</button>
+            <button id="pathToggle">Paths</button>
+        </div>
+        <div id="progress" style="display:none;">
+            Loading: <span id="progressText">0/0</span>
+            <progress id="progressBar" value="0" max="100"></progress>
+        </div>
+        <div id="infoPanel" style="display:none;">
             <strong>SELECTED:</strong> <span id="selId">None</span><br>
-            Class: <span id="selClass">-</span><br>
-            HP: <span id="selHp">-</span> / <span id="selMaxHp">-</span><br>
-            Heat: <span id="selHeat">-</span> / <span id="selHeatCap">-</span><br>
-            Stab: <span id="selStab">-</span> / <span id="selStabMax">-</span><br>
-            Legged: <span id="selLegged">-</span><br>
-            Suppressed: <span id="selSuppressed">-</span><br>
-            EWAR: <span id="selEwar">-</span><br>
-            AMS CD: <span id="selAms">-</span><br>
-            State: <span id="selState">-</span>
+            <div class="info-row">
+                <span class="info-label">Class:</span>
+                <span class="info-value" id="selClass">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">HP:</span>
+                <span class="info-value"><span id="selHp">-</span> / <span id="selMaxHp">-</span></span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Heat:</span>
+                <span class="info-value"><span id="selHeat">-</span> / <span id="selHeatCap">-</span></span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Stability:</span>
+                <span class="info-value"><span id="selStab">-</span> / <span id="selStabMax">-</span></span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Legged:</span>
+                <span class="info-value" id="selLegged">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Suppressed:</span>
+                <span class="info-value" id="selSuppressed">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">EWAR:</span>
+                <span class="info-value" id="selEwar">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">AMS CD:</span>
+                <span class="info-value" id="selAms">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">State:</span>
+                <span class="info-value" id="selState">-</span>
+            </div>
         </div>
     </div>
 
@@ -62,6 +192,7 @@
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+        // Scene
         let scene, camera, renderer, controls;
         let replayData = null;
         let isPlaying = false;
@@ -71,56 +202,407 @@
         let lastFrameTime = 0;
 
         // Objects
-        let mechMeshes = {}; // {id: mesh}
-        let wallMesh = null;
-        let captureZoneMesh = null;
+        let mechMeshes = {};
+        let statusBars = {};
+        let paintHelpers = {};
         let laserLines = [];
-        let missileMeshes = [];
-        let paintHelpers = {}; // {id: wireframeBox}
-        let statusBars = {}; // {id: {hp: mesh, stab: mesh, heat: mesh, group: Object3D}}
-        let floaters = []; // [{mesh, vel, life}]
+        let ewarMeshes = {};
+        let floaters = [];
+        let captureZoneMesh = null;
         let navGroup = new THREE.Group();
         let pathGroup = new THREE.Group();
-        let ewarMeshes = {}; // {id: mesh}
 
         // Config
-        const VOXEL_SIZE = 1.0; // Visual scale
-	        const TEAM_COLORS = { "blue": 0x3388ff, "red": 0xff3333 };
-	        const MECH_SIZES = {
-	            "scout": [0.5, 0.5, 0.9],
-	            "light": [0.6, 0.6, 1.0],
-	            "medium": [1.0, 1.0, 1.0],
-	            "heavy": [1.5, 1.5, 2.0]
-	        };
-	        // Sim mech positions are AABB centers; these are the sim half-heights so models sit on z=0.
-	        const MECH_HALF_HEIGHTS = { "scout": 0.9, "light": 1.0, "medium": 1.5, "heavy": 2.0 };
+        const VOXEL_SIZE = 1.0;
+        const TEAM_COLORS = { "blue": 0x3388ff, "red": 0xff3333 };
+        const MECH_SIZES = {
+            "scout": [0.5, 0.5, 0.9],
+            "light": [0.6, 0.6, 1.0],
+            "medium": [1.0, 1.0, 1.0],
+            "heavy": [1.5, 1.5, 2.0]
+        };
+        const MECH_HALF_HEIGHTS = { "scout": 0.9, "light": 1.0, "medium": 1.5, "heavy": 2.0 };
 
         let selectedMechId = null;
         let raycaster = new THREE.Raycaster();
         let mouse = new THREE.Vector2();
 
-        // SSE connection state (must be declared before init() call)
+        // SSE state
         let eventSource = null;
-        let connectionStatus = 'disconnected';
+        let currentReplay = null;
+        let reconnectDelay = 1000;
 
-        // Helper to properly dispose Three.js objects (prevents GPU memory leaks)
+        // Material caches
+        const fxMaterialCache = { lines: new Map(), meshes: new Map() };
+        const fxGeometryCache = { spheres: new Map() };
+        const floaterTextureCache = new Map();
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a1a);
+            scene.fog = new THREE.Fog(0x1a1a1a, 20, 100);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(-10, -10, 20);
+            camera.up.set(0, 0, 1);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            hemiLight.position.set(0, 0, 50);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+            dirLight.position.set(50, 50, 100);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            const gridHelper = new THREE.GridHelper(40, 40, 0x444444, 0x222222);
+            gridHelper.rotation.x = Math.PI / 2;
+            gridHelper.position.set(20, 20, 0);
+            scene.add(gridHelper);
+            window.gridHelper = gridHelper;
+
+            scene.add(navGroup);
+            scene.add(pathGroup);
+
+            connectEventStream();
+
+            document.getElementById('playPause').addEventListener('click', togglePlay);
+            document.getElementById('stepBack').addEventListener('click', () => stepTime(-1));
+            document.getElementById('stepForward').addEventListener('click', () => stepTime(1));
+            document.getElementById('navToggle').addEventListener('click', toggleNav);
+            document.getElementById('pathToggle').addEventListener('click', togglePath);
+            document.getElementById('timeSlider').addEventListener('input', (e) => {
+                currentTime = parseFloat(e.target.value);
+                updateScene(currentTime);
+                isPlaying = false;
+                document.getElementById('playPause').innerText = "Play";
+            });
+            document.getElementById('speedSelect').addEventListener('change', (e) => {
+                playbackSpeed = parseFloat(e.target.value);
+            });
+
+            window.addEventListener('resize', onWindowResize);
+            renderer.domElement.addEventListener('pointerdown', onPointerDown);
+        }
+
+        function connectEventStream() {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            updateStatus('connecting');
+            eventSource = new EventSource('/events');
+
+            eventSource.onopen = () => {
+                updateStatus('connected');
+                reconnectDelay = 1000;
+            };
+
+            eventSource.addEventListener('replay_start', (e) => {
+                const data = JSON.parse(e.data);
+                console.log('Replay start:', data.replay_id);
+                currentReplay = {
+                    id: data.replay_id,
+                    world: data.world,
+                    worldHash: data.world_ref,
+                    chunks: new Map(),
+                    chunkCount: data.chunk_count,
+                    complete: false,
+                    meta: data.meta || {}
+                };
+                setupWorld(data.world);
+                updateProgress(0, data.chunk_count);
+                document.getElementById('progress').style.display = 'block';
+            });
+
+            eventSource.addEventListener('replay_chunk', (e) => {
+                const data = JSON.parse(e.data);
+                if (currentReplay && data.replay_id === currentReplay.id) {
+                    currentReplay.chunks.set(data.chunk_index, data.frames);
+                    updateProgress(currentReplay.chunks.size, currentReplay.chunkCount);
+                    if (data.chunk_index === 0) {
+                        assembleAndPlay();
+                    }
+                }
+            });
+
+            eventSource.addEventListener('replay_end', (e) => {
+                const data = JSON.parse(e.data);
+                if (currentReplay && data.replay_id === currentReplay.id) {
+                    currentReplay.complete = true;
+                    assembleAndPlay();
+                    document.getElementById('progress').style.display = 'none';
+                }
+            });
+
+            eventSource.onerror = () => {
+                updateStatus('disconnected');
+                eventSource.close();
+                setTimeout(connectEventStream, reconnectDelay);
+                reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+            };
+        }
+
+        function updateStatus(status) {
+            const el = document.getElementById('connectionStatus');
+            el.className = status;
+            el.innerText = '● ' + status.charAt(0).toUpperCase() + status.slice(1);
+        }
+
+        function updateProgress(current, total) {
+            document.getElementById('progressText').innerText = `${current}/${total}`;
+            document.getElementById('progressBar').value = total > 0 ? (current / total) * 100 : 0;
+            document.getElementById('progressBar').max = 100;
+        }
+
+        function assembleAndPlay() {
+            if (!currentReplay) return;
+
+            const frames = [];
+            for (let i = 0; i < currentReplay.chunkCount; i++) {
+                const chunk = currentReplay.chunks.get(i);
+                if (chunk) frames.push(...chunk);
+                else break;
+            }
+
+            if (frames.length > 0) {
+                replayData = { world: currentReplay.world, frames };
+                setupReplay();
+                if (!isPlaying && currentReplay.chunks.size === 1) {
+                    isPlaying = true;
+                    document.getElementById('playPause').innerText = "Pause";
+                }
+                updateMaxTime();
+            }
+        }
+
+        function updateMaxTime() {
+            if (!replayData || !replayData.frames || replayData.frames.length === 0) return;
+            maxTime = replayData.frames[replayData.frames.length - 1].t;
+            document.getElementById('timeSlider').max = maxTime;
+        }
+
+        function setupWorld(world) {
+            cleanScene();
+
+            if (!world) return;
+
+            const wx = world.size[0];
+            const wy = world.size[1];
+            const maxDim = Math.max(wx, wy);
+
+            if (window.gridHelper) scene.remove(window.gridHelper);
+            window.gridHelper = new THREE.GridHelper(maxDim, maxDim, 0x444444, 0x222222);
+            window.gridHelper.rotation.x = Math.PI / 2;
+            window.gridHelper.position.set(wx / 2, wy / 2, 0);
+            scene.add(window.gridHelper);
+
+            const meta = world.meta || {};
+            const cz = meta.capture_zone || null;
+            let czX = wx / 2, czY = wy / 2, czR = 15.0;
+            if (cz) {
+                if (Array.isArray(cz.center) && cz.center.length >= 2) {
+                    czX = cz.center[0];
+                    czY = cz.center[1];
+                }
+                if (typeof cz.radius === 'number') {
+                    czR = cz.radius;
+                }
+            }
+            controls.target.set(czX, czY, 0);
+
+            const inner = Math.max(0.1, czR - 0.5);
+            const outer = Math.max(inner + 0.1, czR + 0.5);
+            const ringGeo = new THREE.RingGeometry(inner, outer, 48);
+            const ringMat = new THREE.MeshBasicMaterial({
+                color: 0x00ffff,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.5
+            });
+            captureZoneMesh = new THREE.Mesh(ringGeo, ringMat);
+            captureZoneMesh.position.set(czX, czY, 0.1);
+            scene.add(captureZoneMesh);
+
+            if (world.walls) {
+                const solidGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+                const tileHeight = VOXEL_SIZE * 0.12;
+                const tileGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, tileHeight);
+
+                const materials = {
+                    1: new THREE.MeshLambertMaterial({ color: 0x555555 }),
+                    2: new THREE.MeshLambertMaterial({ color: 0xff4400, emissive: 0x441100 }),
+                    3: new THREE.MeshLambertMaterial({ color: 0x0044ff, transparent: true, opacity: 0.8 }),
+                    4: new THREE.MeshLambertMaterial({ color: 0x555555, emissive: 0xff2200, transparent: true, opacity: 0.7 }),
+                    5: new THREE.MeshLambertMaterial({ color: 0x333333, roughness: 0.8 }),
+                    6: new THREE.MeshLambertMaterial({ color: 0x6b4f2a, roughness: 1.0 })
+                };
+
+                const byType = {};
+                world.walls.forEach(w => {
+                    const type = w[3] || 1;
+                    if (!byType[type]) byType[type] = [];
+                    byType[type].push(w);
+                });
+
+                Object.entries(byType).forEach(([type, walls]) => {
+                    const typeNum = Number(type);
+                    const isTile = (typeNum === 2 || typeNum === 3 || typeNum === 6);
+                    const geom = isTile ? tileGeometry : solidGeometry;
+                    const iMesh = new THREE.InstancedMesh(geom, materials[type] || materials[1], walls.length);
+                    const matrix = new THREE.Matrix4();
+                    walls.forEach((w, i) => {
+                        const x = w[0] + 0.5;
+                        const y = w[1] + 0.5;
+                        const z = w[2];
+                        let zCenter = z + 0.5;
+                        if (typeNum === 6) {
+                            zCenter = z - (tileHeight * 0.5) - 0.001;
+                        } else if (typeNum === 2 || typeNum === 3) {
+                            zCenter = z + (tileHeight * 0.5) + 0.001;
+                        }
+                        matrix.setPosition(x, y, zCenter);
+                        iMesh.setMatrixAt(i, matrix);
+                    });
+                    iMesh.instanceMatrix.needsUpdate = true;
+                    iMesh.frustumCulled = false;
+                    scene.add(iMesh);
+                    if (!window.worldMeshes) window.worldMeshes = [];
+                    window.worldMeshes.push(iMesh);
+                });
+            }
+        }
+
+        function setupReplay() {
+            if (!replayData || !replayData.frames || replayData.frames.length === 0) return;
+
+            cleanMechs();
+
+            const firstFrame = replayData.frames[0];
+            for (const [id, state] of Object.entries(firstFrame.mechs)) {
+                const mesh = createMechMesh(state.class, state.team);
+                scene.add(mesh);
+                mechMeshes[id] = mesh;
+
+                const sz = MECH_SIZES[state.class];
+                const geo = new THREE.BoxGeometry(sz[0], sz[1], sz[2]);
+                const edges = new THREE.EdgesGeometry(geo);
+                const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xff00ff }));
+                line.visible = false;
+                scene.add(line);
+                paintHelpers[id] = line;
+
+                const statGroup = new THREE.Group();
+                const hpBar = new THREE.Mesh(
+                    new THREE.PlaneGeometry(1, 0.15),
+                    new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+                );
+                hpBar.position.set(0, 0.2, 0);
+                statGroup.add(hpBar);
+                const stabBar = new THREE.Mesh(
+                    new THREE.PlaneGeometry(1, 0.15),
+                    new THREE.MeshBasicMaterial({ color: 0x0088ff })
+                );
+                stabBar.position.set(0, 0, 0);
+                statGroup.add(stabBar);
+                const heatBar = new THREE.Mesh(
+                    new THREE.PlaneGeometry(1, 0.15),
+                    new THREE.MeshBasicMaterial({ color: 0xff0000 })
+                );
+                heatBar.position.set(0, -0.2, 0);
+                statGroup.add(heatBar);
+
+                statGroup.position.set(0, 0, MECH_SIZES[state.class][2] * 1.5);
+                scene.add(statGroup);
+                statusBars[id] = { group: statGroup, hp: hpBar, stab: stabBar, heat: heatBar };
+            }
+
+            updateScene(0);
+        }
+
+        function cleanScene() {
+            if (window.worldMeshes) {
+                window.worldMeshes.forEach(m => {
+                    scene.remove(m);
+                    disposeObject(m);
+                });
+                window.worldMeshes = [];
+            }
+            if (captureZoneMesh) {
+                scene.remove(captureZoneMesh);
+                disposeObject(captureZoneMesh);
+                captureZoneMesh = null;
+            }
+            cleanMechs();
+            navGroup.children.forEach(c => disposeObject(c));
+            navGroup.clear();
+            pathGroup.children.forEach(c => disposeObject(c));
+            pathGroup.clear();
+            if (window.smokeMeshes) {
+                window.smokeMeshes.forEach(m => {
+                    scene.remove(m);
+                    disposeObject(m);
+                });
+                window.smokeMeshes = [];
+            }
+        }
+
+        function cleanMechs() {
+            Object.values(mechMeshes).forEach(m => {
+                scene.remove(m);
+                disposeObject(m);
+            });
+            mechMeshes = {};
+            Object.values(statusBars).forEach(sb => {
+                scene.remove(sb.group);
+                disposeObject(sb.group);
+            });
+            statusBars = {};
+            Object.values(paintHelpers).forEach(h => {
+                scene.remove(h);
+                disposeObject(h);
+            });
+            paintHelpers = {};
+            Object.values(ewarMeshes).forEach(m => {
+                scene.remove(m);
+                disposeObject(m);
+            });
+            ewarMeshes = {};
+            laserLines.forEach(l => {
+                scene.remove(l);
+                if (l.geometry) l.geometry.dispose();
+            });
+            laserLines = [];
+            floaters.forEach(f => {
+                scene.remove(f.mesh);
+                f.mesh.material.dispose();
+                if (f.text !== undefined && f.colorHex !== undefined) {
+                    releaseFloaterTexture(f.text, f.colorHex);
+                }
+            });
+            floaters = [];
+        }
+
         function disposeObject(obj) {
             if (!obj) return;
-
-            // Dispose children recursively
             if (obj.children) {
                 while (obj.children.length > 0) {
                     disposeObject(obj.children[0]);
                     obj.remove(obj.children[0]);
                 }
             }
-
-            // Dispose geometry
-            if (obj.geometry) {
-                obj.geometry.dispose();
-            }
-
-            // Dispose material(s)
+            if (obj.geometry) obj.geometry.dispose();
             if (obj.material) {
                 if (Array.isArray(obj.material)) {
                     obj.material.forEach(mat => {
@@ -134,632 +616,178 @@
             }
         }
 
-        init();
-        animate();
-
-        function init() {
-            scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x1a1a1a);
-            scene.fog = new THREE.Fog(0x1a1a1a, 20, 100);
-
-            // Camera
-            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(-10, -10, 20);
-            camera.up.set(0, 0, 1); // Z-up
-
-            // Renderer
-            renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.body.appendChild(renderer.domElement);
-
-            // Controls
-            controls = new OrbitControls(camera, renderer.domElement);
-            controls.enableDamping = true;
-            controls.dampingFactor = 0.05;
-
-            // Lights
-            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
-            hemiLight.position.set(0, 0, 50);
-            scene.add(hemiLight);
-
-            const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
-            dirLight.position.set(50, 50, 100);
-            dirLight.castShadow = true;
-            scene.add(dirLight);
-
-            // Grid - Initial placeholder, will resize on load
-            const gridHelper = new THREE.GridHelper(40, 40, 0x444444, 0x222222);
-            gridHelper.rotation.x = Math.PI / 2;
-            gridHelper.position.set(20, 20, 0); // Center placeholder
-            scene.add(gridHelper);
-            window.gridHelper = gridHelper;
-
-            scene.add(navGroup);
-            scene.add(pathGroup);
-
-            // SSE connection for live replay streaming
-            connectEventStream();
-
-            // Initial fetch of server files
-            fetchFileList();
-
-            // UI Listeners
-            document.getElementById('fileInput').addEventListener('change', handleFileSelect, false);
-            document.getElementById('refreshBtn').addEventListener('click', fetchFileList);
-            document.getElementById('loadServerBtn').addEventListener('click', loadServerReplay);
-
-            document.getElementById('playPause').addEventListener('click', togglePlay);
-            document.getElementById('navToggle').addEventListener('click', toggleNav);
-            document.getElementById('pathToggle').addEventListener('click', togglePath);
-            document.getElementById('timeSlider').addEventListener('input', (e) => {
-                currentTime = parseFloat(e.target.value);
-                updateScene(currentTime);
-                isPlaying = false;
-                document.getElementById('playPause').innerText = "Play";
-            });
-            window.addEventListener('resize', onWindowResize);
-
-            // Add click listener
-            renderer.domElement.addEventListener('pointerdown', onPointerDown, false);
-        }
-        
-        function onPointerDown(event) {
-            // Calculate mouse position
-            const rect = renderer.domElement.getBoundingClientRect();
-            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-            
-            raycaster.setFromCamera(mouse, camera);
-            
-            // Check intersection with mech meshes
-            const intersects = raycaster.intersectObjects(scene.children, true);
-            
-            // Find first parent that is a mech group
-            let found = null;
-            for (let hit of intersects) {
-                // Traverse up to find the group in mechMeshes
-                let obj = hit.object;
-                while (obj) {
-                    // Check if obj is one of our mech groups
-                    for (const [mid, mesh] of Object.entries(mechMeshes)) {
-                        if (mesh === obj) {
-                            found = mid;
-                            break;
-                        }
-                    }
-                    if (found) break;
-                    obj = obj.parent;
-                }
-                if (found) break;
-            }
-            
-            selectedMechId = found;
-            const panel = document.getElementById('infoPanel');
-            panel.style.display = found ? 'block' : 'none';
-            
-            // Auto-refresh path if visible
-            if (pathGroup.visible && found) {
-                requestPath(found);
-            }
-        }
-
-        function fetchFileList() {
-            fetch('/replays')
-                .then(response => response.json())
-                .then(files => {
-                    const sel = document.getElementById('serverFileList');
-                    sel.innerHTML = '<option value="">-- Select a Replay --</option>';
-                    files.forEach(f => {
-                        const opt = document.createElement('option');
-                        opt.value = f.path;
-                        opt.innerText = f.name;
-                        sel.appendChild(opt);
-                    });
-                })
-                .catch(err => console.error("Failed to fetch replays:", err));
-        }
-
-        function loadServerReplay() {
-            const path = document.getElementById('serverFileList').value;
-            if (!path) return;
-            
-            fetch('/replays/' + path)
-                .then(response => response.json())
-                .then(data => {
-                    console.log("Loaded server replay:", path);
-                    replayData = data;
-                    setupReplay();
-                })
-                .catch(err => alert("Error loading replay: " + err));
-        }
-
-        // --- SSE Connection (replaces WebSocket) ---
-
-        function updateConnectionIndicator(status) {
-            connectionStatus = status;
-            const colors = { connected: '#0f0', connecting: '#ff0', disconnected: '#f00' };
-            const indicator = document.getElementById('connectionIndicator');
-            if (indicator) {
-                indicator.style.background = colors[status] || '#888';
-                indicator.title = `Stream: ${status}`;
-            }
-        }
-
-        function connectEventStream() {
-            // Close existing connection if any
-            if (eventSource) {
-                eventSource.close();
-                eventSource = null;
-            }
-
-            updateConnectionIndicator('connecting');
-
-            // Build URL with optional channel parameter
-            const url = new URL('/events', window.location.href);
-            // Optional: url.searchParams.set('channel', 'my-channel');
-
-            eventSource = new EventSource(url.toString());
-
-            eventSource.onopen = () => {
-                console.log("SSE connected");
-                updateConnectionIndicator('connected');
-            };
-
-            // Handle 'replay' events
-            eventSource.addEventListener('replay', (event) => {
-                try {
-                    const msg = JSON.parse(event.data);
-                    if (msg.type === 'replay' && msg.data) {
-                        console.log("Received replay via SSE (event_id=" + event.lastEventId + ")");
-                        replayData = msg.data;
-                        setupReplay();
-                        // Auto-play new arrivals
-                        isPlaying = true;
-                        document.getElementById('playPause').innerText = "Pause";
-                    }
-                } catch (err) {
-                    console.error("Failed to parse SSE replay event:", err);
-                }
-            });
-
-            // Handle generic messages (fallback)
-            eventSource.onmessage = (event) => {
-                // Keep-alive comments are filtered by browser, won't reach here
-                console.log("SSE message:", event.data);
-            };
-
-            eventSource.onerror = (err) => {
-                console.warn("SSE error, will auto-reconnect:", err);
-                updateConnectionIndicator('disconnected');
-                // EventSource auto-reconnects, but we update UI
-            };
-        }
-
-        // Reconnect when tab becomes visible (extra robustness)
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) {
-                // If disconnected or stale, force reconnect
-                if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
-                    console.log("Tab visible, reconnecting SSE...");
-                    connectEventStream();
-                }
-            }
-        });
-
-        function handleFileSelect(evt) {
-            const file = evt.target.files[0];
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                try {
-                    replayData = JSON.parse(e.target.result);
-                    setupReplay();
-                } catch (err) {
-                    alert("Error parsing JSON: " + err);
-                }
-            };
-            reader.readAsText(file);
-        }
-
-	        function setupReplay() {
-	            if (!replayData || !replayData.frames || replayData.frames.length === 0) return;
-
-	            // Clean up old scene with proper disposal to prevent GPU memory leaks
-	            if (window.worldMeshes) {
-                    window.worldMeshes.forEach(m => {
-                        scene.remove(m);
-                        disposeObject(m);
-                    });
-                    window.worldMeshes = [];
-                }
-	            if (captureZoneMesh) {
-                    scene.remove(captureZoneMesh);
-                    disposeObject(captureZoneMesh);
-                    captureZoneMesh = null;
-                }
-	            Object.values(mechMeshes).forEach(m => {
-                    scene.remove(m);
-                    disposeObject(m);
-                });
-	            mechMeshes = {};
-	            Object.values(statusBars).forEach(sb => {
-                    scene.remove(sb.group);
-                    disposeObject(sb.group);
-                });
-	            statusBars = {};
-	            laserLines.forEach(l => {
-                    scene.remove(l);
-                    if (l.geometry) l.geometry.dispose();
-                    // Don't dispose material - it may be cached
-                });
-	            laserLines = [];
-	            missileMeshes.forEach(m => {
-                    scene.remove(m);
-                    disposeObject(m);
-                });
-	            missileMeshes = [];
-	            Object.values(paintHelpers).forEach(h => {
-                    scene.remove(h);
-                    disposeObject(h);
-                });
-	            paintHelpers = {};
-	            floaters.forEach(f => {
-                    scene.remove(f.mesh);
-                    f.mesh.material.dispose();
-                    if (f.text !== undefined && f.colorHex !== undefined) {
-                        releaseFloaterTexture(f.text, f.colorHex);
-                    }
-                });
-	            floaters = [];
-                Object.values(ewarMeshes).forEach(m => {
-                    scene.remove(m);
-                    disposeObject(m);
-                });
-                ewarMeshes = {};
-                // Clear nav/path groups with disposal
-                navGroup.children.forEach(c => disposeObject(c));
-                navGroup.clear();
-                pathGroup.children.forEach(c => disposeObject(c));
-                pathGroup.clear();
-                // Clear smoke meshes
-                if (window.smokeMeshes) {
-                    window.smokeMeshes.forEach(m => {
-                        scene.remove(m);
-                        disposeObject(m);
-                    });
-                    window.smokeMeshes = [];
-                }
-
-	            // Parse World
-	            if (replayData.world) {
-                // Resize Grid
-                if (window.gridHelper) scene.remove(window.gridHelper);
-                const wx = replayData.world.size[0];
-                const wy = replayData.world.size[1];
-                const maxDim = Math.max(wx, wy);
-                
-                window.gridHelper = new THREE.GridHelper(maxDim, maxDim, 0x444444, 0x222222);
-                window.gridHelper.rotation.x = Math.PI / 2;
-                window.gridHelper.position.set(wx/2, wy/2, 0);
-                scene.add(window.gridHelper);
-
-                // Re-center camera if first load
-                const meta = replayData.world.meta || {};
-                const cz = meta.capture_zone || null;
-                let czX = wx / 2;
-                let czY = wy / 2;
-                let czR = 15.0;
-                if (cz) {
-                    if (Array.isArray(cz.center) && cz.center.length >= 2) {
-                        czX = cz.center[0];
-                        czY = cz.center[1];
-                    }
-                    if (typeof cz.radius === 'number') {
-                        czR = cz.radius;
-                    }
-                }
-                controls.target.set(czX, czY, 0);
-
-                // Draw Capture Zone
-                const inner = Math.max(0.1, czR - 0.5);
-                const outer = Math.max(inner + 0.1, czR + 0.5);
-                const ringGeo = new THREE.RingGeometry(inner, outer, 48);
-                const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, side: THREE.DoubleSide, transparent: true, opacity: 0.5 });
-                captureZoneMesh = new THREE.Mesh(ringGeo, ringMat);
-                captureZoneMesh.position.set(czX, czY, 0.1);
-                scene.add(captureZoneMesh);
-
-                if (replayData.world.walls) {
-                    const solidGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
-                    const tileHeight = VOXEL_SIZE * 0.12;
-                    const tileGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, tileHeight);
-                    // We'll use multiple instanced meshes for different types if needed,
-                    // or just a single one with colors. InstancedMesh supports colors!
-                    
-                    const materials = {
-                        1: new THREE.MeshLambertMaterial({ color: 0x555555 }), // SOLID
-                        2: new THREE.MeshLambertMaterial({ color: 0xff4400, emissive: 0x441100 }), // LAVA
-                        3: new THREE.MeshLambertMaterial({ color: 0x0044ff, transparent: true, opacity: 0.8 }), // WATER
-                        4: new THREE.MeshLambertMaterial({ color: 0x555555, emissive: 0xff2200, transparent: true, opacity: 0.7 }), // DEBRIS_FIELD
-                        5: new THREE.MeshLambertMaterial({ color: 0x333333, roughness: 0.8 }), // SOLID_DEBRIS
-                        6: new THREE.MeshLambertMaterial({ color: 0x6b4f2a, roughness: 1.0 }) // DIRT
-                    };
-                    
-                    // Group walls by type for efficient instancing
-                    const byType = {};
-                    replayData.world.walls.forEach(w => {
-                        // w is [x, y, z, type] or just [x, y, z] (legacy)
-                        const type = w[3] || 1;
-                        if (!byType[type]) byType[type] = [];
-                        byType[type].push(w);
-                    });
-                    
-                    Object.entries(byType).forEach(([type, walls]) => {
-                        const typeNum = Number(type);
-                        const isTile = (typeNum === 2 || typeNum === 3 || typeNum === 6);
-                        const geom = isTile ? tileGeometry : solidGeometry;
-                        const iMesh = new THREE.InstancedMesh(geom, materials[type] || materials[1], walls.length);
-                        const matrix = new THREE.Matrix4();
-                        walls.forEach((w, i) => {
-                            const x = w[0] + 0.5;
-                            const y = w[1] + 0.5;
-                            const z = w[2];
-                            let zCenter = z + 0.5;
-                            if (typeNum === 6) {
-                                // Dirt is a thin "floor" tile sitting just below z=0.
-                                zCenter = z - (tileHeight * 0.5) - 0.001;
-                            } else if (typeNum === 2 || typeNum === 3) {
-                                // Water/lava are thin surface patches on top of the ground.
-                                zCenter = z + (tileHeight * 0.5) + 0.001;
-                            }
-                            matrix.setPosition(x, y, zCenter);
-                            iMesh.setMatrixAt(i, matrix);
-                        });
-                        iMesh.instanceMatrix.needsUpdate = true;
-                        iMesh.frustumCulled = false;
-                        scene.add(iMesh);
-                        // Store for cleanup
-                        if (!window.worldMeshes) window.worldMeshes = [];
-                        window.worldMeshes.push(iMesh);
-                    });
-                }
-            }
-
-            // Metadata / stats
-            const meta = (replayData.world && replayData.world.meta) ? replayData.world.meta : {};
-            const seed = (replayData.world && replayData.world.seed !== undefined) ? replayData.world.seed : "n/a";
-            const archetype = meta.archetype_name || meta.archetype || "n/a";
-            const diag = (meta.highway_diagonal !== undefined) ? meta.highway_diagonal : null;
-            const transform = meta.transform || (meta.recipe && meta.recipe.variant && meta.recipe.variant.transform) || "n/a";
-            const spawns = meta.spawn_corners ? `${meta.spawn_corners.blue}/${meta.spawn_corners.red}` : "n/a";
-            const size = (replayData.world && replayData.world.size) ? replayData.world.size : null;
-            const sizeStr = size ? `${size[0]}x${size[1]}x${size[2]}` : "n/a";
-            const wallCount = (replayData.world && replayData.world.walls) ? replayData.world.walls.length : 0;
-            const czInfo = (meta.capture_zone && Array.isArray(meta.capture_zone.center) && typeof meta.capture_zone.radius === 'number')
-                ? ` zone=(${meta.capture_zone.center[0].toFixed(1)},${meta.capture_zone.center[1].toFixed(1)}) r=${meta.capture_zone.radius.toFixed(1)}`
-                : '';
-            document.getElementById('stats').innerText = `seed=${seed} archetype=${archetype}${diag !== null ? ` diag=${diag}` : ""} transform=${transform} spawns=${spawns} size=${sizeStr} walls=${wallCount}${czInfo}`;
-
-            // Init timeline
-            const frames = replayData.frames;
-            maxTime = frames[frames.length - 1].t;
-            currentTime = 0;
-            
-            document.getElementById('timeSlider').max = maxTime;
-            document.getElementById('controls').style.display = 'block';
-
-            // Init Mechs (from first frame that has them)
-            const firstFrame = frames[0];
-            for (const [id, state] of Object.entries(firstFrame.mechs)) {
-                const mesh = createMechMesh(state.class, state.team);
-                scene.add(mesh);
-                mechMeshes[id] = mesh;
-
-                // Paint Helper
-                // Simple box helper for now, scaled to approx size
-                const sz = MECH_SIZES[state.class];
-                const geo = new THREE.BoxGeometry(sz[0], sz[1], sz[2]);
-                const edges = new THREE.EdgesGeometry(geo);
-                const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xff00ff }));
-                line.visible = false;
-                scene.add(line);
-                paintHelpers[id] = line;
-
-                // Status Bar Group
-                const statGroup = new THREE.Group();
-                // HP (Green)
-                const hpBar = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.15), new THREE.MeshBasicMaterial({color: 0x00ff00}));
-                hpBar.position.set(0, 0.2, 0);
-                statGroup.add(hpBar);
-                // Stability (Blue)
-                const stabBar = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.15), new THREE.MeshBasicMaterial({color: 0x0088ff}));
-                stabBar.position.set(0, 0, 0);
-                statGroup.add(stabBar);
-                // Heat (Red)
-                const heatBar = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.15), new THREE.MeshBasicMaterial({color: 0xff0000}));
-                heatBar.position.set(0, -0.2, 0);
-                statGroup.add(heatBar);
-
-                statGroup.position.set(0, 0, MECH_SIZES[state.class][2] * 1.5);
-                scene.add(statGroup);
-                statusBars[id] = { group: statGroup, hp: hpBar, stab: stabBar, heat: heatBar };
-            }
-
-            updateScene(0);
-        }
-
         function createMechMesh(cls, team) {
             const group = new THREE.Group();
             const color = TEAM_COLORS[team];
             const matBody = new THREE.MeshStandardMaterial({ color: color, roughness: 0.7 });
-            const matDark = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.9 }); // Joints/Guns
+            const matDark = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.9 });
             const matCockpit = new THREE.MeshStandardMaterial({ color: 0x00ffff, emissive: 0x004444, roughness: 0.2 });
 
-            const sizes = MECH_SIZES[cls]; // [w, d, h]
+            const sizes = MECH_SIZES[cls];
             const w = sizes[0], d = sizes[1], h = sizes[2];
 
             if (cls === 'light' || cls === 'scout') {
-                // LIGHT: Chicken Walker, Narrow
-                // Legs
-                const legGeo = new THREE.BoxGeometry(w*0.2, d*0.4, h*0.5);
+                const legGeo = new THREE.BoxGeometry(w * 0.2, d * 0.4, h * 0.5);
                 const legL = new THREE.Mesh(legGeo, matDark);
-                legL.position.set(-w*0.25, 0, h*0.25);
+                legL.position.set(-w * 0.25, 0, h * 0.25);
                 const legR = new THREE.Mesh(legGeo, matDark);
-                legR.position.set(w*0.25, 0, h*0.25);
-                group.add(legL); group.add(legR);
+                legR.position.set(w * 0.25, 0, h * 0.25);
+                group.add(legL, legR);
 
-                // Torso
-                const torsoGeo = new THREE.BoxGeometry(w*0.6, d*0.8, h*0.4);
+                const torsoGeo = new THREE.BoxGeometry(w * 0.6, d * 0.8, h * 0.4);
                 const torso = new THREE.Mesh(torsoGeo, matBody);
-                torso.position.set(0, 0, h*0.7);
+                torso.position.set(0, 0, h * 0.7);
                 group.add(torso);
 
-                // Cockpit (Nose)
-                const cockGeo = new THREE.BoxGeometry(w*0.3, d*0.3, h*0.2);
+                const cockGeo = new THREE.BoxGeometry(w * 0.3, d * 0.3, h * 0.2);
                 const cockpit = new THREE.Mesh(cockGeo, matCockpit);
-                cockpit.position.set(0, d*0.4, h*0.7);
+                cockpit.position.set(0, d * 0.4, h * 0.7);
                 group.add(cockpit);
-
             } else if (cls === 'heavy') {
-                // HEAVY: Wide, Shoulder Pods
-                // Legs (Thick)
-                const legGeo = new THREE.BoxGeometry(w*0.3, d*0.5, h*0.4);
+                const legGeo = new THREE.BoxGeometry(w * 0.3, d * 0.5, h * 0.4);
                 const legL = new THREE.Mesh(legGeo, matDark);
-                legL.position.set(-w*0.3, 0, h*0.2);
+                legL.position.set(-w * 0.3, 0, h * 0.2);
                 const legR = new THREE.Mesh(legGeo, matDark);
-                legR.position.set(w*0.3, 0, h*0.2);
-                group.add(legL); group.add(legR);
+                legR.position.set(w * 0.3, 0, h * 0.2);
+                group.add(legL, legR);
 
-                // Pelvis
-                const pelvisGeo = new THREE.BoxGeometry(w*0.5, d*0.4, h*0.1);
+                const pelvisGeo = new THREE.BoxGeometry(w * 0.5, d * 0.4, h * 0.1);
                 const pelvis = new THREE.Mesh(pelvisGeo, matDark);
-                pelvis.position.set(0, 0, h*0.45);
+                pelvis.position.set(0, 0, h * 0.45);
                 group.add(pelvis);
 
-                // Torso (Massive)
-                const torsoGeo = new THREE.BoxGeometry(w*0.8, d*0.6, h*0.5);
+                const torsoGeo = new THREE.BoxGeometry(w * 0.8, d * 0.6, h * 0.5);
                 const torso = new THREE.Mesh(torsoGeo, matBody);
-                torso.position.set(0, 0, h*0.75);
+                torso.position.set(0, 0, h * 0.75);
                 group.add(torso);
 
-                // Missile Pods (Shoulders)
-                const podGeo = new THREE.BoxGeometry(w*0.25, d*0.5, h*0.25);
+                const podGeo = new THREE.BoxGeometry(w * 0.25, d * 0.5, h * 0.25);
                 const podL = new THREE.Mesh(podGeo, matBody);
-                podL.position.set(-w*0.55, 0, h*0.85);
+                podL.position.set(-w * 0.55, 0, h * 0.85);
                 const podR = new THREE.Mesh(podGeo, matBody);
-                podR.position.set(w*0.55, 0, h*0.85);
-                group.add(podL); group.add(podR);
+                podR.position.set(w * 0.55, 0, h * 0.85);
+                group.add(podL, podR);
 
-                // Cockpit (Slit)
-                const cockGeo = new THREE.BoxGeometry(w*0.4, d*0.1, h*0.1);
+                const cockGeo = new THREE.BoxGeometry(w * 0.4, d * 0.1, h * 0.1);
                 const cockpit = new THREE.Mesh(cockGeo, matCockpit);
-                cockpit.position.set(0, d*0.31, h*0.8);
+                cockpit.position.set(0, d * 0.31, h * 0.8);
                 group.add(cockpit);
-
             } else {
-                // MEDIUM: Standard Humanoid
-                // Legs
-                const legGeo = new THREE.BoxGeometry(w*0.25, d*0.3, h*0.45);
+                const legGeo = new THREE.BoxGeometry(w * 0.25, d * 0.3, h * 0.45);
                 const legL = new THREE.Mesh(legGeo, matDark);
-                legL.position.set(-w*0.25, 0, h*0.225);
+                legL.position.set(-w * 0.25, 0, h * 0.225);
                 const legR = new THREE.Mesh(legGeo, matDark);
-                legR.position.set(w*0.25, 0, h*0.225);
-                group.add(legL); group.add(legR);
+                legR.position.set(w * 0.25, 0, h * 0.225);
+                group.add(legL, legR);
 
-                // Torso
-                const torsoGeo = new THREE.BoxGeometry(w*0.7, d*0.5, h*0.5);
+                const torsoGeo = new THREE.BoxGeometry(w * 0.7, d * 0.5, h * 0.5);
                 const torso = new THREE.Mesh(torsoGeo, matBody);
-                torso.position.set(0, 0, h*0.7);
+                torso.position.set(0, 0, h * 0.7);
                 group.add(torso);
 
-                // Arms (Guns)
-                const armGeo = new THREE.BoxGeometry(w*0.15, d*0.6, h*0.2);
+                const armGeo = new THREE.BoxGeometry(w * 0.15, d * 0.6, h * 0.2);
                 const armL = new THREE.Mesh(armGeo, matBody);
-                armL.position.set(-w*0.45, d*0.1, h*0.65);
+                armL.position.set(-w * 0.45, d * 0.1, h * 0.65);
                 const armR = new THREE.Mesh(armGeo, matBody);
-                armR.position.set(w*0.45, d*0.1, h*0.65);
-                group.add(armL); group.add(armR);
+                armR.position.set(w * 0.45, d * 0.1, h * 0.65);
+                group.add(armL, armR);
 
-                // Head
-                const headGeo = new THREE.BoxGeometry(w*0.3, d*0.3, h*0.2);
+                const headGeo = new THREE.BoxGeometry(w * 0.3, d * 0.3, h * 0.2);
                 const head = new THREE.Mesh(headGeo, matBody);
-                head.position.set(0, 0, h*1.05);
+                head.position.set(0, 0, h * 1.05);
                 group.add(head);
-                
-                // Visor
-                const visorGeo = new THREE.BoxGeometry(w*0.25, d*0.1, h*0.1);
+
+                const visorGeo = new THREE.BoxGeometry(w * 0.25, d * 0.1, h * 0.1);
                 const visor = new THREE.Mesh(visorGeo, matCockpit);
-                visor.position.set(0, d*0.16, h*1.05);
+                visor.position.set(0, d * 0.16, h * 1.05);
                 group.add(visor);
             }
 
             return group;
         }
 
-                function togglePlay() {
-                    isPlaying = !isPlaying;
-                    document.getElementById('playPause').innerText = isPlaying ? "Pause" : "Play";
+        function togglePlay() {
+            isPlaying = !isPlaying;
+            document.getElementById('playPause').innerText = isPlaying ? "Pause" : "Play";
+        }
+
+        function stepTime(direction) {
+            if (!replayData || !replayData.frames) return;
+            const frames = replayData.frames;
+            let targetFrame = 0;
+            for (let i = 0; i < frames.length; i++) {
+                if (direction > 0 && frames[i].t > currentTime) {
+                    targetFrame = i;
+                    break;
+                } else if (direction < 0 && frames[i].t < currentTime) {
+                    targetFrame = i;
                 }
-        
-                function toggleNav() {
-                    if (!replayData || !replayData.world) return;
-                    if (navGroup.children.length > 0 && navGroup.visible) {
-                        navGroup.visible = false;
-                        return;
+            }
+            currentTime = frames[targetFrame].t;
+            document.getElementById('timeSlider').value = currentTime;
+            updateScene(currentTime);
+            isPlaying = false;
+            document.getElementById('playPause').innerText = "Play";
+        }
+
+        function toggleNav() {
+            if (!replayData || !replayData.world) return;
+            if (navGroup.children.length > 0 && navGroup.visible) {
+                navGroup.visible = false;
+                return;
+            }
+            if (navGroup.children.length > 0) {
+                navGroup.visible = true;
+                return;
+            }
+
+            fetch('/nav/build', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(replayData.world)
+            })
+                .then(r => r.json())
+                .then(data => {
+                    renderNavGraph(data);
+                    navGroup.visible = true;
+                })
+                .catch(err => console.error("Nav build failed:", err));
+        }
+
+        function renderNavGraph(data) {
+            navGroup.clear();
+            const nodes = data.nodes;
+            const nodeMat = new THREE.PointsMaterial({ color: 0x00ffff, size: 0.2 });
+            const points = [];
+            const posMap = {};
+
+            nodes.forEach(n => {
+                const p = new THREE.Vector3(...n.pos);
+                points.push(p);
+                posMap[n.id.join(',')] = p;
+            });
+
+            const pointsGeo = new THREE.BufferGeometry().setFromPoints(points);
+            const pointsMesh = new THREE.Points(pointsGeo, nodeMat);
+            navGroup.add(pointsMesh);
+
+            const lineMat = new THREE.LineBasicMaterial({ color: 0x008888, transparent: true, opacity: 0.3 });
+            const linePoints = [];
+            nodes.forEach(n => {
+                const p1 = posMap[n.id.join(',')];
+                n.edges.forEach(eid => {
+                    const p2 = posMap[eid.join(',')];
+                    if (p2) {
+                        linePoints.push(p1, p2);
                     }
-                    if (navGroup.children.length > 0) {
-                        navGroup.visible = true;
-                        return;
-                    }
-        
-                    // Fetch from server
-                    fetch('/nav/build', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(replayData.world)
-                    })
-                    .then(r => r.json())
-                    .then(data => {
-                        renderNavGraph(data);
-                        navGroup.visible = true;
-                    })
-                    .catch(err => console.error("Nav build failed:", err));
-                }
-        
-                function renderNavGraph(data) {
-                    navGroup.clear();
-                    const nodes = data.nodes;
-                    const nodeMat = new THREE.PointsMaterial({ color: 0x00ffff, size: 0.2 });
-                    const points = [];
-                    const posMap = {};
-        
-                    nodes.forEach(n => {
-                        const p = new THREE.Vector3(...n.pos);
-                        points.push(p);
-                        posMap[n.id.join(',')] = p;
-                    });
-        
-                    const pointsGeo = new THREE.BufferGeometry().setFromPoints(points);
-                    const pointsMesh = new THREE.Points(pointsGeo, nodeMat);
-                    navGroup.add(pointsMesh);
-        
-                    // Edges
-                    const lineMat = new THREE.LineBasicMaterial({ color: 0x008888, transparent: true, opacity: 0.3 });
-                    const linePoints = [];
-                    nodes.forEach(n => {
-                        const p1 = posMap[n.id.join(',')];
-                        n.edges.forEach(eid => {
-                            const p2 = posMap[eid.join(',')];
-                            if (p2) {
-                                linePoints.push(p1, p2);
-                            }
-                        });
-                    });
-                    const lineGeo = new THREE.BufferGeometry().setFromPoints(linePoints);
-                    const lines = new THREE.LineSegments(lineGeo, lineMat);
-                    navGroup.add(lines);
-                }
-        
-                function togglePath() {
+                });
+            });
+            const lineGeo = new THREE.BufferGeometry().setFromPoints(linePoints);
+            const lines = new THREE.LineSegments(lineGeo, lineMat);
+            navGroup.add(lines);
+        }
+
+        function togglePath() {
             if (!replayData || !replayData.world) return;
             if (pathGroup.visible) {
                 pathGroup.visible = false;
@@ -777,7 +805,7 @@
             const mech = frame.mechs[mechId];
             if (!mech) return;
 
-            const goalPos = frame.objective.zone_center.concat([0]); // [x,y,0]
+            const goalPos = frame.objective.zone_center.concat([0]);
 
             fetch('/nav/path', {
                 method: 'POST',
@@ -788,23 +816,22 @@
                     goal_pos: goalPos
                 })
             })
-            .then(r => r.json())
-            .then(data => {
-                if (data.found) {
-                    renderPath(data.path);
-                    pathGroup.visible = true;
-                } else {
-                    console.warn("Path not found:", data.error);
-                    pathGroup.clear();
-                }
-            })
-            .catch(err => console.error("Path request failed:", err));
+                .then(r => r.json())
+                .then(data => {
+                    if (data.found) {
+                        renderPath(data.path);
+                        pathGroup.visible = true;
+                    } else {
+                        console.warn("Path not found:", data.error);
+                        pathGroup.clear();
+                    }
+                })
+                .catch(err => console.error("Path request failed:", err));
         }
 
         function renderPath(waypoints) {
             pathGroup.clear();
             const points = waypoints.map(p => new THREE.Vector3(...p));
-            // Offset path slightly up so it's visible over the floor
             points.forEach(p => p.z += 0.5);
 
             const lineMat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 3 });
@@ -812,7 +839,6 @@
             const line = new THREE.Line(lineGeo, lineMat);
             pathGroup.add(line);
 
-            // Waypoint markers
             const dotMat = new THREE.PointsMaterial({ color: 0xffff00, size: 0.3 });
             const dotGeo = new THREE.BufferGeometry().setFromPoints(points);
             const dots = new THREE.Points(dotGeo, dotMat);
@@ -823,7 +849,7 @@
             const frames = replayData.frames;
             let frame = frames[0];
             for (let i = 0; i < frames.length - 1; i++) {
-                if (time >= frames[i].t && time < frames[i+1].t) {
+                if (time >= frames[i].t && time < frames[i + 1].t) {
                     frame = frames[i];
                     break;
                 }
@@ -832,63 +858,48 @@
             return frame;
         }
 
-        function updateScene(time) {	            if (!replayData) return;
-            
-            // Find frame
-            // Simple linear search is fine for short replays
-            const frames = replayData.frames;
-            let frame = frames[0];
-            for (let i = 0; i < frames.length - 1; i++) {
-                if (time >= frames[i].t && time < frames[i+1].t) {
-                    frame = frames[i];
-                    break;
+        function updateScene(time) {
+            if (!replayData) return;
+
+            const frame = getFrameAt(time);
+            document.getElementById('timeDisplay').innerText = time.toFixed(2) + "s / " + maxTime.toFixed(2) + "s";
+
+            const frameMechs = frame.mechs || {};
+            for (const id of Object.keys(mechMeshes)) {
+                if (!(id in frameMechs)) {
+                    mechMeshes[id].visible = false;
                 }
             }
-            if (time >= frames[frames.length - 1].t) frame = frames[frames.length - 1];
+            for (const id of Object.keys(statusBars)) {
+                if (!(id in frameMechs)) {
+                    statusBars[id].group.visible = false;
+                }
+            }
 
-            document.getElementById('timeDisplay').innerText = time.toFixed(2) + "s / " + maxTime.toFixed(2) + "s";
-            
-	            const frameMechs = frame.mechs || {};
-	            for (const id of Object.keys(mechMeshes)) {
-	                if (!(id in frameMechs)) {
-	                    mechMeshes[id].visible = false;
-	                }
-	            }
-	            for (const id of Object.keys(statusBars)) {
-	                if (!(id in frameMechs)) {
-	                    statusBars[id].group.visible = false;
-	                }
-	            }
+            for (const [id, state] of Object.entries(frameMechs)) {
+                const mesh = mechMeshes[id];
+                if (mesh) {
+                    mesh.visible = state.alive;
+                    const hsZ = MECH_HALF_HEIGHTS[state.class] ?? 0.0;
+                    mesh.position.set(state.pos[0], state.pos[1], state.pos[2] - hsZ);
 
-	            // Update Mechs
-	            for (const [id, state] of Object.entries(frameMechs)) {
-	                const mesh = mechMeshes[id];
-	                if (mesh) {
-	                    mesh.visible = state.alive;
-	                    const hsZ = MECH_HALF_HEIGHTS[state.class] ?? 0.0;
-	                    mesh.position.set(state.pos[0], state.pos[1], state.pos[2] - hsZ);
-	                    
-	                    if (state.fallen) {
-	                        mesh.rotation.x = Math.PI / 2; // Lay flat
-	                        mesh.rotation.z = state.yaw; // Keep yaw but sideways
+                    if (state.fallen) {
+                        mesh.rotation.x = Math.PI / 2;
+                        mesh.rotation.z = state.yaw;
                     } else {
                         mesh.rotation.x = 0;
-                        mesh.rotation.z = state.yaw - Math.PI/2;
+                        mesh.rotation.z = state.yaw - Math.PI / 2;
                     }
-                    
-                    // Show painted status
-                    // (Handled by events/laser color)
                 }
 
-                // Update EWAR Bubbles
                 if (state.class === 'scout' && (state.ecm_on || state.eccm_on)) {
                     let bubble = ewarMeshes[id];
                     if (!bubble) {
-                        const geo = new THREE.SphereGeometry(10.0, 32, 32); // Visual scale for 50vox radius
+                        const geo = new THREE.SphereGeometry(10.0, 32, 32);
                         const mat = new THREE.MeshBasicMaterial({
                             transparent: true,
                             opacity: 0.15,
-                            side: THREE.BackSide // See inside from outside
+                            side: THREE.BackSide
                         });
                         bubble = new THREE.Mesh(geo, mat);
                         scene.add(bubble);
@@ -897,14 +908,12 @@
                     bubble.visible = state.alive;
                     bubble.position.set(state.pos[0], state.pos[1], state.pos[2]);
                     bubble.material.color.setHex(state.ecm_on ? 0xff00ff : 0x00ffff);
-                    // Pulsing effect
                     const s = 1.0 + Math.sin(performance.now() * 0.005) * 0.05;
                     bubble.scale.set(s, s, s);
                 } else if (ewarMeshes[id]) {
                     ewarMeshes[id].visible = false;
                 }
 
-                // Update Status Bars
                 if (statusBars[id]) {
                     const sb = statusBars[id];
                     sb.group.visible = state.alive;
@@ -914,29 +923,27 @@
                     }
                     sb.group.lookAt(camera.position);
 
-                    const fallbackMaxHp = {scout: 60, light: 80, medium: 120, heavy: 200}[state.class] || 100;
+                    const fallbackMaxHp = { scout: 60, light: 80, medium: 120, heavy: 200 }[state.class] || 100;
                     const maxHp = (typeof state.hp_max === 'number') ? state.hp_max : fallbackMaxHp;
                     const maxStab = (typeof state.stability_max === 'number') ? state.stability_max : 100.0;
                     const heatCap = (typeof state.heat_cap === 'number') ? state.heat_cap : 100.0;
                     sb.hp.scale.x = Math.max(0.01, Math.max(0, state.hp) / Math.max(1e-6, maxHp));
                     sb.stab.scale.x = Math.max(0.01, Math.max(0, (state.stability || 0)) / Math.max(1e-6, maxStab));
                     sb.heat.scale.x = Math.max(0.01, Math.min(2.0, Math.max(0, state.heat)) / Math.max(1e-6, heatCap));
-                    
-                    // Critical Heat Pulse
+
                     if (state.heat > heatCap * 0.85 && state.heat <= heatCap) {
-                        const pulse = (Math.sin(performance.now() * 0.02) + 1) * 0.5; // 0..1
+                        const pulse = (Math.sin(performance.now() * 0.02) + 1) * 0.5;
                         sb.heat.material.color.setHex(pulse > 0.5 ? 0xff0000 : 0xffff00);
                     } else {
                         sb.heat.material.color.setHex(0xff0000);
                     }
                 }
-                
-                // Update Info Panel
+
                 if (selectedMechId === id) {
                     document.getElementById('selId').innerText = id;
                     document.getElementById('selClass').innerText = state.class;
                     document.getElementById('selHp').innerText = Math.round(state.hp);
-                    document.getElementById('selMaxHp').innerText = Math.round((typeof state.hp_max === 'number') ? state.hp_max : ({scout: 60, light: 80, medium: 120, heavy: 200}[state.class] || 100));
+                    document.getElementById('selMaxHp').innerText = Math.round((typeof state.hp_max === 'number') ? state.hp_max : ({ scout: 60, light: 80, medium: 120, heavy: 200 }[state.class] || 100));
                     document.getElementById('selHeat').innerText = Math.round(state.heat);
                     document.getElementById('selHeatCap').innerText = Math.round((typeof state.heat_cap === 'number') ? state.heat_cap : 100);
                     document.getElementById('selStab').innerText = Math.round(state.stability || 0);
@@ -953,18 +960,11 @@
                         if (state.heat > cap) status = "Shutdown";
                     }
                     document.getElementById('selState').innerText = status;
-                    
-                    // Highlight?
-                    if (mechMeshes[id]) {
-                        // Maybe add a bracket helper? For now UI is enough.
-                    }
                 }
             }
 
-            // Update Smoke Clouds
             const frameSmoke = frame.smoke_clouds || [];
             if (!window.smokeMeshes) window.smokeMeshes = [];
-            // Reuse meshes? For now just clear and rebuild or hide
             window.smokeMeshes.forEach(m => { m.visible = false; });
             frameSmoke.forEach((c, i) => {
                 let mesh = window.smokeMeshes[i];
@@ -980,51 +980,40 @@
                 mesh.scale.set(c.radius, c.radius, c.radius);
             });
 
-            // Events (Lasers/Missiles)
             const recentEvents = frame.events || [];
-
-            // Clear old ephemeral FX - only dispose geometry (materials are cached)
             laserLines.forEach(l => {
                 scene.remove(l);
                 if (l.geometry) l.geometry.dispose();
-                // Don't dispose material - it's cached and reused
             });
             laserLines = [];
-            
-	            // Rebuild
-	            recentEvents.forEach(ev => {
-                    const weapon = ev.weapon || null;
-	                const shooter = frameMechs[ev.shooter];
-	                const target = frameMechs[ev.target];
-	                const pos = ev.pos ? new THREE.Vector3(...ev.pos) : (target ? new THREE.Vector3(...target.pos) : null);
-	                const origin = shooter ? new THREE.Vector3(...shooter.pos) : null;
+
+            recentEvents.forEach(ev => {
+                const weapon = ev.weapon || null;
+                const shooter = frameMechs[ev.shooter];
+                const target = frameMechs[ev.target];
+                const pos = ev.pos ? new THREE.Vector3(...ev.pos) : (target ? new THREE.Vector3(...target.pos) : null);
+                const origin = shooter ? new THREE.Vector3(...shooter.pos) : null;
 
                 if (ev.damage > 0 && target) {
                     spawnFloater(new THREE.Vector3(...target.pos), "-" + Math.round(ev.damage), 0xff0000);
                 }
-                
+
                 if (ev.type === 'paint') {
                     if (origin && target) drawBeam(origin, new THREE.Vector3(...target.pos), 0xff00ff, 1);
-                }
-                else if (ev.type === 'laser_hit') {
+                } else if (ev.type === 'laser_hit') {
                     if (origin && target) {
-                        let color = 0x00ff00; // Green
-                        if (weapon === 'flamer') color = 0xff6600; // Orange for flamer
-                        else if (ev.is_painted) color = 0x00ffff; // Cyan
-                        if (ev.is_crit) color = 0xff0000; // Red (Override)
+                        let color = 0x00ff00;
+                        if (weapon === 'flamer') color = 0xff6600;
+                        else if (ev.is_painted) color = 0x00ffff;
+                        if (ev.is_crit) color = 0xff0000;
                         drawBeam(origin, new THREE.Vector3(...target.pos), color, 2);
                     }
-                }
-                else if (ev.type === 'smoke_cloud') {
+                } else if (ev.type === 'smoke_cloud') {
                     if (pos) drawExplosion(pos, ev.radius, 0xcccccc);
-                }
-                else if (ev.type === 'smoke_launch') {
+                } else if (ev.type === 'smoke_launch') {
                     if (origin) drawFlash(origin, 0xcccccc, 1);
-                }
-                else if (ev.type === 'projectile_hit') {
-                    // Tracers for impacts
+                } else if (ev.type === 'projectile_hit') {
                     if (origin && target) {
-                        // Use weapon when available; fallback to stability heuristic.
                         let color = 0xffaa00;
                         let width = 1;
                         let size = 1;
@@ -1047,22 +1036,17 @@
                             size = isHeavy ? 2 : 1;
                         }
                         if (weapon === 'missile') {
-                            // Full-length tracer for missiles to show the arc
                             drawTracer(origin, new THREE.Vector3(...target.pos), color, width, true);
                         } else {
                             drawTracer(origin, new THREE.Vector3(...target.pos), color, width);
                         }
                         drawFlash(new THREE.Vector3(...target.pos), color, size);
                     }
-                }
-                else if (ev.type === 'missile_hit') {
-                    // Usually handled by explosion logic now, but legacy check
+                } else if (ev.type === 'missile_hit') {
                     if (pos) drawExplosion(pos, 2.5, 0xff4500);
-                }
-                else if (ev.type === 'explosion') {
+                } else if (ev.type === 'explosion') {
                     if (pos) drawExplosion(pos, ev.radius, 0xff4500);
-                }
-                else if (ev.type === 'ams_intercept') {
+                } else if (ev.type === 'ams_intercept') {
                     const defender = frameMechs[ev.defender];
                     if (defender && pos) {
                         const dpos = new THREE.Vector3(...defender.pos);
@@ -1071,12 +1055,9 @@
                     } else if (pos) {
                         drawFlash(pos, 0x66ccff, 1);
                     }
-                }
-                else if (ev.type === 'missile_launch') {
-                    // Draw launch puff
+                } else if (ev.type === 'missile_launch') {
                     if (origin) drawFlash(origin, 0xffffff, 1);
-                }
-                else if (ev.type === 'kinetic_fire') {
+                } else if (ev.type === 'kinetic_fire') {
                     if (origin) {
                         const c = (weapon === 'gauss') ? 0xffff00 : 0xffaa00;
                         drawFlash(origin, c, 1);
@@ -1084,18 +1065,6 @@
                 }
             });
         }
-
-        // --- FX Helpers with Material Caching ---
-        // Cache materials to avoid creating new ones every frame
-        const fxMaterialCache = {
-            lines: new Map(), // key: "color|width" -> LineBasicMaterial
-            meshes: new Map(), // key: "color" -> MeshBasicMaterial
-        };
-
-        // Reusable geometry pools (spheres by size)
-        const fxGeometryCache = {
-            spheres: new Map(), // key: size -> SphereGeometry
-        };
 
         function getLineMaterial(color, width) {
             const key = `${color}|${width}`;
@@ -1122,7 +1091,6 @@
 
         function drawBeam(p1, p2, color, width) {
             const mat = getLineMaterial(color, width);
-            // Geometry must be unique per line (different points), so create new
             const geo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
             const line = new THREE.Line(geo, mat);
             scene.add(line);
@@ -1135,13 +1103,12 @@
                 return;
             }
             const dir = new THREE.Vector3().subVectors(p2, p1).normalize();
-            const start = new THREE.Vector3().subVectors(p2, dir.multiplyScalar(10)); // 10m tail
+            const start = new THREE.Vector3().subVectors(p2, dir.multiplyScalar(10));
             if (start.distanceTo(p2) > p1.distanceTo(p2)) start.copy(p1);
             drawBeam(start, p2, color, width);
         }
 
         function drawFlash(pos, color, size) {
-            // Use cached geometry and material (cloning mesh is cheaper than new geo/mat)
             const geo = getSphereGeometry(size);
             const mat = getMeshMaterial(color);
             const mesh = new THREE.Mesh(geo, mat);
@@ -1158,9 +1125,6 @@
             scene.add(mesh);
             laserLines.push(mesh);
         }
-
-        // Floater texture cache to avoid creating new canvases/textures per damage number
-        const floaterTextureCache = new Map(); // key: "text|color" -> {texture, refCount}
 
         function getFloaterTexture(text, colorHex) {
             const key = `${text}|${colorHex}`;
@@ -1182,9 +1146,7 @@
             const texture = new THREE.CanvasTexture(canvas);
             floaterTextureCache.set(key, { texture, refCount: 1 });
 
-            // Limit cache size to prevent unbounded growth
             if (floaterTextureCache.size > 100) {
-                // Evict oldest entries with refCount 0
                 for (const [k, v] of floaterTextureCache) {
                     if (v.refCount <= 0) {
                         v.texture.dispose();
@@ -1209,25 +1171,56 @@
             const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
             const sprite = new THREE.Sprite(mat);
             sprite.position.copy(pos);
-            sprite.position.z += 2; // Above head
-            sprite.scale.set(4, 2, 1); // Size in world units
+            sprite.position.z += 2;
+            sprite.scale.set(4, 2, 1);
 
             scene.add(sprite);
             floaters.push({ mesh: sprite, life: 1.0, text, colorHex });
         }
 
+        function onPointerDown(event) {
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+
+            let found = null;
+            for (let hit of intersects) {
+                let obj = hit.object;
+                while (obj) {
+                    for (const [mid, mesh] of Object.entries(mechMeshes)) {
+                        if (mesh === obj) {
+                            found = mid;
+                            break;
+                        }
+                    }
+                    if (found) break;
+                    obj = obj.parent;
+                }
+                if (found) break;
+            }
+
+            selectedMechId = found;
+            const panel = document.getElementById('infoPanel');
+            panel.style.display = found ? 'block' : 'none';
+
+            if (pathGroup.visible && found) {
+                requestPath(found);
+            }
+        }
+
         function animate() {
             requestAnimationFrame(animate);
 
-            // Update Floaters
             for (let i = floaters.length - 1; i >= 0; i--) {
                 const f = floaters[i];
-                f.life -= 0.02; // Fade speed
-                f.mesh.position.z += 0.05; // Float up
+                f.life -= 0.02;
+                f.mesh.position.z += 0.05;
                 f.mesh.material.opacity = f.life;
                 if (f.life <= 0) {
                     scene.remove(f.mesh);
-                    // Dispose material (texture is cached and ref-counted)
                     f.mesh.material.dispose();
                     if (f.text !== undefined && f.colorHex !== undefined) {
                         releaseFloaterTexture(f.text, f.colorHex);
@@ -1240,13 +1233,11 @@
                 const now = performance.now();
                 const delta = (now - lastFrameTime) / 1000;
                 lastFrameTime = now;
-                
-                // Clamping delta to avoid jumps
+
                 if (delta < 0.2) {
                     currentTime += delta * playbackSpeed;
                     if (currentTime > maxTime) {
-                        currentTime = 0; // Loop or stop
-                        // isPlaying = false; 
+                        currentTime = 0;
                     }
                     document.getElementById('timeSlider').value = currentTime;
                     updateScene(currentTime);
