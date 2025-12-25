@@ -1451,11 +1451,16 @@ class EchelonEnv:
             in_zone_by_agent[aid] = in_zone
 
         # Territory scoring: whichever team has more tonnage in the zone gains score.
-        # Ratio-based: if contested, reward is (my_tonnage / total_tonnage).
+        # Difference-based: only reward the team WINNING the contest, not just present.
+        # If contested equally, neither team gets zone reward (incentive to fight).
+        # This prevents "hide in zone and collect XP" when enemies are there too.
         total_tonnage = in_zone_tonnage["blue"] + in_zone_tonnage["red"]
         if total_tonnage > 0:
-            blue_tick = in_zone_tonnage["blue"] / total_tonnage
-            red_tick = in_zone_tonnage["red"] / total_tonnage
+            # Control margin: ranges from -1 (enemy dominates) to +1 (we dominate)
+            # Equal tonnage = 0 reward for both (must fight to break the tie)
+            blue_margin = (in_zone_tonnage["blue"] - in_zone_tonnage["red"]) / total_tonnage
+            blue_tick = max(0.0, blue_margin)  # Only positive if winning
+            red_tick = max(0.0, -blue_margin)  # Only positive if winning
         else:
             blue_tick = 0.0
             red_tick = 0.0
