@@ -407,6 +407,11 @@ class EchelonEnv:
             "bad_actions_red": 0.0,
             "bad_obs_blue": 0.0,
             "bad_obs_red": 0.0,
+            # Zone control metrics
+            "zone_ticks_blue": 0.0,
+            "zone_ticks_red": 0.0,
+            "contested_ticks": 0.0,
+            "first_zone_entry_step": -1.0,  # -1 means never entered
         }
         self._prev_fallen = {}
         self._prev_legged = {}
@@ -1903,6 +1908,19 @@ class EchelonEnv:
         # Update scores (using ticks as progress towards winning)
         self.team_zone_score["blue"] = float(self.team_zone_score["blue"] + blue_tick * dt_act)
         self.team_zone_score["red"] = float(self.team_zone_score["red"] + red_tick * dt_act)
+
+        # Track zone presence for metrics
+        blue_in_zone = any(in_zone_by_agent.get(bid, False) for bid in self.blue_ids)
+        red_in_zone = any(in_zone_by_agent.get(rid, False) for rid in self.red_ids)
+
+        if blue_in_zone:
+            self._episode_stats["zone_ticks_blue"] += 1.0
+        if red_in_zone:
+            self._episode_stats["zone_ticks_red"] += 1.0
+        if blue_in_zone and red_in_zone:
+            self._episode_stats["contested_ticks"] += 1.0
+        if blue_in_zone and self._episode_stats["first_zone_entry_step"] < 0:
+            self._episode_stats["first_zone_entry_step"] = float(self.step_count)
 
         # Reward weights (HIGH-6: added combat shaping)
         # NOTE: Terminal win/loss rewards REMOVED - they dominated the signal (98%) and

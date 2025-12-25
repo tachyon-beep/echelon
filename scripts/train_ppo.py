@@ -646,6 +646,9 @@ def main() -> None:
     # Combat statistics tracking
     episodic_combat_stats: list[dict[str, float]] = []
 
+    # Zone control metrics tracking
+    episodic_zone_stats: list[dict[str, float]] = []
+
     # Per-component reward tracking (aggregate across all blue agents)
     COMPONENTS = ["approach", "zone", "damage", "kill", "assist", "death", "terminal"]
     current_ep_components: list[dict[str, float]] = [dict.fromkeys(COMPONENTS, 0.0) for _ in range(num_envs)]
@@ -987,6 +990,16 @@ def main() -> None:
                         ep_combat["deaths_blue"] = float(deaths)
                     episodic_combat_stats.append(ep_combat)
 
+                    # Extract zone stats from episode outcome
+                    ep_zone = {
+                        "zone_ticks_blue": float(stats.get("zone_ticks_blue", 0.0)),
+                        "zone_ticks_red": float(stats.get("zone_ticks_red", 0.0)),
+                        "contested_ticks": float(stats.get("contested_ticks", 0.0)),
+                        "first_zone_entry": float(stats.get("first_zone_entry_step", -1.0)),
+                        "episode_length": float(ep_len),
+                    }
+                    episodic_zone_stats.append(ep_zone)
+
                     # Store action activation rates per role and reset
                     ep_action_rates: dict[str, dict[str, float]] = {}
                     for role in ROLES:
@@ -1151,6 +1164,32 @@ def main() -> None:
             kill_participation = 0.0
             survival_rate = 1.0
             avg_damage_blue = 0.0
+
+        # Zone control metrics
+        recent_zone = episodic_zone_stats[-window:]
+        if recent_zone:
+            # Zone control margin (blue - red normalized by episode length)
+            margins = [
+                (z["zone_ticks_blue"] - z["zone_ticks_red"]) / max(z["episode_length"], 1)
+                for z in recent_zone
+            ]
+            zone_margin = float(np.mean(margins))
+
+            # Contested ratio
+            contested_ratios = [z["contested_ticks"] / max(z["episode_length"], 1) for z in recent_zone]
+            contested_ratio = float(np.mean(contested_ratios))
+
+            # Time to first zone entry (normalized)
+            entries = [
+                z["first_zone_entry"] / max(z["episode_length"], 1)
+                for z in recent_zone
+                if z["first_zone_entry"] >= 0
+            ]
+            time_to_zone = float(np.mean(entries)) if entries else 1.0
+        else:
+            zone_margin = 0.0
+            contested_ratio = 0.0
+            time_to_zone = 1.0
 
         # Print primary line
         opfor_str = f" | opfor {current_weapon_prob:.0%}" if args.train_mode == "heuristic" else ""
@@ -1422,6 +1461,14 @@ def main() -> None:
                     "combat/damage_ratio": damage_ratio,
                     "combat/kill_participation": kill_participation,
                     "combat/survival_rate": survival_rate,
+                }
+            )
+            # Add zone control metrics
+            wandb_metrics.update(
+                {
+                    "zone/control_margin": zone_margin,
+                    "zone/contested_ratio": contested_ratio,
+                    "zone/time_to_entry": time_to_zone,
                 }
             )
             if eval_stats:
