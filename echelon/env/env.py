@@ -1534,15 +1534,14 @@ class EchelonEnv:
                     phi1 = -float(d1 / max_xy)
                     r_approach = W_APPROACH * (phi1 - phi0) * approach_scale
 
-            # (2) Zone Control Reward: divided by number of teammates in zone.
-            # This prevents "everyone pile in" - if 3 teammates are already there,
-            # your zone reward is 1/3. Creates incentive to spread out, guard flanks,
-            # provide overwatch. Zone is "held" by presence, not by stacking bodies.
-            # As long as zone > approach, agents stay nearby but don't all pile in.
+            # (2) Zone Control Reward: 2x base divided by number of teammates.
+            # First agent in zone gets 2x reward (jackpot for taking point).
+            # Second agent: 1x (solid backup). Third+: diminishing returns.
+            # This encourages: get 1-2 in zone, rest on overwatch/flanking.
             team_tick = blue_tick if m.team == "blue" else red_tick
             if in_zone_by_agent.get(aid, False):
                 n_in_zone = max(1, teammates_in_zone.get(m.team, 1))
-                r_zone = W_ZONE_TICK * team_tick / n_in_zone
+                r_zone = 2.0 * W_ZONE_TICK * team_tick / n_in_zone
 
             # (3) Combat shaping rewards with tactical context (HIGH-6)
             # ALL combat rewards are multiplied when fighting in a contested zone.
