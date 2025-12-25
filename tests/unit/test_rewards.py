@@ -64,15 +64,17 @@ class TestRewardPolarity:
         env = reward_env
 
         # Setup: position killer and victim
+        # Use blue_3 (medium) as killer since it has LASER as primary
+        # (blue_0 is scout with PAINTER which does 0 damage)
         victim = env.sim.mechs["red_0"]
         victim.hp = 1.0  # One-shot kill
 
-        killer = env.sim.mechs["blue_0"]
+        killer = env.sim.mechs["blue_3"]
         killer.pos[0], killer.pos[1] = victim.pos[0] - 5.0, victim.pos[1]
         killer.yaw = 0.0  # Facing +x toward victim
 
         actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
-        actions["blue_0"][4] = 1.0  # Fire laser
+        actions["blue_3"][4] = 1.0  # Fire laser (medium has LASER primary)
 
         death_occurred = False
         for _ in range(10):
@@ -93,16 +95,16 @@ class TestRewardPolarity:
         """Getting a kill gives positive reward to the killer."""
         env = reward_env
 
-        # Setup same as death test
+        # Setup: Use blue_3 (medium with LASER) as killer
         victim = env.sim.mechs["red_0"]
         victim.hp = 1.0
 
-        killer = env.sim.mechs["blue_0"]
+        killer = env.sim.mechs["blue_3"]
         killer.pos[0], killer.pos[1] = victim.pos[0] - 5.0, victim.pos[1]
         killer.yaw = 0.0  # Facing +x toward victim
 
         actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
-        actions["blue_0"][4] = 1.0  # PRIMARY (laser)
+        actions["blue_3"][4] = 1.0  # PRIMARY (laser)
 
         kill_occurred = False
         for _ in range(10):
@@ -110,8 +112,8 @@ class TestRewardPolarity:
             _, rewards, _, _, _ = env.step(actions)
             # Check if kill happened this step
             if was_alive and not victim.alive and victim.died:
-                # Kill occurred - W_KILL = 1.0
-                assert rewards["blue_0"] > 0.5, f"Kill should give positive reward, got {rewards['blue_0']}"
+                # Kill occurred - W_KILL = 10.0 (scaled reward)
+                assert rewards["blue_3"] > 0.5, f"Kill should give positive reward, got {rewards['blue_3']}"
                 kill_occurred = True
                 break
 
@@ -126,7 +128,8 @@ class TestRewardAttribution:
         env = reward_env
 
         # Clear setup - position mechs far from zone to isolate combat rewards
-        shooter = env.sim.mechs["blue_0"]
+        # Use blue_3 (medium with LASER) as shooter since blue_0 is scout with PAINTER
+        shooter = env.sim.mechs["blue_3"]
         target = env.sim.mechs["red_0"]
 
         # Position for combat far from zone to minimize zone influence
@@ -136,18 +139,18 @@ class TestRewardAttribution:
 
         # Move everyone else far away to isolate the test
         for aid in env.agents:
-            if aid not in ["blue_0", "red_0"]:
+            if aid not in ["blue_3", "red_0"]:
                 m = env.sim.mechs[aid]
                 m.pos[0], m.pos[1] = 35.0, 35.0
 
         # Get baseline rewards before combat
         actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
         _, baseline_rewards, _, _, _ = env.step(actions)
-        baseline_shooter = baseline_rewards["blue_0"]
+        baseline_shooter = baseline_rewards["blue_3"]
         baseline_target = baseline_rewards["red_0"]
 
         # Now fire weapon
-        actions["blue_0"][4] = 1.0  # Fire laser
+        actions["blue_3"][4] = 1.0  # Fire laser
         target_hp_before = float(target.hp)
         _, combat_rewards, _, _, _ = env.step(actions)
 
@@ -157,7 +160,7 @@ class TestRewardAttribution:
         if damage_dealt > 0:
             # The shooter should get a damage reward (W_DAMAGE * damage)
             # This should make their reward delta more positive than the victim's
-            shooter_delta = combat_rewards["blue_0"] - baseline_shooter
+            shooter_delta = combat_rewards["blue_3"] - baseline_shooter
             target_delta = combat_rewards["red_0"] - baseline_target
 
             assert (

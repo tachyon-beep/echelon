@@ -114,23 +114,85 @@ def default_mech_classes() -> dict[str, MechClassConfig]:
 
 
 def _team_ids(num_packs: int) -> tuple[list[str], list[str]]:
-    total = num_packs * PACK_SIZE
+    """Generate mech IDs for each team.
+
+    With 2+ packs, adds a squad leader at the end (index = num_packs * PACK_SIZE).
+    """
+    pack_total = num_packs * PACK_SIZE
+    # Add squad leader when we have a full squad (2+ packs)
+    total = pack_total + 1 if num_packs >= 2 else pack_total
     blue = [f"blue_{i}" for i in range(total)]
     red = [f"red_{i}" for i in range(total)]
     return blue, red
 
 
-def _roster_for_index(i: int) -> str:
-    # Pack structure (11 mechs): 2 Heavy, 3 Medium, 4 Light, 2 Scout
+def _roster_for_index(i: int, num_packs: int) -> str:
+    """Assign mech class based on position in pack/squad.
+
+    Pack structure (6 mechs):
+      - idx 0, 1: Scout (one per fire team)
+      - idx 2: Light (flanker)
+      - idx 3: Medium (line)
+      - idx 4: Heavy (fire support)
+      - idx 5: Pack Leader (light chassis, command suite)
+
+    Squad structure (13 mechs):
+      - Pack 0: indices 0-5
+      - Pack 1: indices 6-11
+      - Squad Leader: index 12 (medium chassis, squad command suite)
+    """
+    from ..constants import (
+        PACK_HEAVY_IDX,
+        PACK_LEADER_IDX,
+        PACK_LIGHT_IDX,
+        PACK_MEDIUM_IDX,
+        PACK_SCOUT_A_IDX,
+        PACK_SCOUT_B_IDX,
+    )
+
+    total_in_packs = num_packs * PACK_SIZE
+
+    # Squad leader is the last mech when we have 2+ packs
+    if num_packs >= 2 and i == total_in_packs:
+        return "medium"  # Squad leader chassis
+
     idx_in_pack = i % PACK_SIZE
-    if idx_in_pack <= 1:  # 0, 1
-        return "heavy"
-    elif idx_in_pack <= 4:  # 2, 3, 4
-        return "medium"
-    elif idx_in_pack <= 8:  # 5, 6, 7, 8
-        return "light"
-    else:  # 9, 10
+
+    if idx_in_pack in (PACK_SCOUT_A_IDX, PACK_SCOUT_B_IDX):
         return "scout"
+    elif idx_in_pack == PACK_LIGHT_IDX:
+        return "light"
+    elif idx_in_pack == PACK_MEDIUM_IDX:
+        return "medium"
+    elif idx_in_pack == PACK_HEAVY_IDX:
+        return "heavy"
+    elif idx_in_pack == PACK_LEADER_IDX:
+        return "light"  # Pack leader chassis
+    else:
+        return "medium"  # Fallback
+
+
+def _command_role_for_index(i: int, num_packs: int) -> str | None:
+    """Return command role if this index is a command mech, else None.
+
+    Returns:
+        "pack_leader" - Can issue orders to pack members, sees pack sensors
+        "squad_leader" - Can issue orders to anyone, sees full squad telemetry
+        None - Regular line mech
+    """
+    from ..constants import PACK_LEADER_IDX
+
+    total_in_packs = num_packs * PACK_SIZE
+
+    # Squad leader (when we have 2+ packs)
+    if num_packs >= 2 and i == total_in_packs:
+        return "squad_leader"
+
+    # Pack leader (last position in each pack)
+    if i % PACK_SIZE == PACK_LEADER_IDX:
+        return "pack_leader"
+
+    return None
 
 
 class EchelonEnv:
@@ -184,6 +246,7 @@ class EchelonEnv:
 
     def __init__(self, config: EnvConfig):
         self.config = config
+        self.num_packs = config.num_packs
         self.comm_dim = int(max(0, config.comm_dim))
         self.ACTION_DIM = int(self.COMM_START + self.comm_dim)
         self.mech_classes = default_mech_classes()
@@ -195,7 +258,7 @@ class EchelonEnv:
         self._last_reset_seed: int | None = None
         self._spawn_clear: int | None = None
 
-        self.blue_ids, self.red_ids = _team_ids(config.num_packs)
+        self.blue_ids, self.red_ids = _team_ids(self.num_packs)
         self.possible_agents = [*self.blue_ids, *self.red_ids]
         self.agents = list(self.possible_agents)
 
@@ -420,7 +483,7 @@ class EchelonEnv:
         mechs: dict[str, MechState] = {}
         for team, ids in (("blue", self.blue_ids), ("red", self.red_ids)):
             for i, mech_id in enumerate(ids):
-                cls_name = _roster_for_index(i)
+                cls_name = _roster_for_index(i, self.num_packs)
                 spec = self.mech_classes[cls_name]
                 hs = np.asarray(spec.size_voxels, dtype=np.float32) * 0.5
 

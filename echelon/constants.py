@@ -4,9 +4,34 @@ from __future__ import annotations
 # Unit Composition
 # ==============================================================================
 
-# A "pack" is the standard deployed unit: 11 mechs (2 Heavy, 3 Medium, 4 Light, 2 Scout).
-# Two packs form a squad (22 mechs) with a squad leader who can mix/match composition.
-PACK_SIZE = 11
+# Pack: 6 mechs - the basic tactical element
+#   - 1 Scout (recon, painting)
+#   - 1 Light (flanking, mobility)
+#   - 1 Medium (line infantry)
+#   - 1 Heavy (fire support, protected asset)
+#   - 1 Pack Leader (light-equivalent chassis, pack command suite)
+# Pack Leader sees aggregated pack sensor data and can issue orders to pack members.
+PACK_SIZE = 6
+
+# Squad: 13 mechs - two packs + squad leader
+#   - 2 Packs (12 mechs)
+#   - 1 Squad Leader (medium-equivalent chassis, squad command suite)
+# Squad Leader sees full squad telemetry and can issue orders to anyone.
+SQUAD_SIZE = 13
+
+# Indices within a pack (for roster assignment)
+# Two fire teams for "fix" and "assault" flexibility:
+#   Fire Team A: Scout + Medium + Pack Leader (overwatch)
+#   Fire Team B: Scout + Light + Heavy (maneuver element)
+PACK_SCOUT_A_IDX = 0  # Fire team A recon
+PACK_SCOUT_B_IDX = 1  # Fire team B recon
+PACK_LIGHT_IDX = 2  # Flanker/mobility
+PACK_MEDIUM_IDX = 3  # Line infantry
+PACK_HEAVY_IDX = 4  # Fire support (protected asset)
+PACK_LEADER_IDX = 5  # Light-equivalent with pack command suite
+
+# Squad leader is always the last mech in the squad
+# Squad layout: [Pack0: 0-5] [Pack1: 6-11] [SL: 12]
 
 # ==============================================================================
 # Physics Constants
