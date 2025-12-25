@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 
@@ -470,3 +471,38 @@ class TestEnvSuiteIntegration:
         suite_desc = obs_blue0[suite_start:suite_end]
         # Scout's suite descriptor should have first element = 1.0 (SCOUT_RECON one-hot)
         assert suite_desc[0] == 1.0, f"Scout should have suite_type one-hot[0]=1.0, got {suite_desc[:6]}"
+
+    def test_observation_includes_order_obs(self):
+        """Observation includes 10-dim order observation."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            comm_dim=0,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        obs, _ = env.reset(seed=0)
+
+        # Order obs is at offset: contacts + comm + local_map + telemetry + acoustic + hull + suite_desc
+        contacts_total = env.CONTACT_SLOTS * env.CONTACT_DIM
+        telemetry_dim = 16 * 16
+        acoustic_dim = 4
+        hull_dim = 4
+        order_start = (
+            contacts_total
+            + env.LOCAL_MAP_DIM
+            + telemetry_dim
+            + acoustic_dim
+            + hull_dim
+            + SUITE_DESCRIPTOR_DIM
+        )
+        order_end = order_start + env.ORDER_OBS_DIM
+
+        order_obs = obs["blue_0"][order_start:order_end]
+        # No orders issued yet, should be all zeros (NONE order type)
+        assert order_obs.shape == (10,)
+        assert np.allclose(order_obs, 0.0), f"Expected all zeros for no order, got {order_obs}"

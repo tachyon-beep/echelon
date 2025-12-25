@@ -19,7 +19,13 @@ except ImportError:
         _HAS_GYMNASIUM = False
 
 from ..actions import ACTION_DIM as ACTION_DIM_CONST
-from ..actions import ActionIndex
+from ..actions import (
+    ORDER_PARAM_DIM,
+    ORDER_RECIPIENT_DIM,
+    ORDER_TYPE_DIM,
+    ActionIndex,
+    OrderType,
+)
 from ..config import (
     AMS_COOLDOWN_S,
     ECCM_RADIUS_VOX,
@@ -52,7 +58,7 @@ from ..gen.validator import ConnectivityValidator
 from ..nav.graph import NavGraph, NodeID
 from ..nav.planner import Planner
 from ..rl.suite import SUITE_DESCRIPTOR_DIM, CombatSuiteSpec, build_suite_descriptor, get_suite_for_role
-from ..sim.mech import MechState
+from ..sim.mech import MechState, ReceivedOrder
 from ..sim.sim import Sim
 from ..sim.world import VoxelWorld
 
@@ -240,6 +246,13 @@ class EchelonEnv:
     # Optional pack comm message tail.
     COMM_START = OBS_CTRL_START + OBS_CTRL_DIM
 
+    # Command actions (for pack/squad leaders to issue orders).
+    # Layout: [order_type(6), recipient(6), param(5)] = 17 dims
+    # Non-command mechs ignore these dimensions.
+    CMD_ORDER_TYPE_START = -1  # Set in __init__ based on comm_dim
+    CMD_RECIPIENT_START = -1
+    CMD_PARAM_START = -1
+
     # Ego-centric local occupancy map (bool footprint) around the mech.
     LOCAL_MAP_R = 5
     LOCAL_MAP_SIZE = 2 * LOCAL_MAP_R + 1
@@ -249,7 +262,14 @@ class EchelonEnv:
         self.config = config
         self.num_packs = config.num_packs
         self.comm_dim = int(max(0, config.comm_dim))
-        self.ACTION_DIM = int(self.COMM_START + self.comm_dim)
+
+        # Command action layout comes after comm
+        self.CMD_ORDER_TYPE_START = self.COMM_START + self.comm_dim
+        self.CMD_RECIPIENT_START = self.CMD_ORDER_TYPE_START + ORDER_TYPE_DIM
+        self.CMD_PARAM_START = self.CMD_RECIPIENT_START + ORDER_RECIPIENT_DIM
+
+        # Total action dimension includes command actions
+        self.ACTION_DIM = int(self.CMD_PARAM_START + ORDER_PARAM_DIM)
         self.mech_classes = default_mech_classes()
 
         self.rng = np.random.default_rng(config.seed)
@@ -302,6 +322,10 @@ class EchelonEnv:
 
         # Combat Suite assignments (determines observation richness per mech)
         self._mech_suites: dict[str, CombatSuiteSpec] = {}
+
+        # Command hierarchy: maps command mech ID -> list of subordinate IDs
+        # Populated during reset() when suites are assigned
+        self._subordinates: dict[str, list[str]] = {}
 
         # Performance caches (MED-11, MED-12): Static terrain data computed once at reset
         self._cached_telemetry: np.ndarray | None = None
@@ -534,6 +558,25 @@ class EchelonEnv:
                 )
                 mechs[mech_id] = mech
                 self._max_team_hp[team] += float(spec.hp)
+
+        # Build command hierarchy: map command mechs to their subordinates
+        self._subordinates = {}
+        for _team, ids in (("blue", self.blue_ids), ("red", self.red_ids)):
+            for i, mech_id in enumerate(ids):
+                suite = self._mech_suites[mech_id]
+                if suite.issues_orders:
+                    if suite.order_scope == "pack":
+                        # Pack leader: subordinates are pack members (excluding self)
+                        pack_idx = i // PACK_SIZE
+                        pack_start = pack_idx * PACK_SIZE
+                        pack_end = min(pack_start + PACK_SIZE, len(ids))
+                        self._subordinates[mech_id] = [
+                            aid for aid in ids[pack_start:pack_end] if aid != mech_id
+                        ]
+                    elif suite.order_scope == "squad":
+                        # Squad leader: subordinates are all pack leaders in the squad
+                        pack_leaders = [aid for aid in ids if self._mech_suites[aid].order_scope == "pack"]
+                        self._subordinates[mech_id] = pack_leaders
 
         sim = Sim(world=world, dt_sim=self.config.dt_sim, rng=rng_sim)
         sim.reset(mechs)
@@ -1111,9 +1154,13 @@ class EchelonEnv:
             else:
                 suite_desc = np.zeros(SUITE_DESCRIPTOR_DIM, dtype=np.float32)
 
+            # Received order observation (10 dims): tells policy what orders they've received
+            order_obs = self._encode_received_order(viewer, sim)
+
             parts.append(acoustic_intensities)
             parts.append(hull_type)
             parts.append(suite_desc)
+            parts.append(order_obs)
 
             parts.append(
                 np.asarray(
@@ -1170,6 +1217,47 @@ class EchelonEnv:
             obs[aid] = vec
         return obs
 
+    # Received order observation dimensions
+    # order_type_onehot(6) + time_since_order(1) + target_rel_pos(3) = 10
+    ORDER_OBS_DIM = 10
+
+    def _encode_received_order(self, viewer: MechState, sim: Sim) -> np.ndarray:
+        """Encode received order into observation vector (10 dims).
+
+        Layout:
+        - order_type_onehot (6): NONE, FOCUS_FIRE, ADVANCE, HOLD, RALLY, COVER
+        - time_since_order (1): normalized [0, 1], 0=just issued, 1=about to expire
+        - target_rel_pos (3): relative position to target (for FOCUS_FIRE), else zeros
+
+        Returns:
+            10-dim float32 array
+        """
+        order_obs = np.zeros(self.ORDER_OBS_DIM, dtype=np.float32)
+
+        order = viewer.current_order
+        if order is None or order.is_expired(sim.time_s):
+            # No active order - return zeros (NONE is already 0)
+            return order_obs
+
+        # Order type one-hot (6 dims)
+        order_type_idx = min(order.order_type, 5)  # Clamp to valid range
+        order_obs[order_type_idx] = 1.0
+
+        # Time since order (normalized, 0=fresh, 1=stale)
+        time_since = sim.time_s - order.issued_at
+        order_obs[6] = float(np.clip(time_since / 10.0, 0.0, 1.0))  # TTL is 10 seconds
+
+        # Target relative position (for FOCUS_FIRE)
+        if order.order_type == OrderType.FOCUS_FIRE and order.target_id is not None:
+            target = sim.mechs.get(order.target_id)
+            if target is not None and target.alive:
+                world = sim.world
+                max_dim = float(max(world.size_x, world.size_y, world.size_z))
+                rel_pos = (target.pos - viewer.pos) / max_dim
+                order_obs[7:10] = rel_pos
+
+        return order_obs
+
     def _obs_dim(self) -> int:
         comm_dim = PACK_SIZE * int(max(0, self.config.comm_dim))
         # self features =
@@ -1188,6 +1276,7 @@ class EchelonEnv:
             + telemetry_dim
             + self_dim
             + SUITE_DESCRIPTOR_DIM
+            + self.ORDER_OBS_DIM
         )
 
     def _is_targeted(self, mech: MechState) -> bool:
@@ -1198,6 +1287,69 @@ class EchelonEnv:
         # Simple "someone has LOS to me and is in range".
         # HIGH-12: Use spatial grid to query only nearby enemies
         return any(sim.has_los(other.pos, mech.pos) for other in sim.enemies_in_range(mech, 8.0))
+
+    def _process_command_actions(self, act: dict[str, np.ndarray], sim: Sim) -> None:
+        """Process command actions from pack/squad leaders and issue orders to subordinates.
+
+        Command actions are only processed for mechs that have issues_orders=True in their suite.
+        Orders are stored on the receiving mech's current_order field.
+        """
+        current_time = sim.time_s
+
+        for commander_id, subordinates in self._subordinates.items():
+            m = sim.mechs.get(commander_id)
+            if m is None or not m.alive:
+                continue
+
+            a = act.get(commander_id)
+            if a is None:
+                continue
+
+            # Parse command action fields
+            order_type_prefs = a[self.CMD_ORDER_TYPE_START : self.CMD_ORDER_TYPE_START + ORDER_TYPE_DIM]
+            recipient_prefs = a[self.CMD_RECIPIENT_START : self.CMD_RECIPIENT_START + ORDER_RECIPIENT_DIM]
+            order_params = a[self.CMD_PARAM_START : self.CMD_PARAM_START + ORDER_PARAM_DIM]
+
+            # Determine order type (argmax)
+            order_type = int(np.argmax(order_type_prefs))
+
+            # Skip if no order (OrderType.NONE = 0)
+            if order_type == OrderType.NONE:
+                continue
+
+            # Determine recipient (argmax over subordinates, capped to actual subordinate count)
+            recipient_idx = int(np.argmax(recipient_prefs[: len(subordinates)]))
+            if recipient_idx >= len(subordinates):
+                continue
+
+            recipient_id = subordinates[recipient_idx]
+            recipient = sim.mechs.get(recipient_id)
+            if recipient is None or not recipient.alive:
+                continue
+
+            # For FOCUS_FIRE, determine target from order_params (argmax over contact slots)
+            target_id: str | None = None
+            if order_type == OrderType.FOCUS_FIRE:
+                # Use commander's last contact slots to pick target
+                contact_slots = self._last_contact_slots.get(commander_id) or []
+                if order_params.size > 0:
+                    target_idx = int(np.argmax(order_params[: len(contact_slots)]))
+                    if target_idx < len(contact_slots):
+                        target_id = contact_slots[target_idx]
+                        # Validate target is a valid hostile
+                        if target_id is not None:
+                            tgt = sim.mechs.get(target_id)
+                            if tgt is None or not tgt.alive or tgt.team == m.team:
+                                target_id = None
+
+            # Issue the order to the recipient
+            recipient.current_order = ReceivedOrder(
+                order_type=order_type,
+                issuer_id=commander_id,
+                target_id=target_id,
+                issued_at=current_time,
+                acknowledged=False,
+            )
 
     def step(
         self, actions: dict[str, np.ndarray]
@@ -1301,6 +1453,9 @@ class EchelonEnv:
                 self._contact_filter_hostile[aid] = bool(
                     float(a[self.OBS_CTRL_START + self.OBS_SORT_DIM]) > 0.0
                 )
+
+        # Process command actions for pack/squad leaders
+        self._process_command_actions(act, sim)
 
         # Baselines for rewards/shaping.
         dt_act = float(self.config.dt_sim * self.config.decision_repeat)

@@ -10,6 +10,21 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class ReceivedOrder:
+    """An order received from a command mech."""
+
+    order_type: int  # OrderType enum value
+    issuer_id: str  # Who gave the order
+    target_id: str | None  # For FOCUS_FIRE: which enemy to target
+    issued_at: float  # Sim time when order was issued
+    acknowledged: bool = False  # Whether agent has acknowledged
+
+    def is_expired(self, current_time: float, ttl: float = 10.0) -> bool:
+        """Orders expire after TTL seconds."""
+        return (current_time - self.issued_at) > ttl
+
+
+@dataclass
 class MechState:
     mech_id: str
     team: str
@@ -31,6 +46,9 @@ class MechState:
     # Electronic warfare toggles (set by the env, applied by the sim/obs).
     ecm_on: bool = False
     eccm_on: bool = False
+
+    # Command and control: received orders from pack/squad leaders.
+    current_order: ReceivedOrder | None = None
 
     # Status effects.
     suppressed_time: float = 0.0  # Stability regen penalty while > 0.
