@@ -38,7 +38,7 @@ Indicators of PPO algorithm health and stability.
 
 | Panel Type | Metrics | Description |
 |------------|---------|-------------|
-| Line | `train/entropy`, `policy/approx_kl` | Exploration vs policy update magnitude |
+| Line | `train/entropy`, `train/approx_kl` | Exploration vs policy update magnitude |
 | Line | `train/clipfrac`, `policy/saturation_rate` | PPO clipping rate, action space saturation |
 | Line | `policy/explained_variance` | Value function quality (target: > 0.5) |
 
@@ -204,6 +204,7 @@ Periodic evaluation and arena match results.
 |------------|---------|-------------|
 | Line | `eval/win_rate`, `eval/mean_hp_margin` | Heuristic opponent evaluation |
 | Line | `arena/rating`, `arena/rd` | Glicko-2 rating and deviation |
+| Line | `arena/games`, `arena/promoted` | Arena matches played and promotion status |
 | Table | `episodes/agent_breakdown` | Per-agent episode statistics |
 
 ---
@@ -336,6 +337,14 @@ Periodic evaluation and arena match results.
 | Metric | Description |
 |--------|-------------|
 | `agent_breakdown` | Table with per-agent statistics |
+
+#### arena/
+| Metric | Description |
+|--------|-------------|
+| `rating` | Glicko-2 rating |
+| `rd` | Glicko-2 rating deviation |
+| `games` | Number of arena matches played |
+| `promoted` | Whether policy was promoted to league (1/0) |
 
 ---
 
