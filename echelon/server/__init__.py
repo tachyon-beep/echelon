@@ -32,7 +32,9 @@ async def lifespan(app: FastAPI):
     settings.RUNS_DIR.mkdir(parents=True, exist_ok=True)
     yield
     logger.info("Echelon Replay Server shutting down...")
-    # SSE cleanup will be added in Task 2
+    from .sse import sse_manager
+
+    await sse_manager.shutdown()
 
 
 def create_app() -> FastAPI:
@@ -51,10 +53,11 @@ def create_app() -> FastAPI:
     async def health_check():
         """Health check endpoint."""
         from .models import HealthResponse
+        from .sse import sse_manager
 
         return HealthResponse(
             status="ok",
-            clients=0,  # Will be updated in Task 2
+            clients=sse_manager.client_count,
             uptime_s=time.time() - _server_start_time,
         )
 
