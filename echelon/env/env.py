@@ -1543,14 +1543,28 @@ class EchelonEnv:
             if in_zone_by_agent.get(aid, False):
                 r_zone = W_ZONE_TICK * team_tick
 
-            # (3) Combat shaping rewards (HIGH-6)
-            r_damage = W_DAMAGE * step_damage_dealt.get(aid, 0.0)
-            r_kill = W_KILL * step_kills.get(aid, 0)
-            r_assist = W_ASSIST * step_assists.get(aid, 0)
-            if step_deaths.get(aid, False):
-                r_death = W_DEATH
+            # (3) Combat shaping rewards with tactical context (HIGH-6)
+            # Kills/deaths in contested zone are weighted differently:
+            # - Kill in contested zone: BONUS (fighting for the objective)
+            # - Death in contested zone: REDUCED penalty (died for the mission)
+            # - Kill outside zone: normal reward
+            # - Death outside zone: FULL penalty (wasteful death)
+            agent_in_zone = in_zone_by_agent.get(aid, False)
+            zone_is_contested = in_zone_tonnage["blue"] > 0 and in_zone_tonnage["red"] > 0
+            fighting_for_zone = agent_in_zone and zone_is_contested
 
-            # NOTE: Cohesion reward removed - should emerge from survival pressure, not shaping.
+            r_damage = W_DAMAGE * step_damage_dealt.get(aid, 0.0)
+
+            # Kills: 1.5x bonus when fighting in contested zone
+            kill_mult = 1.5 if fighting_for_zone else 1.0
+            r_kill = W_KILL * kill_mult * step_kills.get(aid, 0)
+
+            r_assist = W_ASSIST * step_assists.get(aid, 0)
+
+            # Deaths: 0.5x penalty when fighting in contested zone (died smart)
+            if step_deaths.get(aid, False):
+                death_mult = 0.5 if fighting_for_zone else 1.0
+                r_death = W_DEATH * death_mult
 
             r = r_approach + r_zone + r_damage + r_kill + r_assist + r_death
             rewards[aid] = float(r)
