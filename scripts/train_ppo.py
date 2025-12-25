@@ -1010,6 +1010,10 @@ def main() -> None:
                         "centroid_zone_dist_sum": float(stats.get("centroid_zone_dist_sum", 0.0)),
                         "centroid_zone_dist_count": float(stats.get("centroid_zone_dist_count", 1.0)),
                         "focus_fire_concentration": float(stats.get("focus_fire_concentration", 0.0)),
+                        # Perception metrics
+                        "visible_contacts_sum": float(stats.get("visible_contacts_sum", 0.0)),
+                        "visible_contacts_count": float(stats.get("visible_contacts_count", 1.0)),
+                        "hostile_filter_on_count": float(stats.get("hostile_filter_on_count", 0.0)),
                     }
                     episodic_coord_stats.append(ep_coord)
 
@@ -1514,6 +1518,28 @@ def main() -> None:
                         "coordination/centroid_zone_dist": avg_centroid_dist,
                         "coordination/focus_fire": float(
                             np.mean([s.get("focus_fire_concentration", 0.0) for s in recent_coord])
+                        ),
+                    }
+                )
+
+                # Perception metrics (strided with coordination)
+                wandb_metrics.update(
+                    {
+                        "perception/visible_contacts": float(
+                            np.mean(
+                                [
+                                    s["visible_contacts_sum"] / max(s["visible_contacts_count"], 1)
+                                    for s in recent_coord
+                                ]
+                            )
+                        ),
+                        "perception/hostile_filter_usage": float(
+                            np.mean(
+                                [
+                                    s["hostile_filter_on_count"] / max(s["visible_contacts_count"], 1)
+                                    for s in recent_coord
+                                ]
+                            )
                         ),
                     }
                 )

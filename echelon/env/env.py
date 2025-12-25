@@ -418,6 +418,10 @@ class EchelonEnv:
             "centroid_zone_dist_sum": 0.0,
             "centroid_zone_dist_count": 0.0,
             "focus_fire_concentration": 0.0,
+            # Perception metrics
+            "visible_contacts_sum": 0.0,
+            "visible_contacts_count": 0.0,
+            "hostile_filter_on_count": 0.0,
         }
         self._damage_by_target: dict[str, float] = {}  # target_id -> damage received
         self._prev_fallen = {}
@@ -1103,6 +1107,12 @@ class EchelonEnv:
 
             # Count actual contacts (for panel stats)
             contact_count = min(len(selected), max_contact_count)
+
+            # Track perception metrics for episode stats
+            self._episode_stats["visible_contacts_sum"] += float(contact_count)
+            self._episode_stats["visible_contacts_count"] += 1.0
+            if hostile_only:
+                self._episode_stats["hostile_filter_on_count"] += 1.0
 
             parts: list[np.ndarray] = []
             parts.append(contact_feats.reshape(-1))
