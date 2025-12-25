@@ -1074,6 +1074,41 @@ def main() -> None:
                     current_ep_actions[env_idx] = {role: dict.fromkeys(ACTION_SLOTS, 0) for role in ROLES}
                     current_ep_action_steps[env_idx] = dict.fromkeys(ROLES, 0)
 
+                    # Sample 1 episode per 10 for detailed per-agent breakdown table
+                    if len(episodic_returns) % 10 == 0 and wandb_run is not None:
+                        import wandb
+
+                        columns = [
+                            "agent_id",
+                            "role",
+                            "alive",
+                            "damage_dealt",
+                            "damage_taken",
+                            "kills",
+                            "reward_total",
+                        ]
+                        table_data = []
+
+                        for bid in blue_ids:
+                            agent_info = infos_list[env_idx].get(bid, {})
+                            rc = agent_info.get("reward_components", {})
+                            role = _role_for_agent(bid)
+
+                            table_data.append(
+                                [
+                                    bid,
+                                    role,
+                                    agent_info.get("alive", False),
+                                    rc.get("damage", 0.0) * 200,  # Unnormalize
+                                    0.0,  # damage_taken - would need tracking
+                                    0.0,  # kills - would need per-agent tracking
+                                    sum(rc.values()),
+                                ]
+                            )
+
+                        episode_table = wandb.Table(columns=columns, data=table_data)
+                        wandb_run.log({"episodes/agent_breakdown": episode_table}, step=global_step)
+
                     episodes += 1
                     env_episode_counts[env_idx] += 1
 
