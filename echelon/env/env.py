@@ -1451,16 +1451,22 @@ class EchelonEnv:
             in_zone_by_agent[aid] = in_zone
 
         # Territory scoring: whichever team has more tonnage in the zone gains score.
-        # Difference-based: only reward the team WINNING the contest, not just present.
-        # If contested equally, neither team gets zone reward (incentive to fight).
-        # This prevents "hide in zone and collect XP" when enemies are there too.
+        # Zone reward with contested trickle + dominance bonus.
+        # - Uncontested: full reward (1.0) for being in zone alone
+        # - Contested: trickle (0.25) just for presence + bonus for winning
+        # This keeps agents IN the zone while still incentivizing combat.
+        CONTESTED_FLOOR = 0.25  # 25% of zone reward just for being present when contested
         total_tonnage = in_zone_tonnage["blue"] + in_zone_tonnage["red"]
         if total_tonnage > 0:
-            # Control margin: ranges from -1 (enemy dominates) to +1 (we dominate)
-            # Equal tonnage = 0 reward for both (must fight to break the tie)
             blue_margin = (in_zone_tonnage["blue"] - in_zone_tonnage["red"]) / total_tonnage
-            blue_tick = max(0.0, blue_margin)  # Only positive if winning
-            red_tick = max(0.0, -blue_margin)  # Only positive if winning
+            if in_zone_tonnage["blue"] > 0 and in_zone_tonnage["red"] > 0:
+                # Contested: floor + bonus for winning
+                blue_tick = CONTESTED_FLOOR + max(0.0, blue_margin) * (1.0 - CONTESTED_FLOOR)
+                red_tick = CONTESTED_FLOOR + max(0.0, -blue_margin) * (1.0 - CONTESTED_FLOOR)
+            else:
+                # Uncontested: winner gets full reward
+                blue_tick = 1.0 if in_zone_tonnage["blue"] > 0 else 0.0
+                red_tick = 1.0 if in_zone_tonnage["red"] > 0 else 0.0
         else:
             blue_tick = 0.0
             red_tick = 0.0
