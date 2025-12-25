@@ -1014,6 +1014,10 @@ def main() -> None:
                         "visible_contacts_sum": float(stats.get("visible_contacts_sum", 0.0)),
                         "visible_contacts_count": float(stats.get("visible_contacts_count", 1.0)),
                         "hostile_filter_on_count": float(stats.get("hostile_filter_on_count", 0.0)),
+                        # EWAR metrics
+                        "ecm_on_ticks": float(stats.get("ecm_on_ticks", 0.0)),
+                        "eccm_on_ticks": float(stats.get("eccm_on_ticks", 0.0)),
+                        "scout_ticks": float(stats.get("scout_ticks", 1.0)),
                     }
                     episodic_coord_stats.append(ep_coord)
 
@@ -1540,6 +1544,12 @@ def main() -> None:
                                     for s in recent_coord
                                 ]
                             )
+                        ),
+                        "perception/ecm_usage": float(
+                            np.mean([s["ecm_on_ticks"] / max(s["scout_ticks"], 1) for s in recent_coord])
+                        ),
+                        "perception/eccm_usage": float(
+                            np.mean([s["eccm_on_ticks"] / max(s["scout_ticks"], 1) for s in recent_coord])
                         ),
                     }
                 )

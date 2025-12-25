@@ -422,6 +422,10 @@ class EchelonEnv:
             "visible_contacts_sum": 0.0,
             "visible_contacts_count": 0.0,
             "hostile_filter_on_count": 0.0,
+            # EWAR usage metrics (scouts only)
+            "ecm_on_ticks": 0.0,
+            "eccm_on_ticks": 0.0,
+            "scout_ticks": 0.0,
         }
         self._damage_by_target: dict[str, float] = {}  # target_id -> damage received
         self._prev_fallen = {}
@@ -1981,6 +1985,16 @@ class EchelonEnv:
             centroid_dist = float(np.linalg.norm(centroid - np.array([zone_cx, zone_cy])))
             self._episode_stats["centroid_zone_dist_sum"] += centroid_dist
             self._episode_stats["centroid_zone_dist_count"] += 1.0
+
+        # Track EWAR usage (scouts only - they have ECM/ECCM)
+        for mid in self.blue_ids:
+            m = sim.mechs.get(mid)
+            if m is not None and m.alive and m.spec.name == "scout":
+                self._episode_stats["scout_ticks"] += 1.0
+                if m.ecm_on:
+                    self._episode_stats["ecm_on_ticks"] += 1.0
+                if m.eccm_on:
+                    self._episode_stats["eccm_on_ticks"] += 1.0
 
         # Reward weights (HIGH-6: added combat shaping)
         # NOTE: Terminal win/loss rewards REMOVED - they dominated the signal (98%) and
