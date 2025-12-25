@@ -51,14 +51,8 @@ class NavGraphCache:
         # If we're not the builder, wait for the builder to finish
         if not is_builder:
             await event.wait()
-            async with self._lock:
-                if world_hash in self._cache:
-                    self._cache.move_to_end(world_hash)
-                    return self._cache[world_hash]
-                # If not in cache after wait, builder must have failed
-                # Fall through to build ourselves (rare recovery path)
-                event = asyncio.Event()
-                self._building[world_hash] = event
+            # Retry the entire operation to handle builder failure correctly
+            return await self.get_or_build(world_hash, world_data)
 
         # We're the builder - build outside lock
         try:

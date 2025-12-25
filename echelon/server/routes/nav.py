@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from echelon.nav.planner import Planner
 
-from ..models import PathRequest
+from ..models import NavGraphRequest, PathRequest
 from ..nav_cache import nav_cache
 from ..world_cache import world_cache
 
@@ -17,11 +17,9 @@ router = APIRouter(prefix="/nav")
 
 
 @router.post("/graph")
-async def get_nav_graph(request: dict):
+async def get_nav_graph(request: NavGraphRequest):
     """Get or build NavGraph for a world (cached by hash)."""
-    world_hash = request.get("world_hash")
-    if not world_hash:
-        raise HTTPException(status_code=400, detail="world_hash required")
+    world_hash = request.world_hash
 
     world_data = world_cache.get(world_hash)
     if world_data is None:

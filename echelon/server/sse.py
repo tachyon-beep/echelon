@@ -55,9 +55,6 @@ class SSEManager:
         self._event_counter = 0
         self._shutdown = False
 
-        # Latest event per replay_id for new connections
-        self._latest_replay: dict[str, tuple[str, str]] | None = None
-
     async def register(self) -> SSEClient:
         """Register a new SSE client."""
         async with self._lock:

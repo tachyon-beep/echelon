@@ -34,6 +34,12 @@ class HealthResponse(BaseModel):
     uptime_s: float
 
 
+class NavGraphRequest(BaseModel):
+    """Request for NavGraph data."""
+
+    world_hash: str
+
+
 class PathRequest(BaseModel):
     """Request for A* pathfinding."""
 
