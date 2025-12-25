@@ -1544,22 +1544,22 @@ class EchelonEnv:
                 r_zone = W_ZONE_TICK * team_tick
 
             # (3) Combat shaping rewards with tactical context (HIGH-6)
-            # Kills/deaths in contested zone are weighted differently:
-            # - Kill in contested zone: BONUS (fighting for the objective)
-            # - Death in contested zone: REDUCED penalty (died for the mission)
-            # - Kill outside zone: normal reward
-            # - Death outside zone: FULL penalty (wasteful death)
+            # ALL combat rewards are multiplied when fighting in a contested zone.
+            # This teaches: "fighting FOR the zone is what matters"
+            # - Combat in contested zone: 2x damage, kills, assists
+            # - Death in contested zone: 0.5x penalty (died for the mission)
+            # - Combat outside zone: normal rewards
+            # - Death outside zone: full penalty (wasteful)
             agent_in_zone = in_zone_by_agent.get(aid, False)
             zone_is_contested = in_zone_tonnage["blue"] > 0 and in_zone_tonnage["red"] > 0
             fighting_for_zone = agent_in_zone and zone_is_contested
 
-            r_damage = W_DAMAGE * step_damage_dealt.get(aid, 0.0)
+            # 2x multiplier for ALL offensive actions in contested zone
+            combat_mult = 2.0 if fighting_for_zone else 1.0
 
-            # Kills: 1.5x bonus when fighting in contested zone
-            kill_mult = 1.5 if fighting_for_zone else 1.0
-            r_kill = W_KILL * kill_mult * step_kills.get(aid, 0)
-
-            r_assist = W_ASSIST * step_assists.get(aid, 0)
+            r_damage = W_DAMAGE * combat_mult * step_damage_dealt.get(aid, 0.0)
+            r_kill = W_KILL * combat_mult * step_kills.get(aid, 0)
+            r_assist = W_ASSIST * combat_mult * step_assists.get(aid, 0)
 
             # Deaths: 0.5x penalty when fighting in contested zone (died smart)
             if step_deaths.get(aid, False):
