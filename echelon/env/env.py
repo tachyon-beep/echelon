@@ -51,6 +51,7 @@ from ..gen.transforms import (
 from ..gen.validator import ConnectivityValidator
 from ..nav.graph import NavGraph, NodeID
 from ..nav.planner import Planner
+from ..rl.suite import SUITE_DESCRIPTOR_DIM, CombatSuiteSpec, build_suite_descriptor, get_suite_for_role
 from ..sim.mech import MechState
 from ..sim.sim import Sim
 from ..sim.world import VoxelWorld
@@ -299,6 +300,9 @@ class EchelonEnv:
         self._cached_paths: dict[str, list[NodeID]] = {}
         self._path_update_tick: dict[str, int] = {}
 
+        # Combat Suite assignments (determines observation richness per mech)
+        self._mech_suites: dict[str, CombatSuiteSpec] = {}
+
         # Performance caches (MED-11, MED-12): Static terrain data computed once at reset
         self._cached_telemetry: np.ndarray | None = None
         self._cached_occupancy_2d: np.ndarray | None = None
@@ -481,10 +485,14 @@ class EchelonEnv:
 
         zone_cx, zone_cy, _ = capture_zone_params(world.meta, size_x=world.size_x, size_y=world.size_y)
         mechs: dict[str, MechState] = {}
+        self._mech_suites = {}  # Reset suite assignments
         for team, ids in (("blue", self.blue_ids), ("red", self.red_ids)):
             for i, mech_id in enumerate(ids):
                 cls_name = _roster_for_index(i, self.num_packs)
+                command_role = _command_role_for_index(i, self.num_packs)
                 spec = self.mech_classes[cls_name]
+                # Assign combat suite based on class and command role
+                self._mech_suites[mech_id] = get_suite_for_role(cls_name, command_role)
                 hs = np.asarray(spec.size_voxels, dtype=np.float32) * 0.5
 
                 corner = spawn_corners[team]
@@ -1096,8 +1104,16 @@ class EchelonEnv:
             if hull_idx is not None:
                 hull_type[hull_idx] = 1.0
 
+            # Suite descriptor (14 dims): tells policy what sensor/C2 package this mech has
+            suite = self._mech_suites.get(aid)
+            if suite is not None:
+                suite_desc = np.array(build_suite_descriptor(suite), dtype=np.float32)
+            else:
+                suite_desc = np.zeros(SUITE_DESCRIPTOR_DIM, dtype=np.float32)
+
             parts.append(acoustic_intensities)
             parts.append(hull_type)
+            parts.append(suite_desc)
 
             parts.append(
                 np.asarray(
@@ -1157,7 +1173,7 @@ class EchelonEnv:
     def _obs_dim(self) -> int:
         comm_dim = PACK_SIZE * int(max(0, self.config.comm_dim))
         # self features =
-        #   acoustic_quadrants(4) + hull_type_onehot(4) +
+        #   acoustic_quadrants(4) + hull_type_onehot(4) + suite_descriptor(14) +
         #   targeted, under_fire, painted, shutdown, crit_heat, self_hp_norm, self_heat_norm,
         #   heat_headroom, stability_risk, damage_dir_local(3), incoming_missile, sensor_quality,
         #   jam_level, ecm_on, eccm_on, suppressed, ams_cd, self_vel(3), cooldowns(4), in_zone,
@@ -1171,6 +1187,7 @@ class EchelonEnv:
             + int(self.LOCAL_MAP_DIM)
             + telemetry_dim
             + self_dim
+            + SUITE_DESCRIPTOR_DIM
         )
 
     def _is_targeted(self, mech: MechState) -> bool:

@@ -372,3 +372,101 @@ class TestCombatSuiteActorCritic:
         # Note: the output is computed BEFORE resetting, so we need to check
         # that the internal state multiplication by (1-done) works
         # This test verifies the reset propagates correctly
+
+
+# === Environment Integration Tests ===
+
+
+class TestEnvSuiteIntegration:
+    """Test suite integration with EchelonEnv."""
+
+    def test_mechs_get_suite_assignments(self):
+        """All mechs are assigned combat suites during reset."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+
+        # All agents should have suite assignments
+        for aid in env.agents:
+            assert aid in env._mech_suites, f"Agent {aid} missing suite assignment"
+            suite = env._mech_suites[aid]
+            assert suite.suite_type is not None
+
+    def test_scout_gets_scout_suite(self):
+        """Scout mechs get SCOUT_RECON suite."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+
+        # blue_0 and blue_1 should be scouts
+        assert env._mech_suites["blue_0"].suite_type == SuiteType.SCOUT_RECON
+        assert env._mech_suites["blue_1"].suite_type == SuiteType.SCOUT_RECON
+
+    def test_pack_leader_gets_command_suite(self):
+        """Pack leaders get PACK_COMMAND suite."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, WorldConfig
+        from echelon.constants import PACK_SIZE
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+
+        # Last mech in pack (index 5 in pack of 6) is pack leader
+        pack_leader_id = f"blue_{PACK_SIZE - 1}"
+        assert env._mech_suites[pack_leader_id].suite_type == SuiteType.PACK_COMMAND
+
+    def test_observation_includes_suite_descriptor(self):
+        """Observation includes 14-dim suite descriptor."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            comm_dim=0,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        obs, _ = env.reset(seed=0)
+
+        # Observation dimension should include suite descriptor
+        expected_dim = env._obs_dim()
+        for aid in env.agents:
+            assert obs[aid].shape == (expected_dim,)
+
+        # Verify suite descriptor is non-zero for a scout
+        obs_blue0 = obs["blue_0"]
+        # Suite descriptor is at offset: contacts + comm + local_map + telemetry + acoustic + hull
+        contacts_total = env.CONTACT_SLOTS * env.CONTACT_DIM
+        telemetry_dim = 16 * 16
+        acoustic_dim = 4
+        hull_dim = 4
+        suite_start = contacts_total + env.LOCAL_MAP_DIM + telemetry_dim + acoustic_dim + hull_dim
+        suite_end = suite_start + SUITE_DESCRIPTOR_DIM
+
+        suite_desc = obs_blue0[suite_start:suite_end]
+        # Scout's suite descriptor should have first element = 1.0 (SCOUT_RECON one-hot)
+        assert suite_desc[0] == 1.0, f"Scout should have suite_type one-hot[0]=1.0, got {suite_desc[:6]}"

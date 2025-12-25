@@ -269,9 +269,9 @@ def test_shutdown_zeroes_observed_velocity():
     offset = contacts_total + comm_total + int(env.LOCAL_MAP_DIM) + telemetry_dim
 
     self_features = obs_v[offset:]
-    assert self_features.size >= 30
+    assert self_features.size >= 44  # acoustic(4) + hull(4) + suite_desc(14) + scalars(>=22)
 
-    self_vel_offset = 27  # acoustic(4) + hull(4) + 19 slots before self_vel
+    self_vel_offset = 41  # acoustic(4) + hull(4) + suite_desc(14) + 19 slots before self_vel
     self_vel = self_features[self_vel_offset : self_vel_offset + 3]
     assert np.allclose(self_vel, 0.0)
 
