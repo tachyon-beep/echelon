@@ -996,6 +996,23 @@ def main() -> None:
             next_value=next_value, next_done=next_done, gamma=args.gamma, gae_lambda=args.gae_lambda
         )
 
+        # Compute advantage and value statistics for logging
+        # (advantages and returns are guaranteed non-None after compute_gae)
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+        adv_mean = float(buffer.advantages.mean().item())
+        adv_std = float(buffer.advantages.std().item())
+        val_mean = float(buffer.values.mean().item())
+        val_std = float(buffer.values.std().item())
+
+        # Explained variance: how well values predict returns
+        # ev = 1 - Var(returns - values) / Var(returns)
+        with torch.no_grad():
+            returns_var = buffer.returns.var()
+            residual_var = (buffer.returns - buffer.values).var()
+            explained_var_t = 1.0 - (residual_var / (returns_var + 1e-8))
+            explained_var = float(explained_var_t.item())
+
         # PPO update
         metrics = trainer.update(buffer, init_state)
 
@@ -1285,6 +1302,11 @@ def main() -> None:
                 "train/avg_len": avg_len,
                 "train/win_rate_blue": win_rate_blue,
                 "train/win_rate_red": win_rate_red,
+                "policy/advantage_mean": adv_mean,
+                "policy/advantage_std": adv_std,
+                "policy/value_mean": val_mean,
+                "policy/value_std": val_std,
+                "policy/explained_variance": explained_var,
             }
             # Add per-role rewards
             for role in ROLES:
