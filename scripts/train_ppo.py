@@ -55,6 +55,166 @@ def _role_for_agent(agent_id: str) -> str:
 
 
 # ====================================================================
+# Metric Computation Helpers
+# ====================================================================
+
+
+def compute_return_stats(recent_returns: list[float]) -> dict[str, float]:
+    """Compute return distribution statistics.
+
+    Args:
+        recent_returns: List of recent episode returns.
+
+    Returns:
+        Dictionary with keys: mean, median, p10, p90, std.
+    """
+    if len(recent_returns) < 5:
+        return {"mean": 0.0, "median": 0.0, "p10": 0.0, "p90": 0.0, "std": 0.0}
+
+    arr = np.array(recent_returns)
+    return {
+        "mean": float(np.mean(arr)),
+        "median": float(np.median(arr)),
+        "p10": float(np.percentile(arr, 10)),
+        "p90": float(np.percentile(arr, 90)),
+        "std": float(np.std(arr)),
+    }
+
+
+def compute_combat_stats(recent_combat: list[dict[str, float]], num_agents: int) -> dict[str, float]:
+    """Compute combat statistics from recent episodes.
+
+    Args:
+        recent_combat: List of per-episode combat stat dicts with keys:
+            damage_blue, damage_red, kills_blue, kills_red, assists_blue, deaths_blue.
+        num_agents: Number of agents on the learning team (for survival rate calc).
+
+    Returns:
+        Dictionary with keys: damage_dealt, damage_ratio, kill_participation, survival_rate.
+    """
+    if not recent_combat:
+        return {"damage_dealt": 0.0, "damage_ratio": 1.0, "kill_participation": 0.0, "survival_rate": 1.0}
+
+    avg_damage_blue = float(np.mean([s["damage_blue"] for s in recent_combat]))
+    avg_damage_red = float(np.mean([s["damage_red"] for s in recent_combat]))
+    damage_ratio = avg_damage_blue / max(avg_damage_red, 1.0)
+
+    avg_kills = float(np.mean([s["kills_blue"] for s in recent_combat]))
+    avg_deaths = float(np.mean([s["deaths_blue"] for s in recent_combat]))
+    avg_assists = float(np.mean([s["assists_blue"] for s in recent_combat]))
+
+    # Kill participation = (kills + assists) / total_team_kills
+    total_kills = avg_kills + float(np.mean([s["kills_red"] for s in recent_combat]))
+    kill_participation = (avg_kills + avg_assists) / max(total_kills, 1.0)
+
+    # Survival rate = agents alive at end / total agents
+    survival_rate = 1.0 - (avg_deaths / max(num_agents, 1))
+
+    return {
+        "damage_dealt": avg_damage_blue,
+        "damage_ratio": damage_ratio,
+        "kill_participation": kill_participation,
+        "survival_rate": survival_rate,
+    }
+
+
+def compute_zone_stats(recent_zone: list[dict[str, float]]) -> dict[str, float]:
+    """Compute zone control metrics from recent episodes.
+
+    Args:
+        recent_zone: List of per-episode zone stat dicts with keys:
+            zone_ticks_blue, zone_ticks_red, contested_ticks, first_zone_entry, episode_length.
+
+    Returns:
+        Dictionary with keys: control_margin, contested_ratio, time_to_entry.
+    """
+    if not recent_zone:
+        return {"control_margin": 0.0, "contested_ratio": 0.0, "time_to_entry": 1.0}
+
+    # Zone control margin (blue - red normalized by episode length)
+    margins = [
+        (z["zone_ticks_blue"] - z["zone_ticks_red"]) / max(z["episode_length"], 1) for z in recent_zone
+    ]
+    zone_margin = float(np.mean(margins))
+
+    # Contested ratio
+    contested_ratios = [z["contested_ticks"] / max(z["episode_length"], 1) for z in recent_zone]
+    contested_ratio = float(np.mean(contested_ratios))
+
+    # Time to first zone entry (normalized)
+    entries = [
+        z["first_zone_entry"] / max(z["episode_length"], 1) for z in recent_zone if z["first_zone_entry"] >= 0
+    ]
+    time_to_zone = float(np.mean(entries)) if entries else 1.0
+
+    return {
+        "control_margin": zone_margin,
+        "contested_ratio": contested_ratio,
+        "time_to_entry": time_to_zone,
+    }
+
+
+def compute_coordination_stats(recent_coord: list[dict[str, float]]) -> dict[str, float]:
+    """Compute coordination metrics from recent episodes.
+
+    Args:
+        recent_coord: List of per-episode coordination stat dicts with keys:
+            pack_dispersion_sum, pack_dispersion_count, centroid_zone_dist_sum,
+            centroid_zone_dist_count, focus_fire_concentration.
+
+    Returns:
+        Dictionary with keys: pack_dispersion, centroid_zone_dist, focus_fire.
+    """
+    if not recent_coord:
+        return {"pack_dispersion": 0.0, "centroid_zone_dist": 0.0, "focus_fire": 0.0}
+
+    avg_dispersion = float(
+        np.mean([s["pack_dispersion_sum"] / max(s["pack_dispersion_count"], 1) for s in recent_coord])
+    )
+    avg_centroid_dist = float(
+        np.mean([s["centroid_zone_dist_sum"] / max(s["centroid_zone_dist_count"], 1) for s in recent_coord])
+    )
+    focus_fire = float(np.mean([s.get("focus_fire_concentration", 0.0) for s in recent_coord]))
+
+    return {
+        "pack_dispersion": avg_dispersion,
+        "centroid_zone_dist": avg_centroid_dist,
+        "focus_fire": focus_fire,
+    }
+
+
+def compute_perception_stats(recent_coord: list[dict[str, float]]) -> dict[str, float]:
+    """Compute perception metrics from recent episodes.
+
+    Args:
+        recent_coord: List of per-episode coordination stat dicts with keys:
+            visible_contacts_sum, visible_contacts_count, hostile_filter_on_count,
+            ecm_on_ticks, eccm_on_ticks, scout_ticks.
+
+    Returns:
+        Dictionary with keys: visible_contacts, hostile_filter_usage, ecm_usage, eccm_usage.
+    """
+    if not recent_coord:
+        return {"visible_contacts": 0.0, "hostile_filter_usage": 0.0, "ecm_usage": 0.0, "eccm_usage": 0.0}
+
+    visible_contacts = float(
+        np.mean([s["visible_contacts_sum"] / max(s["visible_contacts_count"], 1) for s in recent_coord])
+    )
+    hostile_filter_usage = float(
+        np.mean([s["hostile_filter_on_count"] / max(s["visible_contacts_count"], 1) for s in recent_coord])
+    )
+    ecm_usage = float(np.mean([s["ecm_on_ticks"] / max(s["scout_ticks"], 1) for s in recent_coord]))
+    eccm_usage = float(np.mean([s["eccm_on_ticks"] / max(s["scout_ticks"], 1) for s in recent_coord]))
+
+    return {
+        "visible_contacts": visible_contacts,
+        "hostile_filter_usage": hostile_filter_usage,
+        "ecm_usage": ecm_usage,
+        "eccm_usage": eccm_usage,
+    }
+
+
+# ====================================================================
 # Arena Self-Play Utilities
 # ====================================================================
 
@@ -1186,17 +1346,7 @@ def main() -> None:
         avg_len = float(np.mean(episodic_lengths[-window:])) if episodic_lengths else 0.0
 
         # Return distribution statistics
-        if len(episodic_returns) >= 5:
-            returns_arr = np.array(episodic_returns[-window:])  # Use recent window
-            return_median = float(np.median(returns_arr))
-            return_p10 = float(np.percentile(returns_arr, 10))
-            return_p90 = float(np.percentile(returns_arr, 90))
-            return_std = float(np.std(returns_arr))
-        else:
-            return_median = avg_return
-            return_p10 = avg_return
-            return_p90 = avg_return
-            return_std = 0.0
+        return_stats = compute_return_stats(episodic_returns[-window:])
 
         recent_outcomes = episodic_outcomes[-window:]
         n_out = len(recent_outcomes)
@@ -1239,52 +1389,11 @@ def main() -> None:
 
         # Combat statistics
         recent_combat = episodic_combat_stats[-window:]
-        if recent_combat:
-            avg_damage_blue = float(np.mean([s["damage_blue"] for s in recent_combat]))
-            avg_damage_red = float(np.mean([s["damage_red"] for s in recent_combat]))
-            damage_ratio = avg_damage_blue / max(avg_damage_red, 1.0)
-
-            avg_kills = float(np.mean([s["kills_blue"] for s in recent_combat]))
-            avg_deaths = float(np.mean([s["deaths_blue"] for s in recent_combat]))
-            avg_assists = float(np.mean([s["assists_blue"] for s in recent_combat]))
-
-            # Kill participation = (kills + assists) / total_team_kills
-            total_kills = avg_kills + float(np.mean([s["kills_red"] for s in recent_combat]))
-            kill_participation = (avg_kills + avg_assists) / max(total_kills, 1.0)
-
-            # Survival rate = agents alive at end / total agents
-            survival_rate = 1.0 - (avg_deaths / len(blue_ids))
-        else:
-            damage_ratio = 1.0
-            kill_participation = 0.0
-            survival_rate = 1.0
-            avg_damage_blue = 0.0
+        combat_stats = compute_combat_stats(recent_combat, len(blue_ids))
 
         # Zone control metrics
         recent_zone = episodic_zone_stats[-window:]
-        if recent_zone:
-            # Zone control margin (blue - red normalized by episode length)
-            margins = [
-                (z["zone_ticks_blue"] - z["zone_ticks_red"]) / max(z["episode_length"], 1)
-                for z in recent_zone
-            ]
-            zone_margin = float(np.mean(margins))
-
-            # Contested ratio
-            contested_ratios = [z["contested_ticks"] / max(z["episode_length"], 1) for z in recent_zone]
-            contested_ratio = float(np.mean(contested_ratios))
-
-            # Time to first zone entry (normalized)
-            entries = [
-                z["first_zone_entry"] / max(z["episode_length"], 1)
-                for z in recent_zone
-                if z["first_zone_entry"] >= 0
-            ]
-            time_to_zone = float(np.mean(entries)) if entries else 1.0
-        else:
-            zone_margin = 0.0
-            contested_ratio = 0.0
-            time_to_zone = 1.0
+        zone_stats = compute_zone_stats(recent_zone)
 
         # Print primary line
         opfor_str = f" | opfor {current_weapon_prob:.0%}" if args.train_mode == "heuristic" else ""
@@ -1526,15 +1635,7 @@ def main() -> None:
                 "policy/action_std_mean": float(action_std.mean()),
                 "policy/saturation_rate": saturation_rate,
             }
-            wandb_metrics.update(
-                {
-                    "returns/mean": avg_return,
-                    "returns/median": return_median,
-                    "returns/p10": return_p10,
-                    "returns/p90": return_p90,
-                    "returns/std": return_std,
-                }
-            )
+            wandb_metrics.update({f"returns/{k}": v for k, v in return_stats.items()})
             # Add per-role rewards
             for role in ROLES:
                 wandb_metrics[f"train/reward_{role}"] = avg_by_role[role]
@@ -1550,83 +1651,18 @@ def main() -> None:
             if args.train_mode == "heuristic":
                 wandb_metrics["curriculum/opfor_weapon_prob"] = current_weapon_prob
             # Add combat statistics
-            wandb_metrics.update(
-                {
-                    "combat/damage_dealt": avg_damage_blue,
-                    "combat/damage_ratio": damage_ratio,
-                    "combat/kill_participation": kill_participation,
-                    "combat/survival_rate": survival_rate,
-                }
-            )
+            wandb_metrics.update({f"combat/{k}": v for k, v in combat_stats.items()})
             # Add zone control metrics
-            wandb_metrics.update(
-                {
-                    "zone/control_margin": zone_margin,
-                    "zone/contested_ratio": contested_ratio,
-                    "zone/time_to_entry": time_to_zone,
-                }
-            )
+            wandb_metrics.update({f"zone/{k}": v for k, v in zone_stats.items()})
             # Coordination metrics - only compute every 10 updates
             if update % 10 == 0:
                 recent_coord = episodic_coord_stats[-window:]
-                if recent_coord:
-                    avg_dispersion = float(
-                        np.mean(
-                            [
-                                s["pack_dispersion_sum"] / max(s["pack_dispersion_count"], 1)
-                                for s in recent_coord
-                            ]
-                        )
-                    )
-                    avg_centroid_dist = float(
-                        np.mean(
-                            [
-                                s["centroid_zone_dist_sum"] / max(s["centroid_zone_dist_count"], 1)
-                                for s in recent_coord
-                            ]
-                        )
-                    )
-                else:
-                    avg_dispersion = 0.0
-                    avg_centroid_dist = 0.0
-
-                wandb_metrics.update(
-                    {
-                        "coordination/pack_dispersion": avg_dispersion,
-                        "coordination/centroid_zone_dist": avg_centroid_dist,
-                        "coordination/focus_fire": float(
-                            np.mean([s.get("focus_fire_concentration", 0.0) for s in recent_coord])
-                        ),
-                    }
-                )
+                coord_stats = compute_coordination_stats(recent_coord)
+                wandb_metrics.update({f"coordination/{k}": v for k, v in coord_stats.items()})
 
                 # Perception metrics (strided with coordination)
-                wandb_metrics.update(
-                    {
-                        "perception/visible_contacts": float(
-                            np.mean(
-                                [
-                                    s["visible_contacts_sum"] / max(s["visible_contacts_count"], 1)
-                                    for s in recent_coord
-                                ]
-                            )
-                        ),
-                        "perception/hostile_filter_usage": float(
-                            np.mean(
-                                [
-                                    s["hostile_filter_on_count"] / max(s["visible_contacts_count"], 1)
-                                    for s in recent_coord
-                                ]
-                            )
-                        ),
-                        "perception/ecm_usage": float(
-                            np.mean([s["ecm_on_ticks"] / max(s["scout_ticks"], 1) for s in recent_coord])
-                        ),
-                        "perception/eccm_usage": float(
-                            np.mean([s["eccm_on_ticks"] / max(s["scout_ticks"], 1) for s in recent_coord])
-                        ),
-                    }
-                )
+                perception_stats = compute_perception_stats(recent_coord)
+                wandb_metrics.update({f"perception/{k}": v for k, v in perception_stats.items()})
 
             # Histograms (every update)
             if len(episodic_returns) >= 10:
