@@ -23,7 +23,7 @@ def _make_env_thunk(env_cfg: EnvConfig):
     return EchelonEnv(env_cfg)
 
 
-def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig) -> None:
+def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig, initial_weapon_prob: float = 0.5) -> None:
     """Worker process that runs a single environment.
 
     Protocol:
@@ -32,18 +32,20 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig) -> None:
         ("get_team_alive", None) -> {"blue": bool, "red": bool}
         ("get_last_outcome", None) -> dict | None
         ("get_heuristic_actions", agent_ids) -> {agent_id: action}
+        ("set_heuristic_weapon_prob", float) -> None (updates weapon fire probability)
         ("close", None) -> exits
 
     Args:
         remote: Parent connection pipe for communication
         env_fn: Environment factory function
         env_cfg: Environment configuration
+        initial_weapon_prob: Initial weapon fire probability for heuristic (curriculum)
     """
     try:
         from echelon.agents.heuristic import HeuristicPolicy
 
         env = env_fn(env_cfg)
-        heuristic = HeuristicPolicy()
+        heuristic = HeuristicPolicy(weapon_fire_prob=initial_weapon_prob)
 
         while True:
             cmd, data = remote.recv()
@@ -60,6 +62,9 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig) -> None:
             elif cmd == "get_heuristic_actions":
                 res = {rid: heuristic.act(env, rid) for rid in data}
                 remote.send(res)
+            elif cmd == "set_heuristic_weapon_prob":
+                heuristic.weapon_fire_prob = float(data)
+                remote.send(None)
             elif cmd == "close":
                 remote.close()
                 break
@@ -88,19 +93,20 @@ class VectorEnv:
             ...
     """
 
-    def __init__(self, num_envs: int, env_cfg: EnvConfig):
+    def __init__(self, num_envs: int, env_cfg: EnvConfig, initial_weapon_prob: float = 0.5):
         """Initialize vectorized environment.
 
         Args:
             num_envs: Number of parallel environments
             env_cfg: Environment configuration (shared across all envs)
+            initial_weapon_prob: Initial weapon fire probability for heuristic opponent
         """
         self.num_envs = num_envs
         # Use spawn to avoid CUDA fork issues
         ctx = mp.get_context("spawn")
         self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(self.num_envs)], strict=False)
         self.ps = [
-            ctx.Process(target=_env_worker, args=(work_remote, _make_env_thunk, env_cfg))
+            ctx.Process(target=_env_worker, args=(work_remote, _make_env_thunk, env_cfg, initial_weapon_prob))
             for work_remote in self.work_remotes
         ]
         for p in self.ps:
@@ -178,6 +184,17 @@ class VectorEnv:
         for remote in self.remotes:
             remote.send(("get_heuristic_actions", red_ids))
         return [remote.recv() for remote in self.remotes]
+
+    def set_heuristic_weapon_prob(self, prob: float) -> None:
+        """Update heuristic weapon fire probability (for curriculum learning).
+
+        Args:
+            prob: New weapon fire probability (0.0 to 1.0)
+        """
+        for remote in self.remotes:
+            remote.send(("set_heuristic_weapon_prob", prob))
+        for remote in self.remotes:
+            remote.recv()  # Wait for acknowledgment
 
     def close(self) -> None:
         """Close all environments and terminate worker processes.

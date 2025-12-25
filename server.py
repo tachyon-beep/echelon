@@ -14,6 +14,8 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import gzip
+import hashlib
 import heapq
 import json
 import logging
@@ -26,10 +28,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from echelon.nav.graph import NavGraph
 from echelon.nav.planner import Planner
@@ -44,9 +47,12 @@ class Settings(BaseSettings):
     SSE_KEEPALIVE_S: float = 15.0  # Send keepalive every N seconds
     SSE_CLIENT_TIMEOUT_S: float = 60.0  # Disconnect idle clients after N seconds
     SSE_MAX_CLIENTS: int = 64  # Maximum concurrent SSE clients
-    SSE_MAX_BROADCAST_BYTES: int = 25 * 1024 * 1024  # Max replay size
+    SSE_MAX_BROADCAST_BYTES: int = 50 * 1024 * 1024  # Max replay size (50MB)
     SSE_MAX_LATEST_CHANNELS: int = 8  # Max channels to cache latest replay for
     SSE_RECENT_EVENTS_MAX: int = 100  # Max recent event IDs to track (not full data)
+
+    # World cache settings
+    WORLD_CACHE_MAX_SIZE: int = 32  # Max cached worlds (LRU eviction)
 
     # Replay settings
     REPLAYS_LIST_LIMIT: int = 200
@@ -81,11 +87,76 @@ class ReplayPushResponse(BaseModel):
     channel: str
     event_id: int
     clients_notified: int
+    world_ref: str | None = None  # Hash for future deduplication
 
 
 class ReplayListEntry(BaseModel):
     name: str
     path: str
+
+
+# --- Gzip Middleware ---
+
+
+class GzipRequestMiddleware(BaseHTTPMiddleware):
+    """Decompress gzip-encoded request bodies."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.headers.get("content-encoding") == "gzip":
+            body = await request.body()
+            try:
+                decompressed = gzip.decompress(body)
+                # Create new request with decompressed body
+                request._body = decompressed
+            except Exception as e:
+                logger.warning(f"Failed to decompress gzip body: {e}")
+                raise HTTPException(status_code=400, detail="Invalid gzip encoding") from e
+        return await call_next(request)
+
+
+# --- World Cache ---
+
+
+class WorldCache:
+    """LRU cache for world data, keyed by content hash."""
+
+    def __init__(self, max_size: int = 32):
+        self._cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._max_size = max_size
+
+    def _compute_hash(self, world: dict[str, Any]) -> str:
+        """Compute deterministic hash of world data."""
+        # Serialize deterministically
+        canonical = json.dumps(world, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+    def get(self, world_hash: str) -> dict[str, Any] | None:
+        """Get world by hash, updating LRU order."""
+        if world_hash in self._cache:
+            self._cache.move_to_end(world_hash)
+            return self._cache[world_hash]
+        return None
+
+    def put(self, world: dict[str, Any]) -> str:
+        """Store world, return its hash."""
+        world_hash = self._compute_hash(world)
+        if world_hash in self._cache:
+            self._cache.move_to_end(world_hash)
+        else:
+            self._cache[world_hash] = world
+            # Evict oldest if over capacity
+            while len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
+        return world_hash
+
+    def has(self, world_hash: str) -> bool:
+        return world_hash in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+world_cache = WorldCache(max_size=settings.WORLD_CACHE_MAX_SIZE)
 
 
 # --- SSE Client Management ---
@@ -400,6 +471,42 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Echelon Replay Server")
+app.add_middleware(GzipRequestMiddleware)
+
+
+# --- World Endpoints ---
+
+
+@app.get("/worlds/{world_hash}")
+async def get_world(world_hash: str):
+    """Get cached world by hash."""
+    world = world_cache.get(world_hash)
+    if world is None:
+        raise HTTPException(status_code=404, detail=f"World {world_hash} not found")
+    return world
+
+
+@app.put("/worlds/{world_hash}")
+async def put_world(world_hash: str, world: dict[str, Any]):
+    """Store world with specified hash (client computes hash)."""
+    # Verify hash matches
+    actual_hash = world_cache._compute_hash(world)
+    if actual_hash != world_hash:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Hash mismatch: expected {world_hash}, got {actual_hash}",
+        )
+    world_cache.put(world)
+    logger.info(f"Cached world {world_hash} ({len(world_cache)} worlds in cache)")
+    return {"status": "ok", "world_hash": world_hash}
+
+
+@app.head("/worlds/{world_hash}")
+async def check_world(world_hash: str):
+    """Check if world exists in cache (for client-side dedup)."""
+    if world_cache.has(world_hash):
+        return Response(status_code=200)
+    return Response(status_code=404)
 
 
 # --- SSE Endpoint ---
@@ -551,6 +658,10 @@ async def push_replay(
     The replay is broadcast to:
     - All global listeners (channel=None)
     - All listeners subscribed to the specified channel
+
+    Supports world deduplication:
+    - If replay contains "world_ref" instead of "world", resolves from cache
+    - If replay contains "world", caches it and replaces with "world_ref" for future
     """
     # Determine channel
     if not channel:
@@ -560,6 +671,28 @@ async def push_replay(
             channel = Path(run_dir).name
         else:
             channel = "default"
+
+    # Handle world deduplication
+    cached_world_ref: str | None = None
+    world_ref = replay.get("world_ref")
+    if world_ref and "world" not in replay:
+        # Resolve world from cache
+        world = world_cache.get(world_ref)
+        if world is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"world_ref {world_ref} not found in cache. Push world first.",
+            )
+        # Insert world into replay for broadcast
+        replay = {**replay, "world": world}
+        del replay["world_ref"]
+        cached_world_ref = world_ref  # Return the ref that was used
+        logger.debug(f"Resolved world_ref {world_ref} from cache")
+    elif "world" in replay:
+        # Cache the world for future deduplication
+        world = replay["world"]
+        cached_world_ref = world_cache.put(world)
+        logger.debug(f"Cached world {cached_world_ref} ({len(world_cache)} worlds in cache)")
 
     # Encode
     try:
@@ -573,7 +706,13 @@ async def push_replay(
     if nbytes > settings.SSE_MAX_BROADCAST_BYTES:
         logger.warning(f"Replay too large ({nbytes} bytes) for channel {channel}. Dropping.")
         return ReplayPushResponse(
-            status="too_large", bytes=nbytes, summary=summary, channel=channel, event_id=0, clients_notified=0
+            status="too_large",
+            bytes=nbytes,
+            summary=summary,
+            channel=channel,
+            event_id=0,
+            clients_notified=0,
+            world_ref=cached_world_ref,
         )
 
     # Broadcast via SSE
@@ -593,6 +732,7 @@ async def push_replay(
         channel=channel,
         event_id=event_id,
         clients_notified=clients_notified,
+        world_ref=cached_world_ref,
     )
 
 

@@ -48,7 +48,7 @@ class HeuristicPolicy:
     def __init__(
         self,
         desired_range: float = 5.5,
-        approach_speed_scale: float = 0.5,
+        approach_speed_scale: float = 1.0,
         weapon_fire_prob: float = 0.5,
     ):
         self.desired_range = float(desired_range)
@@ -169,10 +169,13 @@ class HeuristicPolicy:
             centroid = squad_pos / squad_count
             dist_to_squad = float(np.linalg.norm(centroid - mech.pos))
 
-            # If far from squad and safe-ish, blend toward squad.
-            if dist_to_squad > 15.0 and dist > 20.0:
-                # Blend 70% to squad, 30% to objective.
-                move_target = centroid * 0.7 + move_target * 0.3
+            # Only cluster AFTER reaching the zone area - don't let slow mechs hold others back
+            dist_to_zone = (
+                float(np.linalg.norm(zone_center[:2] - mech.pos[:2])) if zone_center is not None else 999.0
+            )
+            if dist_to_zone < zone_radius * 2 and dist_to_squad > 15.0 and dist > 20.0:
+                # Blend 50% to squad, 50% to objective (less aggressive clustering)
+                move_target = centroid * 0.5 + move_target * 0.5
 
         # Re-calculate delta based on move_target
         move_delta = move_target - mech.pos
@@ -209,9 +212,15 @@ class HeuristicPolicy:
         else:
             strafe_throttle *= 0.25
 
-        # Slow down approach so the baseline doesn't instantly brawl.
-        forward_throttle *= self.approach_speed_scale
-        strafe_throttle *= self.approach_speed_scale
+        # Scale approach speed (1.0 = full speed to zone, then slow for combat)
+        if in_zone:
+            # Already in zone - slow down for combat maneuvers
+            forward_throttle *= 0.5
+            strafe_throttle *= 0.5
+        else:
+            # Not in zone - move at full speed to get there
+            forward_throttle *= self.approach_speed_scale
+            strafe_throttle *= self.approach_speed_scale
 
         vertical = 0.0
 
@@ -229,8 +238,7 @@ class HeuristicPolicy:
             los_ok = has_los(world, mech.pos, target.pos)
 
             # Missile logic (Heavy only effectively)
-            missile_in_range = dist <= 35.0
-            missile_facing = abs(yaw_err) <= math.radians(90.0)
+            # Paint lock = 50 range, LOS only = 12 range
             painted_lock = False
             if target.painted_remaining > 0.0 and target.last_painter_id is not None:
                 painter = sim.mechs.get(target.last_painter_id)
@@ -238,15 +246,18 @@ class HeuristicPolicy:
                     p_me = _pack_index(mech_id)
                     p_painter = _pack_index(painter.mech_id)
                     painted_lock = (p_me is not None) and (p_me == p_painter)
+            missile_range = 50.0 if painted_lock else 12.0
+            missile_in_range = dist <= missile_range
+            missile_facing = abs(yaw_err) <= math.radians(90.0)
             can_fire_missile = missile_in_range and missile_facing and (los_ok or painted_lock)
 
-            # Kinetic logic (Gauss/AC)
-            kinetic_range = 60.0 if mech.spec.name == "heavy" else 20.0
+            # Kinetic logic (Gauss=20, AC=12)
+            kinetic_range = 20.0 if mech.spec.name == "heavy" else 12.0
             kinetic_in_range = dist <= kinetic_range
             kinetic_facing = abs(yaw_err) <= math.radians(30.0)
 
-            # Paint logic
-            paint_in_range = dist <= 15.0
+            # Paint logic (range=10)
+            paint_in_range = dist <= 10.0
             paint_facing = abs(yaw_err) <= math.radians(30.0)
 
             if mech.spec.name == "scout":

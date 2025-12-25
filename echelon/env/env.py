@@ -77,7 +77,7 @@ def default_mech_classes() -> dict[str, MechClassConfig]:
         "light": MechClassConfig(
             name="light",
             size_voxels=(1.5, 1.5, 2.0),
-            max_speed=6.0,
+            max_speed=6.8,  # Was 6.0 - faster to survive and contribute
             max_yaw_rate=1.5,  # Fast but catchable
             max_jet_accel=16.0,
             hp=80.0,
@@ -89,11 +89,11 @@ def default_mech_classes() -> dict[str, MechClassConfig]:
         "medium": MechClassConfig(
             name="medium",
             size_voxels=(2.5, 2.5, 3.0),
-            max_speed=4.5,
+            max_speed=5.5,  # Was 4.5 - faster to keep up and contribute
             max_yaw_rate=1.0,  # Moderate
             max_jet_accel=0.0,
-            hp=120.0,
-            leg_hp=60.0,
+            hp=150.0,  # Was 120 - more armor for frontline durability
+            leg_hp=75.0,  # Was 60 - proportional increase
             heat_cap=100.0,
             heat_dissipation=11.0,
             tonnage=55.0,
@@ -101,7 +101,7 @@ def default_mech_classes() -> dict[str, MechClassConfig]:
         "heavy": MechClassConfig(
             name="heavy",
             size_voxels=(3.5, 3.5, 4.0),
-            max_speed=3.3,
+            max_speed=2.5,  # Was 3.3 - slower so lights can race to zone
             max_yaw_rate=0.6,  # Slow turret
             max_jet_accel=0.0,
             hp=200.0,
@@ -1465,15 +1465,17 @@ class EchelonEnv:
         self.team_zone_score["red"] = float(self.team_zone_score["red"] + red_tick * dt_act)
 
         # Reward weights (HIGH-6: added combat shaping)
-        W_ZONE_TICK = 0.15  # Bumped: being IN zone should be more valuable than approaching
-        W_APPROACH = 0.05  # Reduced: was causing agents to hover near zone entrance
-        W_DAMAGE = 0.005  # Per point of damage dealt
-        W_KILL = 1.0  # Per kill
-        W_ASSIST = 0.5  # Per assist
-        W_DEATH = -0.1  # Death penalty (reduced: was -0.5, too harsh before learning to fight)
-        W_COHESION = 0.01  # Pack cohesion: reward tactical spacing with packmates
+        # NOTE: Terminal win/loss rewards REMOVED - they dominated the signal (98%) and
+        # didn't tell agents what they did wrong. Mission success is shaped via zone rewards.
+        # NOTE: All rewards scaled 10x (2025-12-25) - signal was too weak for gradient learning.
+        W_ZONE_TICK = 3.0  # Being IN zone and controlling it
+        W_APPROACH = 1.5  # Moving toward zone
+        W_DAMAGE = 0.05  # Per point of damage dealt
+        W_KILL = 10.0  # Per kill
+        W_ASSIST = 5.0  # Per assist
+        W_DEATH = -1.0  # Death penalty
+        # NOTE: W_COHESION removed - cohesion should emerge from survival pressure, not explicit reward.
         # NOTE: W_AGGRESSION removed - incentivized spam firing (reward hacking).
-        # W_DAMAGE already rewards successful combat outcomes.
 
         # Count teammates in zone for scaled breadcrumb decay (HIGH-7)
         teammates_in_zone: dict[str, int] = {"blue": 0, "red": 0}
@@ -1489,9 +1491,24 @@ class EchelonEnv:
             # Dead agents get 0 after the death step (terminal rewards handled at episode end - MED-3).
             if not (m.alive or m.died):
                 rewards[aid] = 0.0
+                infos[aid]["reward_components"] = {
+                    "approach": 0.0,
+                    "zone": 0.0,
+                    "damage": 0.0,
+                    "kill": 0.0,
+                    "assist": 0.0,
+                    "death": 0.0,
+                    "terminal": 0.0,
+                }
                 continue
 
-            r = 0.0
+            # Track individual reward components for debugging/analysis
+            r_approach = 0.0
+            r_zone = 0.0
+            r_damage = 0.0
+            r_kill = 0.0
+            r_assist = 0.0
+            r_death = 0.0
 
             # (1) Move toward objective: potential-style shaping on distance to zone center.
             # HIGH-7: Use exponential decay based on teammates in zone instead of binary cutoff.
@@ -1504,7 +1521,7 @@ class EchelonEnv:
                 if d0 is not None and d1 is not None and max_xy > 0.0:
                     phi0 = -float(d0 / max_xy)
                     phi1 = -float(d1 / max_xy)
-                    r += W_APPROACH * (phi1 - phi0) * approach_scale
+                    r_approach = W_APPROACH * (phi1 - phi0) * approach_scale
 
             # (2) Zone Control Reward: only agents IN the zone get credit for control.
             # This is proper credit assignment - if you're not in the zone, you're not
@@ -1513,28 +1530,30 @@ class EchelonEnv:
             # and gave distant agents zero gradient signal.
             team_tick = blue_tick if m.team == "blue" else red_tick
             if in_zone_by_agent.get(aid, False):
-                r += W_ZONE_TICK * team_tick
+                r_zone = W_ZONE_TICK * team_tick
 
             # (3) Combat shaping rewards (HIGH-6)
-            r += W_DAMAGE * step_damage_dealt.get(aid, 0.0)
-            r += W_KILL * step_kills.get(aid, 0)
-            r += W_ASSIST * step_assists.get(aid, 0)
+            r_damage = W_DAMAGE * step_damage_dealt.get(aid, 0.0)
+            r_kill = W_KILL * step_kills.get(aid, 0)
+            r_assist = W_ASSIST * step_assists.get(aid, 0)
             if step_deaths.get(aid, False):
-                r += W_DEATH
+                r_death = W_DEATH
 
-            # (4) Pack cohesion reward: encourage tactical spacing (10-30 voxels from pack center)
-            pack_ids = self._packmates.get(aid, [])
-            alive_packmates = [pid for pid in pack_ids if sim.mechs[pid].alive and pid != aid]
-            if len(alive_packmates) >= 1 and m.alive:
-                pack_positions = [sim.mechs[pid].pos for pid in alive_packmates]
-                pack_center = np.mean(pack_positions, axis=0)
-                dist_to_pack = float(np.linalg.norm(m.pos - pack_center))
-                if 10.0 < dist_to_pack < 30.0:
-                    r += W_COHESION  # Good tactical spacing
-                elif dist_to_pack > 50.0:
-                    r -= W_COHESION * 0.5  # Straggler penalty
+            # NOTE: Cohesion reward removed - should emerge from survival pressure, not shaping.
 
+            r = r_approach + r_zone + r_damage + r_kill + r_assist + r_death
             rewards[aid] = float(r)
+
+            # Store component breakdown in infos for training script analysis
+            infos[aid]["reward_components"] = {
+                "approach": float(r_approach),
+                "zone": float(r_zone),
+                "damage": float(r_damage),
+                "kill": float(r_kill),
+                "assist": float(r_assist),
+                "death": float(r_death),
+                "terminal": 0.0,
+            }
 
         # Episode end conditions (King of the Hill is the primary win condition).
         hp_after = self.team_hp()
@@ -1601,20 +1620,10 @@ class EchelonEnv:
                 "stats": dict(self._episode_stats),
             }
 
-            # MED-3: Terminal reward distribution for all agents (including dead ones).
-            # Win/loss signal helps dead agents learn what led to the outcome.
-            W_WIN = 5.0
-            W_LOSE = -5.0
-            W_DRAW = 0.0
-            for aid in self.agents:
-                m = sim.mechs[aid]
-                if winner == "draw":
-                    terminal_r = W_DRAW
-                elif winner == m.team:
-                    terminal_r = W_WIN
-                else:
-                    terminal_r = W_LOSE
-                rewards[aid] = float(rewards.get(aid, 0.0) + terminal_r)
+            # NOTE: Terminal win/loss rewards removed. They dominated the learning signal
+            # (98%) and didn't provide gradient information. Mission success is now shaped
+            # entirely through zone approach/control rewards. Dead agents learn from death
+            # penalty (W_DEATH) and the shaping rewards they received while alive.
 
         # Attach aggregated events to all infos (for now).
         if events:

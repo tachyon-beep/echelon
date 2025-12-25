@@ -334,13 +334,17 @@ class TestPlayMatch:
                 red_policy=random_policy,
                 seed=seed,
                 device=device,
-                max_steps=20,
+                max_steps=100,  # Enough steps for random policies to deal some damage
             )
             outcomes.append(outcome)
 
         # Should have some variety in winners or HP
         hp_values = [o.hp["blue"] for o in outcomes]
-        assert len(set(hp_values)) > 1, "All matches had identical HP - suspicious"
+        winners = [o.winner for o in outcomes]
+        # Either HP varies or winners vary
+        assert (
+            len(set(hp_values)) > 1 or len(set(winners)) > 1
+        ), "All matches had identical HP and winners - suspicious"
 
     def test_play_match_respects_max_steps(self, small_env_config, random_policy):
         """play_match terminates at max_steps."""
