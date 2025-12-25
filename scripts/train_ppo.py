@@ -643,6 +643,9 @@ def main() -> None:
     current_ep_returns_by_role: list[dict[str, float]] = [dict.fromkeys(ROLES, 0.0) for _ in range(num_envs)]
     episodic_returns_by_role: list[dict[str, float]] = []  # list of per-episode {role: total}
 
+    # Combat statistics tracking
+    episodic_combat_stats: list[dict[str, float]] = []
+
     # Per-component reward tracking (aggregate across all blue agents)
     COMPONENTS = ["approach", "zone", "damage", "kill", "assist", "death", "terminal"]
     current_ep_components: list[dict[str, float]] = [dict.fromkeys(COMPONENTS, 0.0) for _ in range(num_envs)]
@@ -961,6 +964,29 @@ def main() -> None:
                     current_ep_returns_by_role[env_idx] = dict.fromkeys(ROLES, 0.0)
                     current_ep_components[env_idx] = dict.fromkeys(COMPONENTS, 0.0)
 
+                    # Extract combat stats from episode outcome
+                    ep_combat = {
+                        "damage_blue": 0.0,
+                        "damage_red": 0.0,
+                        "kills_blue": 0.0,
+                        "kills_red": 0.0,
+                        "assists_blue": 0.0,
+                        "deaths_blue": 0.0,
+                    }
+                    if outcome is not None:
+                        stats = outcome.get("stats", {})
+                        ep_combat["damage_blue"] = float(stats.get("damage_blue", 0.0))
+                        ep_combat["damage_red"] = float(stats.get("damage_red", 0.0))
+                        ep_combat["kills_blue"] = float(stats.get("kills_blue", 0.0))
+                        ep_combat["kills_red"] = float(stats.get("kills_red", 0.0))
+                        ep_combat["assists_blue"] = float(stats.get("assists_blue", 0.0))
+                        # Count deaths from blue team alive status
+                        deaths = sum(
+                            1 for bid in blue_ids if not infos_list[env_idx].get(bid, {}).get("alive", True)
+                        )
+                        ep_combat["deaths_blue"] = float(deaths)
+                    episodic_combat_stats.append(ep_combat)
+
                     # Store action activation rates per role and reset
                     ep_action_rates: dict[str, dict[str, float]] = {}
                     for role in ROLES:
@@ -1102,6 +1128,29 @@ def main() -> None:
                 for slot in ACTION_SLOTS:
                     vals = [ep.get(role, {}).get(slot, 0.0) for ep in recent_actions]
                     avg_actions_by_role[role][slot] = float(np.mean(vals)) if vals else 0.0
+
+        # Combat statistics
+        recent_combat = episodic_combat_stats[-window:]
+        if recent_combat:
+            avg_damage_blue = float(np.mean([s["damage_blue"] for s in recent_combat]))
+            avg_damage_red = float(np.mean([s["damage_red"] for s in recent_combat]))
+            damage_ratio = avg_damage_blue / max(avg_damage_red, 1.0)
+
+            avg_kills = float(np.mean([s["kills_blue"] for s in recent_combat]))
+            avg_deaths = float(np.mean([s["deaths_blue"] for s in recent_combat]))
+            avg_assists = float(np.mean([s["assists_blue"] for s in recent_combat]))
+
+            # Kill participation = (kills + assists) / total_team_kills
+            total_kills = avg_kills + float(np.mean([s["kills_red"] for s in recent_combat]))
+            kill_participation = (avg_kills + avg_assists) / max(total_kills, 1.0)
+
+            # Survival rate = agents alive at end / total agents
+            survival_rate = 1.0 - (avg_deaths / len(blue_ids))
+        else:
+            damage_ratio = 1.0
+            kill_participation = 0.0
+            survival_rate = 1.0
+            avg_damage_blue = 0.0
 
         # Print primary line
         opfor_str = f" | opfor {current_weapon_prob:.0%}" if args.train_mode == "heuristic" else ""
@@ -1366,6 +1415,15 @@ def main() -> None:
             # Add opponent curriculum metrics
             if args.train_mode == "heuristic":
                 wandb_metrics["curriculum/opfor_weapon_prob"] = current_weapon_prob
+            # Add combat statistics
+            wandb_metrics.update(
+                {
+                    "combat/damage_dealt": avg_damage_blue,
+                    "combat/damage_ratio": damage_ratio,
+                    "combat/kill_participation": kill_participation,
+                    "combat/survival_rate": survival_rate,
+                }
+            )
             if eval_stats:
                 wandb_metrics["eval/win_rate"] = eval_stats["win_rate"]
                 wandb_metrics["eval/mean_hp_margin"] = eval_stats["mean_hp_margin"]
