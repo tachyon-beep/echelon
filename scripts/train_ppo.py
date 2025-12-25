@@ -38,6 +38,7 @@ from echelon.arena.match import play_match
 from echelon.constants import PACK_SIZE
 from echelon.rl.model import ActorCriticLSTM, LSTMState
 from echelon.training import PPOConfig, PPOTrainer, RolloutBuffer, VectorEnv, evaluate_vs_heuristic
+from echelon.training.spatial import SpatialAccumulator
 
 
 def _role_for_agent(agent_id: str) -> str:
@@ -575,6 +576,10 @@ def main() -> None:
 
     obs_dim = int(next(iter(next_obs_dicts[0].values())).shape[0])
 
+    # Initialize spatial tracking for heatmaps
+    spatial_acc = SpatialAccumulator(grid_size=32)
+    world_size = (float(env_cfg.world.size_x), float(env_cfg.world.size_y))
+
     # Initialize model and trainer
     model = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
     trainer = PPOTrainer(model, ppo_cfg, device)
@@ -929,6 +934,33 @@ def main() -> None:
                     dtype=np.float32,
                 )
                 arena_done_np[env_idx * len(red_ids) : (env_idx + 1) * len(red_ids)] = arena_d_i
+
+                # Record spatial data from events for heatmaps
+                # Events are attached to agent infos; pick any agent to get them
+                first_info = env_infos.get(blue_ids[0], {})
+                events = first_info.get("events", [])
+                # Track last damage position per target for kill events (kills don't include pos)
+                last_damage_pos: dict[str, tuple[float, float]] = {}
+                for event in events:
+                    event_type = event.get("type")
+                    pos = event.get("pos")
+                    if pos is not None and len(pos) >= 2:
+                        x, y = float(pos[0]), float(pos[1])
+                        # Record damage events
+                        if event_type in ("laser_hit", "projectile_hit"):
+                            damage = float(event.get("damage", 0.0))
+                            if damage > 0:
+                                spatial_acc.record_damage(x, y, damage, world_size)
+                            # Track position for potential kill attribution
+                            target_id = event.get("target")
+                            if target_id:
+                                last_damage_pos[target_id] = (x, y)
+                        # Record kill events using last known damage position
+                        elif event_type == "kill":
+                            target_id = event.get("target")
+                            if target_id and target_id in last_damage_pos:
+                                dx, dy = last_damage_pos[target_id]
+                                spatial_acc.record_death(dx, dy, world_size)
 
                 # Check episode termination
                 # NOTE: Zone wins set terminations=True (objective achieved).
@@ -1591,6 +1623,13 @@ def main() -> None:
                     wandb_metrics[f"distributions/action_{name}"] = wandb.Histogram(
                         all_actions[:, i].tolist()
                     )
+
+            # Spatial heatmaps (strided - every 50 updates)
+            if update % 50 == 0:
+                heatmap_images = spatial_acc.to_images()
+                for name, img in heatmap_images.items():
+                    wandb_metrics[f"spatial/{name}"] = img
+                spatial_acc.reset()
 
             if eval_stats:
                 wandb_metrics["eval/win_rate"] = eval_stats["win_rate"]
