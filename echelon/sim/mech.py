@@ -11,17 +11,38 @@ if TYPE_CHECKING:
 
 @dataclass
 class ReceivedOrder:
-    """An order received from a command mech."""
+    """An order received from a command mech.
+
+    Orders are contracts with escape clauses. Units can acknowledge,
+    report progress, or override with a valid reason.
+    """
 
     order_type: int  # OrderType enum value
     issuer_id: str  # Who gave the order
     target_id: str | None  # For FOCUS_FIRE: which enemy to target
     issued_at: float  # Sim time when order was issued
-    acknowledged: bool = False  # Whether agent has acknowledged
+
+    # Contract state
+    acknowledged: bool = False  # Whether agent has acknowledged receipt
+    progress: float = 0.0  # Order completion progress [0, 1]
+    override_reason: int = 0  # OrderOverride enum value (0 = NONE = following)
+
+    # Status flags (set by subordinate's status report action)
+    is_engaged: bool = False  # Currently in combat
+    is_blocked: bool = False  # Cannot proceed (nav failure, obstacle)
+    needs_support: bool = False  # Requesting assistance
 
     def is_expired(self, current_time: float, ttl: float = 10.0) -> bool:
         """Orders expire after TTL seconds."""
         return (current_time - self.issued_at) > ttl
+
+    def is_overridden(self) -> bool:
+        """Whether the order is being overridden (not followed)."""
+        return self.override_reason != 0
+
+    def is_complete(self) -> bool:
+        """Whether the order is complete (progress >= 1.0)."""
+        return self.progress >= 1.0
 
 
 @dataclass

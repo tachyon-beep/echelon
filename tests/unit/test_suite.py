@@ -367,7 +367,7 @@ class TestCombatSuiteActorCritic:
 
         # Now reset with done=1
         done = torch.ones(2)
-        _, _, _, _, next_state = model.get_action_and_value(obs, lstm_state, done)
+        _, _, _, _, _next_state = model.get_action_and_value(obs, lstm_state, done)
 
         # State should be reset (h and c start fresh after done)
         # Note: the output is computed BEFORE resetting, so we need to check
@@ -473,7 +473,16 @@ class TestEnvSuiteIntegration:
         assert suite_desc[0] == 1.0, f"Scout should have suite_type one-hot[0]=1.0, got {suite_desc[:6]}"
 
     def test_observation_includes_order_obs(self):
-        """Observation includes 10-dim order observation."""
+        """Observation includes 20-dim order observation (expanded for status reports).
+
+        Order observation layout:
+        - order_type_onehot (6): NONE, FOCUS_FIRE, ADVANCE, HOLD, RALLY, COVER
+        - time_since_order (1): normalized [0, 1]
+        - target_rel_pos (3): relative position to target
+        - progress (1): order completion progress [0, 1]
+        - override_reason_onehot (6): NONE, BLOCKED_PATH, CRITICAL_THREAT, etc.
+        - status_flags (3): is_engaged, is_blocked, needs_support
+        """
         from echelon import EchelonEnv
         from echelon.config import EnvConfig, WorldConfig
 
@@ -504,7 +513,8 @@ class TestEnvSuiteIntegration:
 
         order_obs = obs["blue_0"][order_start:order_end]
         # No orders issued yet, should be all zeros (NONE order type)
-        assert order_obs.shape == (10,)
+        # ORDER_OBS_DIM is now 20 (base 10 + status report fields 10)
+        assert order_obs.shape == (20,), f"Expected 20-dim order obs, got {order_obs.shape}"
         assert np.allclose(order_obs, 0.0), f"Expected all zeros for no order, got {order_obs}"
 
     def test_observation_includes_panel_stats(self):

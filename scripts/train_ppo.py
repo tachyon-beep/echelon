@@ -1408,7 +1408,7 @@ def main() -> None:
                 }
             )
             print(
-                f"arena_submit match {i+1}/{matches}: opp={opp_entry.entry_id} cand_as={cand_team} "
+                f"arena_submit match {i + 1}/{matches}: opp={opp_entry.entry_id} cand_as={cand_team} "
                 f"winner={out.winner} score={cand_score}"
             )
 

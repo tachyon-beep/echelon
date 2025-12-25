@@ -2,7 +2,7 @@
 
 import pytest
 
-from echelon import EnvConfig, WorldConfig
+from echelon import EchelonEnv, EnvConfig, WorldConfig
 from echelon.training.vec_env import VectorEnv
 
 
@@ -21,6 +21,12 @@ def small_env_cfg() -> EnvConfig:
     )
 
 
+def _get_action_dim(cfg: EnvConfig) -> int:
+    """Get action dimension from a temporary environment."""
+    env = EchelonEnv(cfg)
+    return env.ACTION_DIM
+
+
 def test_vec_env_single_env(small_env_cfg: EnvConfig):
     """Test VectorEnv with single environment (fast unit test)."""
     vec_env = VectorEnv(num_envs=1, env_cfg=small_env_cfg)
@@ -37,8 +43,9 @@ def test_vec_env_single_env(small_env_cfg: EnvConfig):
         agent_ids = list(obs_list[0].keys())
         assert len(agent_ids) > 0
 
-        # Create dummy actions (zeros) - ACTION_DIM=26 (base=9, target=5, obs_ctrl=4, comm_dim=8)
-        actions = {aid: [0.0] * 26 for aid in agent_ids}
+        # Create dummy actions (zeros) - use action dimension from config
+        action_dim = _get_action_dim(small_env_cfg)
+        actions = {aid: [0.0] * action_dim for aid in agent_ids}
 
         # Step
         obs_list, rew_list, term_list, trunc_list, info_list = vec_env.step([actions])
@@ -129,6 +136,7 @@ def test_vec_env_heuristic_actions_protocol(small_env_cfg: EnvConfig):
 
 def test_vec_env_multi_step_rollout(small_env_cfg: EnvConfig):
     """Integration test: collect short rollout."""
+    action_dim = _get_action_dim(small_env_cfg)
     with VectorEnv(num_envs=1, env_cfg=small_env_cfg) as vec_env:
         obs_list, _ = vec_env.reset(seeds=[42])
 
@@ -136,8 +144,8 @@ def test_vec_env_multi_step_rollout(small_env_cfg: EnvConfig):
         rollout_steps = 10
 
         for _ in range(rollout_steps):
-            # Create dummy actions (ACTION_DIM=26)
-            actions = {aid: [0.0] * 26 for aid in agent_ids}
+            # Create dummy actions using actual action dimension
+            actions = {aid: [0.0] * action_dim for aid in agent_ids}
 
             # Step
             obs_list, _rew_list, term_list, trunc_list, _ = vec_env.step([actions])

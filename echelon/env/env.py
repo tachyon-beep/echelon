@@ -23,6 +23,10 @@ from ..actions import (
     ORDER_PARAM_DIM,
     ORDER_RECIPIENT_DIM,
     ORDER_TYPE_DIM,
+    STATUS_ACKNOWLEDGE_DIM,
+    STATUS_FLAGS_DIM,
+    STATUS_OVERRIDE_DIM,
+    STATUS_PROGRESS_DIM,
     ActionIndex,
     OrderType,
 )
@@ -258,6 +262,14 @@ class EchelonEnv:
     CMD_RECIPIENT_START = -1
     CMD_PARAM_START = -1
 
+    # Status report actions (for subordinates reporting to command).
+    # Layout: [acknowledge(1), override(6), progress(1), flags(3)] = 11 dims
+    # Command mechs ignore these dimensions.
+    STATUS_ACK_START = -1  # Set in __init__
+    STATUS_OVERRIDE_START = -1
+    STATUS_PROGRESS_START = -1
+    STATUS_FLAGS_START = -1
+
     # Ego-centric local occupancy map (bool footprint) around the mech.
     LOCAL_MAP_R = 5
     LOCAL_MAP_SIZE = 2 * LOCAL_MAP_R + 1
@@ -273,8 +285,14 @@ class EchelonEnv:
         self.CMD_RECIPIENT_START = self.CMD_ORDER_TYPE_START + ORDER_TYPE_DIM
         self.CMD_PARAM_START = self.CMD_RECIPIENT_START + ORDER_RECIPIENT_DIM
 
-        # Total action dimension includes command actions
-        self.ACTION_DIM = int(self.CMD_PARAM_START + ORDER_PARAM_DIM)
+        # Status report action layout comes after command actions
+        self.STATUS_ACK_START = self.CMD_PARAM_START + ORDER_PARAM_DIM
+        self.STATUS_OVERRIDE_START = self.STATUS_ACK_START + STATUS_ACKNOWLEDGE_DIM
+        self.STATUS_PROGRESS_START = self.STATUS_OVERRIDE_START + STATUS_OVERRIDE_DIM
+        self.STATUS_FLAGS_START = self.STATUS_PROGRESS_START + STATUS_PROGRESS_DIM
+
+        # Total action dimension includes command + status report actions
+        self.ACTION_DIM = int(self.STATUS_FLAGS_START + STATUS_FLAGS_DIM)
         self.mech_classes = default_mech_classes()
 
         self.rng = np.random.default_rng(config.seed)
@@ -1237,8 +1255,9 @@ class EchelonEnv:
         return obs
 
     # Received order observation dimensions
-    # order_type_onehot(6) + time_since_order(1) + target_rel_pos(3) = 10
-    ORDER_OBS_DIM = 10
+    # order_type_onehot(6) + time_since_order(1) + target_rel_pos(3) +
+    # progress(1) + override_reason_onehot(6) + status_flags(3) = 20
+    ORDER_OBS_DIM = 20
 
     # Panel stats dimensions (compensates for mean pooling losing count information)
     # contact_count(1) + intel_count(1) + order_count(1) + squad_count(1) +
@@ -1246,15 +1265,21 @@ class EchelonEnv:
     PANEL_STATS_DIM = 8
 
     def _encode_received_order(self, viewer: MechState, sim: Sim) -> np.ndarray:
-        """Encode received order into observation vector (10 dims).
+        """Encode received order into observation vector (20 dims).
 
         Layout:
         - order_type_onehot (6): NONE, FOCUS_FIRE, ADVANCE, HOLD, RALLY, COVER
         - time_since_order (1): normalized [0, 1], 0=just issued, 1=about to expire
         - target_rel_pos (3): relative position to target (for FOCUS_FIRE), else zeros
+        - progress (1): order completion progress [0, 1]
+        - override_reason_onehot (6): NONE, BLOCKED_PATH, CRITICAL_THREAT, etc.
+        - status_flags (3): is_engaged, is_blocked, needs_support
+
+        The subordinate sees their own status report state, allowing them to
+        observe what they're currently reporting to their commander.
 
         Returns:
-            10-dim float32 array
+            20-dim float32 array
         """
         order_obs = np.zeros(self.ORDER_OBS_DIM, dtype=np.float32)
 
@@ -1279,6 +1304,20 @@ class EchelonEnv:
                 max_dim = float(max(world.size_x, world.size_y, world.size_z))
                 rel_pos = (target.pos - viewer.pos) / max_dim
                 order_obs[7:10] = rel_pos
+
+        # Progress (1 dim at index 10)
+        order_obs[10] = float(np.clip(order.progress, 0.0, 1.0))
+
+        # Override reason one-hot (6 dims at indices 11-16)
+        # 0=NONE, 1=BLOCKED_PATH, 2=CRITICAL_THREAT, 3=TARGET_DESTROYED,
+        # 4=RESOURCE_DEPLETED, 5=COMMS_LOST
+        override_idx = min(order.override_reason, 5)
+        order_obs[11 + override_idx] = 1.0
+
+        # Status flags (3 dims at indices 17-19)
+        order_obs[17] = 1.0 if order.is_engaged else 0.0
+        order_obs[18] = 1.0 if order.is_blocked else 0.0
+        order_obs[19] = 1.0 if order.needs_support else 0.0
 
         return order_obs
 
@@ -1455,6 +1494,54 @@ class EchelonEnv:
                 acknowledged=False,
             )
 
+    def _process_status_reports(self, act: dict[str, np.ndarray], sim: Sim) -> None:
+        """Process status report actions from subordinates.
+
+        Subordinates update their current_order state via status report actions.
+        This allows commanders to observe subordinate status.
+
+        Status report action layout (11 dims):
+        - acknowledge (1): > 0.5 means acknowledge order receipt
+        - override_reason (6): one-hot for override reason (argmax)
+        - progress (1): order completion progress [0, 1]
+        - flags (3): is_engaged, is_blocked, needs_support (> 0.5 means set)
+        """
+        for aid in self.agents:
+            m = sim.mechs.get(aid)
+            if m is None or not m.alive:
+                continue
+
+            # Only process status reports for mechs with an active order
+            order = m.current_order
+            if order is None or order.is_expired(sim.time_s):
+                continue
+
+            a = act.get(aid)
+            if a is None:
+                continue
+
+            # Parse status report action fields
+            ack_val = float(a[self.STATUS_ACK_START])
+            override_prefs = a[self.STATUS_OVERRIDE_START : self.STATUS_OVERRIDE_START + STATUS_OVERRIDE_DIM]
+            progress_val = float(a[self.STATUS_PROGRESS_START])
+            flags_vals = a[self.STATUS_FLAGS_START : self.STATUS_FLAGS_START + STATUS_FLAGS_DIM]
+
+            # Update order state
+            if ack_val > 0.5:
+                order.acknowledged = True
+
+            # Override reason (argmax)
+            override_reason = int(np.argmax(override_prefs))
+            order.override_reason = override_reason
+
+            # Progress (clamp to [0, 1])
+            order.progress = float(np.clip(progress_val, 0.0, 1.0))
+
+            # Status flags (threshold at 0.5)
+            order.is_engaged = bool(flags_vals[0] > 0.5) if flags_vals.size > 0 else False
+            order.is_blocked = bool(flags_vals[1] > 0.5) if flags_vals.size > 1 else False
+            order.needs_support = bool(flags_vals[2] > 0.5) if flags_vals.size > 2 else False
+
     def step(
         self, actions: dict[str, np.ndarray]
     ) -> tuple[
@@ -1560,6 +1647,9 @@ class EchelonEnv:
 
         # Process command actions for pack/squad leaders
         self._process_command_actions(act, sim)
+
+        # Process status reports from subordinates (updates their order state)
+        self._process_status_reports(act, sim)
 
         # Baselines for rewards/shaping.
         dt_act = float(self.config.dt_sim * self.config.decision_repeat)
