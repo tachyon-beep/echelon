@@ -1051,6 +1051,19 @@ def main() -> None:
         avg_return = float(np.mean(episodic_returns[-window:])) if episodic_returns else 0.0
         avg_len = float(np.mean(episodic_lengths[-window:])) if episodic_lengths else 0.0
 
+        # Return distribution statistics
+        if len(episodic_returns) >= 5:
+            returns_arr = np.array(episodic_returns[-window:])  # Use recent window
+            return_median = float(np.median(returns_arr))
+            return_p10 = float(np.percentile(returns_arr, 10))
+            return_p90 = float(np.percentile(returns_arr, 90))
+            return_std = float(np.std(returns_arr))
+        else:
+            return_median = avg_return
+            return_p10 = avg_return
+            return_p90 = avg_return
+            return_std = 0.0
+
         recent_outcomes = episodic_outcomes[-window:]
         n_out = len(recent_outcomes)
         win_rate_blue = recent_outcomes.count("blue") / n_out if n_out > 0 else 0.0
@@ -1330,6 +1343,15 @@ def main() -> None:
                 "policy/action_std_mean": float(action_std.mean()),
                 "policy/saturation_rate": saturation_rate,
             }
+            wandb_metrics.update(
+                {
+                    "returns/mean": avg_return,
+                    "returns/median": return_median,
+                    "returns/p10": return_p10,
+                    "returns/p90": return_p90,
+                    "returns/std": return_std,
+                }
+            )
             # Add per-role rewards
             for role in ROLES:
                 wandb_metrics[f"train/reward_{role}"] = avg_by_role[role]
