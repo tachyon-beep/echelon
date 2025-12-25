@@ -802,6 +802,12 @@ def main() -> None:
 
         init_state = lstm_state
 
+        # Action statistics accumulators
+        update_action_sum = np.zeros(action_dim, dtype=np.float64)
+        update_action_sq_sum = np.zeros(action_dim, dtype=np.float64)
+        update_action_count = 0
+        update_saturation_count = 0
+
         # Collect rollout
         for step in range(args.rollout_steps):
             global_step += batch_size
@@ -818,6 +824,13 @@ def main() -> None:
             buffer.values[step] = value
 
             action_np = action.detach().cpu().numpy()
+
+            # Accumulate action statistics for this update
+            actions_flat_np = action_np  # Already flat from model output
+            update_action_sum += actions_flat_np.sum(axis=0)
+            update_action_sq_sum += (actions_flat_np**2).sum(axis=0)
+            update_action_count += actions_flat_np.shape[0]
+            update_saturation_count += int((np.abs(actions_flat_np) > 0.95).sum())
 
             # Prepare action dictionaries
             all_actions_dicts: list[dict[str, np.ndarray]] = [{} for _ in range(num_envs)]
@@ -986,6 +999,12 @@ def main() -> None:
             next_done = torch.from_numpy(done_flat).to(device)
             arena_done = torch.from_numpy(arena_done_np).to(opponent_device)
             next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
+
+        # Action statistics for this update
+        action_mean = update_action_sum / max(update_action_count, 1)
+        action_var = (update_action_sq_sum / max(update_action_count, 1)) - (action_mean**2)
+        action_std = np.sqrt(np.maximum(action_var, 0))
+        saturation_rate = update_saturation_count / max(update_action_count * action_dim, 1)
 
         # Compute GAE
         with torch.no_grad():
@@ -1307,6 +1326,9 @@ def main() -> None:
                 "policy/value_mean": val_mean,
                 "policy/value_std": val_std,
                 "policy/explained_variance": explained_var,
+                "policy/action_mean_norm": float(np.linalg.norm(action_mean)),
+                "policy/action_std_mean": float(action_std.mean()),
+                "policy/saturation_rate": saturation_rate,
             }
             # Add per-role rewards
             for role in ROLES:
