@@ -226,7 +226,12 @@ class EchelonEnv:
     - filter (1 float): >0 selects hostile-only contacts
     """
 
-    CONTACT_SLOTS = 5
+    # Maximum contact slots (global cap for array allocation).
+    # Each suite fills a subset based on visual_contact_slots.
+    # Scout=20, Light=10, Medium=8, Heavy=5.
+    MAX_CONTACT_SLOTS = 20
+    CONTACT_SLOTS = MAX_CONTACT_SLOTS  # Alias for backwards compatibility
+
     # rel(3) + rel_vel(3) + yaw(2) + hp/heat(2) + stab/fallen/legged(3)
     # + relation_onehot(3) + class_onehot(4) + painted(1) + visible(1) + lead_pitch(1)
     # + closing_rate(1) + crossing_angle(1) = 25
@@ -236,8 +241,8 @@ class EchelonEnv:
     OBS_SORT_DIM = 3
     OBS_CTRL_DIM = OBS_SORT_DIM + 1  # + hostile-only filter
 
-    # Target selection preferences (argmax selects one of the CONTACT_SLOTS from the last obs).
-    TARGET_DIM = CONTACT_SLOTS
+    # Target selection preferences (argmax selects one of the MAX_CONTACT_SLOTS from the last obs).
+    TARGET_DIM = MAX_CONTACT_SLOTS
     TARGET_START = BASE_ACTION_DIM
 
     # Observation selection controls (applies to the next returned obs).
@@ -878,8 +883,12 @@ class EchelonEnv:
             viewer = sim.mechs[aid]
             if not viewer.alive:
                 obs[aid] = np.zeros(self._obs_dim(), dtype=np.float32)
-                self._last_contact_slots[aid] = [None] * self.CONTACT_SLOTS
+                self._last_contact_slots[aid] = [None] * self.MAX_CONTACT_SLOTS
                 continue
+
+            # Get combat suite for this mech (determines perception richness)
+            suite = self._mech_suites.get(aid)
+            effective_contact_slots = suite.visual_contact_slots if suite else 5
 
             pack_ids = self._packmates.get(aid, [])
             sort_mode = int(self._contact_sort_mode.get(aid, 0))
@@ -992,9 +1001,10 @@ class EchelonEnv:
 
             selected: list[tuple[str, str, bool]] = []
             used_counts = {"friendly": 0, "hostile": 0, "neutral": 0}
+            max_contact_count = effective_contact_slots  # Suite-variable contact limit
 
             if hostile_only:
-                reserved_local = {"friendly": 0, "hostile": self.CONTACT_SLOTS, "neutral": 0}
+                reserved_local = {"friendly": 0, "hostile": max_contact_count, "neutral": 0}
                 repurpose_local = ["hostile"]
             else:
                 reserved_local = reserved
@@ -1008,8 +1018,8 @@ class EchelonEnv:
                     selected.append((rel, oid, painted))
                 used_counts[rel] += take
 
-            # Repurpose any unused slots based on priority.
-            while len(selected) < self.CONTACT_SLOTS:
+            # Repurpose any unused slots based on priority (up to suite's contact limit).
+            while len(selected) < max_contact_count:
                 filled = False
                 for rel in repurpose_local:
                     i = used_counts[rel]
@@ -1022,16 +1032,21 @@ class EchelonEnv:
                 if not filled:
                     break
 
-            contact_feats = np.zeros((self.CONTACT_SLOTS, self.CONTACT_DIM), dtype=np.float32)
-            for i, (rel, oid, painted) in enumerate(selected[: self.CONTACT_SLOTS]):
+            # Allocate MAX_CONTACT_SLOTS for fixed-size VecEnv compatibility.
+            # Only fill up to effective_contact_slots (suite-variable).
+            contact_feats = np.zeros((self.MAX_CONTACT_SLOTS, self.CONTACT_DIM), dtype=np.float32)
+            for i, (rel, oid, painted) in enumerate(selected[:max_contact_count]):
                 contact_feats[i, :] = self._contact_features(
                     viewer, sim.mechs[oid], relation=rel, painted_by_pack=painted
                 )
 
-            slot_ids: list[str | None] = [None] * self.CONTACT_SLOTS
-            for i, (_, oid, _) in enumerate(selected[: self.CONTACT_SLOTS]):
+            slot_ids: list[str | None] = [None] * self.MAX_CONTACT_SLOTS
+            for i, (_, oid, _) in enumerate(selected[:max_contact_count]):
                 slot_ids[i] = oid
             self._last_contact_slots[aid] = slot_ids
+
+            # Count actual contacts (for panel stats)
+            contact_count = min(len(selected), max_contact_count)
 
             parts: list[np.ndarray] = []
             parts.append(contact_feats.reshape(-1))
@@ -1148,7 +1163,7 @@ class EchelonEnv:
                 hull_type[hull_idx] = 1.0
 
             # Suite descriptor (14 dims): tells policy what sensor/C2 package this mech has
-            suite = self._mech_suites.get(aid)
+            # (suite already fetched at start of loop for contact slots)
             if suite is not None:
                 suite_desc = np.array(build_suite_descriptor(suite), dtype=np.float32)
             else:
@@ -1157,10 +1172,14 @@ class EchelonEnv:
             # Received order observation (10 dims): tells policy what orders they've received
             order_obs = self._encode_received_order(viewer, sim)
 
+            # Panel stats (8 dims): compensates for mean pooling losing count information
+            panel_stats = self._build_panel_stats(viewer, sim, contact_count, suite)
+
             parts.append(acoustic_intensities)
             parts.append(hull_type)
             parts.append(suite_desc)
             parts.append(order_obs)
+            parts.append(panel_stats)
 
             parts.append(
                 np.asarray(
@@ -1221,6 +1240,11 @@ class EchelonEnv:
     # order_type_onehot(6) + time_since_order(1) + target_rel_pos(3) = 10
     ORDER_OBS_DIM = 10
 
+    # Panel stats dimensions (compensates for mean pooling losing count information)
+    # contact_count(1) + intel_count(1) + order_count(1) + squad_count(1) +
+    # threat_mass(1) + friendly_mass(1) + has_alert(1) + detail_level(1) = 8
+    PANEL_STATS_DIM = 8
+
     def _encode_received_order(self, viewer: MechState, sim: Sim) -> np.ndarray:
         """Encode received order into observation vector (10 dims).
 
@@ -1258,6 +1282,85 @@ class EchelonEnv:
 
         return order_obs
 
+    def _build_panel_stats(
+        self,
+        viewer: MechState,
+        sim: Sim,
+        contact_count: int,
+        suite: CombatSuiteSpec | None,
+    ) -> np.ndarray:
+        """Build panel stats observation vector (8 dims).
+
+        Panel stats compensate for mean pooling losing count information.
+        This tells the policy "how full is my display" and aggregate metrics.
+
+        Layout:
+        - contact_count_norm (1): filled contact slots / max slots
+        - intel_count_norm (1): filled intel slots / max slots (placeholder)
+        - order_count_norm (1): 1 if has active order, else 0
+        - squad_count_norm (1): visible squadmates / max squad (placeholder)
+        - threat_mass (1): sum of enemy mech class weights in contacts
+        - friendly_mass (1): sum of friendly mech class weights in contacts
+        - has_alert (1): 1 if critical condition (under fire, low HP, missile)
+        - detail_level (1): suite's squad_detail_level normalized
+
+        Returns:
+            8-dim float32 array
+        """
+        stats = np.zeros(self.PANEL_STATS_DIM, dtype=np.float32)
+
+        # Contact count normalized to suite capacity (or fallback to CONTACT_SLOTS)
+        max_contacts = suite.visual_contact_slots if suite else self.CONTACT_SLOTS
+        stats[0] = float(contact_count) / max(1, max_contacts)
+
+        # Intel count (placeholder - always 0 until intel stream is implemented)
+        stats[1] = 0.0
+
+        # Order count (1 if has active order)
+        has_order = viewer.current_order is not None and not viewer.current_order.is_expired(sim.time_s)
+        stats[2] = 1.0 if has_order else 0.0
+
+        # Squad count (placeholder - need to count visible squadmates)
+        # For now, use pack size since we always have pack visibility
+        stats[3] = float(PACK_SIZE - 1) / float(PACK_SIZE)  # Minus self
+
+        # Threat/friendly mass from contacts
+        # Mech class weights: scout=0.5, light=0.7, medium=1.0, heavy=1.5
+        class_weights = {"scout": 0.5, "light": 0.7, "medium": 1.0, "heavy": 1.5}
+        threat_mass = 0.0
+        friendly_mass = 0.0
+
+        # Count from last contact slots (entities we're tracking)
+        for slot_id in self._last_contact_slots.get(viewer.mech_id, []):
+            if slot_id is None:
+                continue
+            other = sim.mechs.get(slot_id)
+            if other is None or not other.alive:
+                continue
+            weight = class_weights.get(other.spec.name, 1.0)
+            if other.team != viewer.team:
+                threat_mass += weight
+            else:
+                friendly_mass += weight
+
+        # Normalize to reasonable range (0-1 for typical scenarios)
+        stats[4] = min(1.0, threat_mass / 5.0)  # 5 heavies = max
+        stats[5] = min(1.0, friendly_mass / 5.0)
+
+        # Alert flag: critical conditions requiring immediate attention
+        has_alert = (
+            viewer.was_hit  # Just took damage
+            or viewer.hp < viewer.spec.hp * 0.25  # Low HP
+            or viewer.heat > viewer.spec.heat_cap * 0.9  # Near overheat
+            or viewer.stability < 20.0  # About to fall
+        )
+        stats[6] = 1.0 if has_alert else 0.0
+
+        # Detail level from suite
+        stats[7] = suite.squad_detail_norm if suite else 0.0
+
+        return stats
+
     def _obs_dim(self) -> int:
         comm_dim = PACK_SIZE * int(max(0, self.config.comm_dim))
         # self features =
@@ -1270,13 +1373,14 @@ class EchelonEnv:
         self_dim = 47
         telemetry_dim = 16 * 16
         return (
-            self.CONTACT_SLOTS * self.CONTACT_DIM
+            self.MAX_CONTACT_SLOTS * self.CONTACT_DIM
             + comm_dim
             + int(self.LOCAL_MAP_DIM)
             + telemetry_dim
             + self_dim
             + SUITE_DESCRIPTOR_DIM
             + self.ORDER_OBS_DIM
+            + self.PANEL_STATS_DIM
         )
 
     def _is_targeted(self, mech: MechState) -> bool:

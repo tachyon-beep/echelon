@@ -506,3 +506,79 @@ class TestEnvSuiteIntegration:
         # No orders issued yet, should be all zeros (NONE order type)
         assert order_obs.shape == (10,)
         assert np.allclose(order_obs, 0.0), f"Expected all zeros for no order, got {order_obs}"
+
+    def test_observation_includes_panel_stats(self):
+        """Observation includes 8-dim panel stats."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=1,
+            comm_dim=0,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        obs, _ = env.reset(seed=0)
+
+        # Panel stats is at offset: contacts + comm + local_map + telemetry + acoustic + hull + suite_desc + order_obs
+        contacts_total = env.MAX_CONTACT_SLOTS * env.CONTACT_DIM
+        telemetry_dim = 16 * 16
+        acoustic_dim = 4
+        hull_dim = 4
+        panel_start = (
+            contacts_total
+            + env.LOCAL_MAP_DIM
+            + telemetry_dim
+            + acoustic_dim
+            + hull_dim
+            + SUITE_DESCRIPTOR_DIM
+            + env.ORDER_OBS_DIM
+        )
+        panel_end = panel_start + env.PANEL_STATS_DIM
+
+        panel_stats = obs["blue_0"][panel_start:panel_end]
+        assert panel_stats.shape == (8,), f"Expected 8-dim panel stats, got {panel_stats.shape}"
+        # Panel stats should be finite and mostly in [0, 1] range
+        assert np.all(np.isfinite(panel_stats)), f"Panel stats should be finite: {panel_stats}"
+
+    def test_scout_sees_more_contacts_than_heavy(self):
+        """Scout (20 slots) should fill more contacts than Heavy (5 slots)."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=40, size_y=40, size_z=15, obstacle_fill=0.0, ensure_connectivity=False),
+            num_packs=2,  # Need more agents for this test
+            comm_dim=0,
+            seed=0,
+            max_episode_seconds=5.0,
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+
+        # Position all mechs close together so everyone can see everyone
+        for _mid, m in env.sim.mechs.items():
+            m.pos[:] = np.array([20.0 + np.random.rand(), 20.0 + np.random.rand(), 1.0], dtype=np.float32)
+
+        obs, *_ = env.step({})
+
+        # blue_0 is Scout (index 0) with 20 contact slots
+        # blue_4 is Heavy (index 4) with 5 contact slots
+        scout_obs = obs["blue_0"]
+        heavy_obs = obs["blue_4"]
+
+        contacts_total = env.MAX_CONTACT_SLOTS * env.CONTACT_DIM
+        scout_contacts = scout_obs[:contacts_total].reshape(env.MAX_CONTACT_SLOTS, env.CONTACT_DIM)
+        heavy_contacts = heavy_obs[:contacts_total].reshape(env.MAX_CONTACT_SLOTS, env.CONTACT_DIM)
+
+        # Count non-zero contacts (visible flag is at index 21)
+        scout_visible = int((scout_contacts[:, 21] > 0.5).sum())
+        heavy_visible = int((heavy_contacts[:, 21] > 0.5).sum())
+
+        # Scout should see more contacts (up to 20) than Heavy (capped at 5)
+        assert (
+            scout_visible > heavy_visible
+        ), f"Scout should see more contacts than Heavy: scout={scout_visible}, heavy={heavy_visible}"
+        assert heavy_visible <= 5, f"Heavy should see at most 5 contacts: {heavy_visible}"
