@@ -649,6 +649,9 @@ def main() -> None:
     # Zone control metrics tracking
     episodic_zone_stats: list[dict[str, float]] = []
 
+    # Coordination metrics tracking
+    episodic_coord_stats: list[dict[str, float]] = []
+
     # Per-component reward tracking (aggregate across all blue agents)
     COMPONENTS = ["approach", "zone", "damage", "kill", "assist", "death", "terminal"]
     current_ep_components: list[dict[str, float]] = [dict.fromkeys(COMPONENTS, 0.0) for _ in range(num_envs)]
@@ -999,6 +1002,15 @@ def main() -> None:
                         "episode_length": float(ep_len),
                     }
                     episodic_zone_stats.append(ep_zone)
+
+                    # Extract coordination stats from episode outcome
+                    ep_coord = {
+                        "pack_dispersion_sum": float(stats.get("pack_dispersion_sum", 0.0)),
+                        "pack_dispersion_count": float(stats.get("pack_dispersion_count", 1.0)),
+                        "centroid_zone_dist_sum": float(stats.get("centroid_zone_dist_sum", 0.0)),
+                        "centroid_zone_dist_count": float(stats.get("centroid_zone_dist_count", 1.0)),
+                    }
+                    episodic_coord_stats.append(ep_coord)
 
                     # Store action activation rates per role and reset
                     ep_action_rates: dict[str, dict[str, float]] = {}
@@ -1471,6 +1483,36 @@ def main() -> None:
                     "zone/time_to_entry": time_to_zone,
                 }
             )
+            # Coordination metrics - only compute every 10 updates
+            if update % 10 == 0:
+                recent_coord = episodic_coord_stats[-window:]
+                if recent_coord:
+                    avg_dispersion = float(
+                        np.mean(
+                            [
+                                s["pack_dispersion_sum"] / max(s["pack_dispersion_count"], 1)
+                                for s in recent_coord
+                            ]
+                        )
+                    )
+                    avg_centroid_dist = float(
+                        np.mean(
+                            [
+                                s["centroid_zone_dist_sum"] / max(s["centroid_zone_dist_count"], 1)
+                                for s in recent_coord
+                            ]
+                        )
+                    )
+                else:
+                    avg_dispersion = 0.0
+                    avg_centroid_dist = 0.0
+
+                wandb_metrics.update(
+                    {
+                        "coordination/pack_dispersion": avg_dispersion,
+                        "coordination/centroid_zone_dist": avg_centroid_dist,
+                    }
+                )
             if eval_stats:
                 wandb_metrics["eval/win_rate"] = eval_stats["win_rate"]
                 wandb_metrics["eval/mean_hp_margin"] = eval_stats["mean_hp_margin"]

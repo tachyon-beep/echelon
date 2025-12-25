@@ -412,6 +412,11 @@ class EchelonEnv:
             "zone_ticks_red": 0.0,
             "contested_ticks": 0.0,
             "first_zone_entry_step": -1.0,  # -1 means never entered
+            # Coordination metrics
+            "pack_dispersion_sum": 0.0,
+            "pack_dispersion_count": 0.0,
+            "centroid_zone_dist_sum": 0.0,
+            "centroid_zone_dist_count": 0.0,
         }
         self._prev_fallen = {}
         self._prev_legged = {}
@@ -684,6 +689,32 @@ class EchelonEnv:
         for m in sim.mechs.values():
             hp[m.team] += max(0.0, float(m.hp)) if m.alive else 0.0
         return hp
+
+    def _compute_pack_dispersion(self, team: str) -> float:
+        """Compute mean pairwise distance between pack members."""
+        sim = self.sim
+        if sim is None:
+            return 0.0
+
+        ids = self.blue_ids if team == "blue" else self.red_ids
+        positions: list[np.ndarray] = []
+        for mid in ids:
+            m = sim.mechs.get(mid)
+            if m is not None and m.alive:
+                positions.append(m.pos[:2])  # XY only
+
+        if len(positions) < 2:
+            return 0.0
+
+        # Mean pairwise distance
+        total_dist = 0.0
+        count = 0
+        for i, p1 in enumerate(positions):
+            for p2 in positions[i + 1 :]:
+                total_dist += float(np.linalg.norm(p1 - p2))
+                count += 1
+
+        return total_dist / max(count, 1)
 
     def _contact_features(
         self,
@@ -1921,6 +1952,19 @@ class EchelonEnv:
             self._episode_stats["contested_ticks"] += 1.0
         if blue_in_zone and self._episode_stats["first_zone_entry_step"] < 0:
             self._episode_stats["first_zone_entry_step"] = float(self.step_count)
+
+        # Coordination metrics (computed every step, accumulated)
+        dispersion = self._compute_pack_dispersion("blue")
+        self._episode_stats["pack_dispersion_sum"] += dispersion
+        self._episode_stats["pack_dispersion_count"] += 1.0
+
+        # Centroid to zone distance
+        blue_positions = [sim.mechs[bid].pos[:2] for bid in self.blue_ids if sim.mechs[bid].alive]
+        if blue_positions:
+            centroid = np.mean(blue_positions, axis=0)
+            centroid_dist = float(np.linalg.norm(centroid - np.array([zone_cx, zone_cy])))
+            self._episode_stats["centroid_zone_dist_sum"] += centroid_dist
+            self._episode_stats["centroid_zone_dist_count"] += 1.0
 
         # Reward weights (HIGH-6: added combat shaping)
         # NOTE: Terminal win/loss rewards REMOVED - they dominated the signal (98%) and
