@@ -331,9 +331,8 @@
                 if (currentReplay && data.replay_id === currentReplay.id) {
                     currentReplay.chunks.set(data.chunk_index, data.frames);
                     updateProgress(currentReplay.chunks.size, currentReplay.chunkCount);
-                    if (data.chunk_index === 0) {
-                        assembleAndPlay();
-                    }
+                    // Reassemble on every chunk to extend playback as frames arrive
+                    assembleAndPlay();
                 }
             });
 
