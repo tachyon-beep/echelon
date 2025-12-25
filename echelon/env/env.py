@@ -417,7 +417,9 @@ class EchelonEnv:
             "pack_dispersion_count": 0.0,
             "centroid_zone_dist_sum": 0.0,
             "centroid_zone_dist_count": 0.0,
+            "focus_fire_concentration": 0.0,
         }
+        self._damage_by_target: dict[str, float] = {}  # target_id -> damage received
         self._prev_fallen = {}
         self._prev_legged = {}
         self._prev_shutdown = {}
@@ -1814,6 +1816,8 @@ class EchelonEnv:
                         step_shots_fired[shooter_id] = step_shots_fired.get(shooter_id, 0) + 1
                         if target_id in step_damage_received:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
+                        # Track damage by target for focus fire metric
+                        self._damage_by_target[target_id] = self._damage_by_target.get(target_id, 0.0) + dmg
                 elif et == "projectile_hit":
                     shooter_id = str(ev["shooter"])
                     target_id = str(ev["target"])
@@ -1826,6 +1830,8 @@ class EchelonEnv:
                         step_damage_dealt[shooter_id] = step_damage_dealt.get(shooter_id, 0.0) + dmg
                         if target_id in step_damage_received:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
+                        # Track damage by target for focus fire metric
+                        self._damage_by_target[target_id] = self._damage_by_target.get(target_id, 0.0) + dmg
                 elif et == "missile_launch":
                     shooter_id = str(ev["shooter"])
                     shooter = sim.mechs.get(shooter_id)
@@ -2127,6 +2133,14 @@ class EchelonEnv:
             infos[aid]["in_zone"] = bool(in_zone_by_agent.get(aid, False))
 
         if reason is not None:
+            # Focus fire concentration: damage on top target / total damage
+            if self._damage_by_target:
+                total_dmg = sum(self._damage_by_target.values())
+                max_target_dmg = max(self._damage_by_target.values())
+                self._episode_stats["focus_fire_concentration"] = max_target_dmg / max(total_dmg, 1.0)
+            else:
+                self._episode_stats["focus_fire_concentration"] = 0.0
+
             self.last_outcome = {
                 "reason": reason,
                 "winner": winner or "draw",

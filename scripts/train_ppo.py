@@ -1009,6 +1009,7 @@ def main() -> None:
                         "pack_dispersion_count": float(stats.get("pack_dispersion_count", 1.0)),
                         "centroid_zone_dist_sum": float(stats.get("centroid_zone_dist_sum", 0.0)),
                         "centroid_zone_dist_count": float(stats.get("centroid_zone_dist_count", 1.0)),
+                        "focus_fire_concentration": float(stats.get("focus_fire_concentration", 0.0)),
                     }
                     episodic_coord_stats.append(ep_coord)
 
@@ -1511,6 +1512,9 @@ def main() -> None:
                     {
                         "coordination/pack_dispersion": avg_dispersion,
                         "coordination/centroid_zone_dist": avg_centroid_dist,
+                        "coordination/focus_fire": float(
+                            np.mean([s.get("focus_fire_concentration", 0.0) for s in recent_coord])
+                        ),
                     }
                 )
             if eval_stats:
