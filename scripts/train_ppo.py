@@ -175,73 +175,83 @@ def git_info(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def push_replay(url: str, replay: dict, _world_cache: set[str] | None = None) -> None:
-    """Push replay JSON to server with gzip compression and world deduplication.
+def push_replay(url: str, replay: dict, chunk_size: int = 100) -> None:
+    """Push replay in chunks to server.
 
-    Uses a module-level cache to track which world hashes have been pushed this session.
-    Worlds are deduplicated by content hash - if the same world was already pushed,
-    only send a reference instead of the full ~30MB world data.
+    Sends world once (deduplicated by hash), then streams frames in chunks.
+    Each chunk is ~1-2 MB, keeping memory bounded on both ends.
     """
     if not url:
         return
 
     import gzip
     import hashlib
+    import logging
+    import uuid
 
     import requests  # type: ignore[import-untyped]
 
-    # Module-level cache for tracking pushed worlds
-    if _world_cache is None:
-        _world_cache = _pushed_worlds
+    logger = logging.getLogger(__name__)
 
     try:
         base_url = url.rsplit("/push", 1)[0]
 
-        # World deduplication: compute hash, push world if new, then reference it
+        # 1. Push world if not cached
         world = replay.get("world")
-        if world:
-            # Compute deterministic hash matching server's algorithm
-            canonical = json.dumps(world, sort_keys=True, separators=(",", ":"))
-            world_hash = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        if not world:
+            logger.warning("Replay has no world data, skipping push")
+            return
 
-            # Check if world already cached on server (HEAD request)
-            if world_hash not in _world_cache:
-                try:
-                    head_resp = requests.head(f"{base_url}/worlds/{world_hash}", timeout=2)
-                    if head_resp.status_code == 200:
-                        _world_cache.add(world_hash)
-                except Exception:
-                    pass  # Server might not support HEAD, push anyway
+        canonical = json.dumps(world, sort_keys=True, separators=(",", ":"))
+        world_hash = hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
-            # Push world if not cached
-            if world_hash not in _world_cache:
-                world_data = gzip.compress(json.dumps(world).encode())
-                requests.put(
-                    f"{base_url}/worlds/{world_hash}",
-                    data=world_data,
-                    headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
-                    timeout=10,
-                )
-                _world_cache.add(world_hash)
+        # Check server cache
+        try:
+            head_resp = requests.head(f"{base_url}/worlds/{world_hash}", timeout=2)
+            world_cached = head_resp.status_code == 200
+        except Exception:
+            world_cached = False
 
-            # Replace world with reference in replay
-            replay = {k: v for k, v in replay.items() if k != "world"}
-            replay["world_ref"] = world_hash
+        if not world_cached:
+            world_data = gzip.compress(json.dumps(world).encode())
+            requests.put(
+                f"{base_url}/worlds/{world_hash}",
+                data=world_data,
+                headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+                timeout=10,
+            )
 
-        # Compress and push replay
-        data = gzip.compress(json.dumps(replay).encode())
-        requests.post(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
-            timeout=10,
-        )
+        # 2. Push chunks
+        frames = replay.get("frames", [])
+        if not frames:
+            return
+
+        replay_id = uuid.uuid4().hex[:12]
+        chunk_count = (len(frames) + chunk_size - 1) // chunk_size
+
+        for i in range(chunk_count):
+            chunk = {
+                "replay_id": replay_id,
+                "world_ref": world_hash,
+                "chunk_index": i,
+                "chunk_count": chunk_count,
+                "frames": frames[i * chunk_size : (i + 1) * chunk_size],
+            }
+            if i == 0:
+                chunk["meta"] = {
+                    "episode": replay.get("episode"),
+                    "update": replay.get("update"),
+                }
+                # Include run metadata if present
+                if "run" in replay:
+                    chunk["run"] = replay["run"]
+
+            requests.post(url, json=chunk, timeout=10)
+
+    except requests.RequestException as e:
+        logger.warning(f"Failed to push replay chunk: {e}")
     except Exception as e:
-        print(f"Failed to push replay: {e}")
-
-
-# Track which worlds we've already pushed this session
-_pushed_worlds: set[str] = set()
+        logger.error(f"Unexpected error pushing replay: {e}")
 
 
 # ====================================================================
