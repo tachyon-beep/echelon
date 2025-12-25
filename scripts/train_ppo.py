@@ -1553,6 +1553,19 @@ def main() -> None:
                         ),
                     }
                 )
+
+            # Histograms (every update)
+            if len(episodic_returns) >= 10:
+                wandb_metrics["distributions/returns"] = wandb.Histogram(episodic_returns[-window:])
+
+            # Advantage histogram (from buffer, after PPO update)
+            if buffer.advantages is not None:
+                adv_sample = buffer.advantages.cpu().numpy().flatten()
+                if len(adv_sample) > 1000:
+                    # Sample to avoid huge histograms
+                    adv_sample = np.random.choice(adv_sample, 1000, replace=False)
+                wandb_metrics["distributions/advantages"] = wandb.Histogram(adv_sample.tolist())
+
             if eval_stats:
                 wandb_metrics["eval/win_rate"] = eval_stats["win_rate"]
                 wandb_metrics["eval/mean_hp_margin"] = eval_stats["mean_hp_margin"]
