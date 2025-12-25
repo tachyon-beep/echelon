@@ -811,6 +811,9 @@ def main() -> None:
 
         init_state = lstm_state
 
+        # Action samples for histograms
+        update_action_samples: list[np.ndarray] = []
+
         # Action statistics accumulators
         update_action_sum = np.zeros(action_dim, dtype=np.float64)
         update_action_sq_sum = np.zeros(action_dim, dtype=np.float64)
@@ -833,6 +836,10 @@ def main() -> None:
             buffer.values[step] = value
 
             action_np = action.detach().cpu().numpy()
+
+            # Sample actions for histogram (every 10th step to limit memory)
+            if step % 10 == 0:
+                update_action_samples.append(action_np.copy())
 
             # Accumulate action statistics for this update
             actions_flat_np = action_np  # Already flat from model output
@@ -1565,6 +1572,25 @@ def main() -> None:
                     # Sample to avoid huge histograms
                     adv_sample = np.random.choice(adv_sample, 1000, replace=False)
                 wandb_metrics["distributions/advantages"] = wandb.Histogram(adv_sample.tolist())
+
+            # Action histograms (strided - every 5 updates)
+            if update % 5 == 0 and update_action_samples:
+                all_actions = np.vstack(update_action_samples)
+                action_names = [
+                    "forward",
+                    "strafe",
+                    "vertical",
+                    "yaw",
+                    "primary",
+                    "vent",
+                    "secondary",
+                    "tertiary",
+                    "special",
+                ]
+                for i, name in enumerate(action_names[: min(len(action_names), all_actions.shape[1])]):
+                    wandb_metrics[f"distributions/action_{name}"] = wandb.Histogram(
+                        all_actions[:, i].tolist()
+                    )
 
             if eval_stats:
                 wandb_metrics["eval/win_rate"] = eval_stats["win_rate"]
