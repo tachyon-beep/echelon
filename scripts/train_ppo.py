@@ -1004,6 +1004,8 @@ def main() -> None:
         v_loss = metrics["vf_loss"]
         entropy_loss = metrics["entropy"]
         grad_norm = metrics["grad_norm"]
+        approx_kl = metrics["approx_kl"]
+        clipfrac = metrics["clipfrac"]
         loss = metrics["loss"]
 
         sps = int((global_step - start_global_step) / max(1e-6, (time.time() - start_time)))
@@ -1273,6 +1275,9 @@ def main() -> None:
                 "train/v_loss": v_loss,
                 "train/entropy": entropy_loss,
                 "train/grad_norm": grad_norm,
+                "train/approx_kl": approx_kl,
+                "train/clipfrac": clipfrac,
+                "train/learning_rate": trainer.optimizer.param_groups[0]["lr"],
                 "train/sps": sps,
                 "train/global_step": global_step,
                 "train/episodes": episodes,
