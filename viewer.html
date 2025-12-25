@@ -376,7 +376,7 @@
             }
 
             if (frames.length > 0) {
-                replayData = { world: currentReplay.world, frames };
+                replayData = { world: currentReplay.world, worldHash: currentReplay.worldHash, frames };
                 setupReplay();
                 if (!isPlaying && currentReplay.chunks.size === 1) {
                     isPlaying = true;
@@ -740,10 +740,16 @@
                 return;
             }
 
-            fetch('/nav/build', {
+            const worldHash = replayData.worldHash || (currentReplay && currentReplay.worldHash);
+            if (!worldHash) {
+                console.warn("Nav graph request missing world hash.");
+                return;
+            }
+
+            fetch('/nav/graph', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(replayData.world)
+                body: JSON.stringify({ world_hash: worldHash })
             })
                 .then(r => r.json())
                 .then(data => {
@@ -806,11 +812,17 @@
 
             const goalPos = frame.objective.zone_center.concat([0]);
 
+            const worldHash = replayData.worldHash || (currentReplay && currentReplay.worldHash);
+            if (!worldHash) {
+                console.warn("Path request missing world hash.");
+                return;
+            }
+
             fetch('/nav/path', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    world: replayData.world,
+                    world_hash: worldHash,
                     start_pos: mech.pos,
                     goal_pos: goalPos
                 })
