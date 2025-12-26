@@ -51,3 +51,4 @@ full-run-v1/
 # AI assistant configs (keep local, don't publish)
 CLAUDE.md
 GEMINI.md
+docs/temp_reports/
