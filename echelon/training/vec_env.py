@@ -246,6 +246,9 @@ class VectorEnv:
         if weapon_prob is not None:
             update["weapon_prob"] = weapon_prob
         if map_size_range is not None:
+            min_size, max_size = map_size_range
+            if min_size > max_size:
+                raise ValueError(f"map_size_range min ({min_size}) must be <= max ({max_size})")
             update["map_size_range"] = map_size_range
 
         if update:

@@ -170,8 +170,10 @@ def test_vec_env_curriculum_parameters(small_env_cfg: EnvConfig):
             map_size_range=(40, 60),
         )
 
-        # Verify it doesn't crash
-        pass
+        # Verify values are set
+        curriculum = vec_env.get_curriculum()
+        assert curriculum["weapon_prob"] == 0.3
+        assert curriculum["map_size_range"] == (40, 60)
     finally:
         vec_env.close()
 
