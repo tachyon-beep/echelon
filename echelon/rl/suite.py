@@ -308,9 +308,11 @@ def build_suite_descriptor(suite: CombatSuiteSpec) -> list[float]:
     suite_onehot[suite.suite_type.value - 1] = 1.0  # Enum values start at 1
 
     # Capability scalars (4 dims)
+    # sensor_range_mult ranges from 0.8 (Heavy) to 1.5 (Scout), normalize to [0, 1]
+    sensor_range_norm = (suite.sensor_range_mult - 0.8) / 0.7
     capabilities = [
         suite.contact_capacity_norm,  # Contact capacity
-        suite.sensor_range_mult,  # Sensor quality
+        sensor_range_norm,  # Sensor range (normalized)
         suite.sensor_fidelity,  # Classification quality
         suite.squad_detail_norm,  # Squad awareness
     ]
