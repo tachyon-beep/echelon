@@ -39,9 +39,9 @@ from echelon.constants import (
     PACK_HEAVY_IDX,
     PACK_LEADER_IDX,
     PACK_LIGHT_IDX,
-    PACK_MEDIUM_IDX,
-    PACK_SCOUT_A_IDX,
-    PACK_SCOUT_B_IDX,
+    PACK_MEDIUM_A_IDX,
+    PACK_MEDIUM_B_IDX,
+    PACK_SCOUT_IDX,
     PACK_SIZE,
 )
 from echelon.rl.lstm_state import LSTMState
@@ -54,14 +54,14 @@ def _role_for_agent(agent_id: str) -> str:
     """Get role name for an agent ID based on pack composition.
 
     Pack structure (PACK_SIZE=6):
-      0: Scout A, 1: Scout B, 2: Light, 3: Medium, 4: Heavy, 5: Pack Leader
+      0: Scout, 1: Light, 2-3: Medium, 4: Heavy, 5: Pack Leader (light chassis)
     """
     idx = int(agent_id.split("_")[1]) % PACK_SIZE
-    if idx in (PACK_SCOUT_A_IDX, PACK_SCOUT_B_IDX):
+    if idx == PACK_SCOUT_IDX:
         return "scout"
     elif idx == PACK_LIGHT_IDX:
         return "light"
-    elif idx == PACK_MEDIUM_IDX:
+    elif idx in (PACK_MEDIUM_A_IDX, PACK_MEDIUM_B_IDX):
         return "medium"
     elif idx == PACK_HEAVY_IDX:
         return "heavy"
@@ -821,7 +821,8 @@ def main() -> None:
     current_ep_lens = [0] * num_envs
 
     # Per-role reward tracking (for blue team only - the learning policy)
-    ROLES = ["heavy", "medium", "light", "scout"]
+    ROLES = ["heavy", "medium", "light", "scout", "leader"]
+    ROLE_ABBREV = {"heavy": "Hv", "medium": "Md", "light": "Lt", "scout": "Sc", "leader": "PL"}
     current_ep_returns_by_role: list[dict[str, float]] = [dict.fromkeys(ROLES, 0.0) for _ in range(num_envs)]
     episodic_returns_by_role: list[dict[str, float]] = []  # list of per-episode {role: total}
 
@@ -1424,7 +1425,7 @@ def main() -> None:
         )
 
         # Print per-role rewards (compact)
-        role_str = " | ".join([f"{r[0].upper()}:{avg_by_role[r]:.2f}" for r in ROLES])
+        role_str = " | ".join([f"{ROLE_ABBREV[r]}:{avg_by_role[r]:.2f}" for r in ROLES])
         print(f"         roles: {role_str}")
 
         # Print reward component breakdown with percentages
@@ -1441,12 +1442,12 @@ def main() -> None:
             action_parts = []
             for role in ROLES:
                 rates = avg_actions_by_role[role]
-                role_char = role[0].upper()
+                role_abbr = ROLE_ABBREV[role]
                 # Show prim/sec/tert as percentages (0-100%)
                 prim_pct = rates["primary"] * 100
                 sec_pct = rates["secondary"] * 100
                 tert_pct = rates["tertiary"] * 100
-                action_parts.append(f"{role_char}:p{prim_pct:.0f}/s{sec_pct:.0f}/t{tert_pct:.0f}")
+                action_parts.append(f"{role_abbr}:p{prim_pct:.0f}/s{sec_pct:.0f}/t{tert_pct:.0f}")
             print(f"       actions: {' | '.join(action_parts)}")
 
         # Evaluation
