@@ -23,8 +23,32 @@ class TestRolloutBufferCreation:
         assert buffer.rewards.shape == (10, 5)
         assert buffer.dones.shape == (10, 5)
         assert buffer.values.shape == (10, 5)
-        assert buffer.advantages is None
-        assert buffer.returns is None
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+        assert buffer.advantages.shape == (10, 5)
+        assert buffer.returns.shape == (10, 5)
+
+    def test_preallocates_advantages_and_returns(self):
+        """Verify advantages and returns are pre-allocated in create()."""
+        buffer = RolloutBuffer.create(
+            num_steps=10,
+            num_agents=5,
+            obs_dim=32,
+            action_dim=9,
+            device=torch.device("cpu"),
+        )
+
+        # Should be pre-allocated, not None
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+
+        # Correct shape
+        assert buffer.advantages.shape == (10, 5)
+        assert buffer.returns.shape == (10, 5)
+
+        # Should be zeros initially
+        assert (buffer.advantages == 0).all()
+        assert (buffer.returns == 0).all()
 
     def test_create_allocates_zeros(self):
         """Test create() initializes tensors to zero."""
@@ -37,6 +61,10 @@ class TestRolloutBufferCreation:
         assert torch.all(buffer.rewards == 0.0)
         assert torch.all(buffer.dones == 0.0)
         assert torch.all(buffer.values == 0.0)
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+        assert torch.all(buffer.advantages == 0.0)
+        assert torch.all(buffer.returns == 0.0)
 
     def test_create_uses_device(self):
         """Test create() allocates tensors on specified device."""
@@ -49,6 +77,10 @@ class TestRolloutBufferCreation:
         assert buffer.rewards.device == device
         assert buffer.dones.device == device
         assert buffer.values.device == device
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+        assert buffer.advantages.device == device
+        assert buffer.returns.device == device
 
 
 class TestGAESingleStep:
