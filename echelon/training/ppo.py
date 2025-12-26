@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
-from echelon.rl.model import LSTMState
+from echelon.rl.lstm_state import LSTMState
 from echelon.training.normalization import ReturnNormalizer
 
 if TYPE_CHECKING:

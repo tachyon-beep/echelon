@@ -36,7 +36,8 @@ from echelon.arena.glicko2 import GameResult
 from echelon.arena.league import League, LeagueEntry
 from echelon.arena.match import play_match
 from echelon.constants import PACK_SIZE
-from echelon.rl.model import ActorCriticLSTM, LSTMState
+from echelon.rl.lstm_state import LSTMState
+from echelon.rl.model import ActorCriticLSTM
 from echelon.training import PPOConfig, PPOTrainer, RolloutBuffer, VectorEnv, evaluate_vs_heuristic
 from echelon.training.spatial import SpatialAccumulator
 

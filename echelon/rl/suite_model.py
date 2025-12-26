@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
+from .lstm_state import LSTMState
 from .suite import SUITE_DESCRIPTOR_DIM, DeepSetEncoder
 
 # Epsilon for numerical stability in tanh squashing
@@ -27,14 +28,6 @@ def _atanh(x: Tensor) -> Tensor:
     """Inverse hyperbolic tangent with clamping for stability."""
     x = torch.clamp(x, -1.0 + TANH_EPS, 1.0 - TANH_EPS)
     return 0.5 * (torch.log1p(x) - torch.log1p(-x))
-
-
-@dataclass(frozen=True)
-class LSTMState:
-    """Hidden state for LSTM."""
-
-    h: Tensor  # [1, batch, hidden]
-    c: Tensor  # [1, batch, hidden]
 
 
 @dataclass(frozen=True)
@@ -111,7 +104,8 @@ class SuiteStreamEncoder(nn.Module):
             nn.LayerNorm(output_dim),
             nn.ReLU(),
             nn.Linear(output_dim, output_dim),
-            nn.Tanh(),
+            nn.LayerNorm(output_dim),  # LayerNorm + ReLU instead of Tanh for better gradient flow
+            nn.ReLU(),
         )
 
     def forward(self, obs: SuiteObservation) -> Tensor:

@@ -5,12 +5,14 @@ at episode boundaries. These tests verify:
 - State resets when done=1
 - State preserved when done=0
 - Per-agent isolation
+- NamedTuple behavior for torch.compile compatibility
 """
 
 import pytest
 import torch
 
-from echelon.rl.model import ActorCriticLSTM, LSTMState
+from echelon.rl.lstm_state import LSTMState
+from echelon.rl.model import ActorCriticLSTM
 
 
 @pytest.fixture
@@ -138,3 +140,31 @@ class TestLSTMStateHandling:
         assert torch.all(state.c == 0.0), "Initial c should be zeros"
         assert state.h.shape == (1, batch_size, model.lstm_hidden_dim)
         assert state.c.shape == (1, batch_size, model.lstm_hidden_dim)
+
+
+class TestLSTMStateNamedTuple:
+    """Verify LSTMState is a NamedTuple for torch.compile compatibility."""
+
+    def test_lstm_state_is_namedtuple(self):
+        """Verify LSTMState is a NamedTuple for torch.compile compatibility."""
+        # NamedTuples are subclasses of tuple
+        h = torch.zeros(1, 2, 128)
+        c = torch.zeros(1, 2, 128)
+        state = LSTMState(h=h, c=c)
+
+        assert isinstance(state, tuple)
+        assert state.h is h
+        assert state.c is c
+        # Can unpack like tuple
+        h_out, c_out = state
+        assert h_out is h
+        assert c_out is c
+
+    def test_lstm_state_immutable(self):
+        """NamedTuple should be immutable."""
+        h = torch.zeros(1, 2, 128)
+        c = torch.zeros(1, 2, 128)
+        state = LSTMState(h=h, c=c)
+
+        with pytest.raises(AttributeError):
+            state.h = torch.ones(1, 2, 128)  # type: ignore[misc]
