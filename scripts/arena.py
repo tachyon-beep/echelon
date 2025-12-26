@@ -169,7 +169,14 @@ def cmd_eval_candidate(args: argparse.Namespace) -> None:
     # Use a deterministic seed stream so reruns are reproducible.
     seed0 = int(args.seed) * 1_000_000 + 12345
     for i in range(matches):
-        opp_entry = rng.choice(pool)
+        # Use PFSP sampling: weight opponents by rating distance for better learning signal
+        # Cold-start warmup restricts pool for new policies (< 20 games)
+        opp_entry = league.sample_pfsp_opponent(
+            pool=pool,
+            candidate_rating=candidate_entry.rating.rating,
+            rng=rng,
+            candidate_games=candidate_entry.games,
+        )
         opp_policy = get_opponent(opp_entry.entry_id)
 
         if env_signature(opp_policy.env_cfg) != sig:
