@@ -158,3 +158,77 @@ def test_vec_env_multi_step_rollout(small_env_cfg: EnvConfig):
 
         # Should complete without errors
         assert len(obs_list) == 1
+
+
+def test_vec_env_curriculum_parameters(small_env_cfg: EnvConfig):
+    """Test that curriculum parameters can be dynamically updated."""
+    vec_env = VectorEnv(num_envs=1, env_cfg=small_env_cfg)
+    try:
+        # Set curriculum parameters
+        vec_env.set_curriculum(
+            weapon_prob=0.3,
+            map_size_range=(40, 60),
+        )
+
+        # Verify it doesn't crash
+        pass
+    finally:
+        vec_env.close()
+
+
+def test_vec_env_get_curriculum(small_env_cfg: EnvConfig):
+    """Test getting current curriculum state."""
+    vec_env = VectorEnv(num_envs=1, env_cfg=small_env_cfg)
+    try:
+        curriculum = vec_env.get_curriculum()
+
+        assert "weapon_prob" in curriculum
+        assert "map_size_range" in curriculum
+    finally:
+        vec_env.close()
+
+
+def test_vec_env_set_curriculum_updates_values(small_env_cfg: EnvConfig):
+    """Test that set_curriculum actually updates values."""
+    vec_env = VectorEnv(num_envs=1, env_cfg=small_env_cfg)
+    try:
+        # Set new values
+        vec_env.set_curriculum(
+            weapon_prob=0.75,
+            map_size_range=(30, 50),
+        )
+
+        # Get updated values
+        updated = vec_env.get_curriculum()
+
+        assert updated["weapon_prob"] == 0.75
+        assert updated["map_size_range"] == (30, 50)
+    finally:
+        vec_env.close()
+
+
+def test_vec_env_curriculum_partial_update(small_env_cfg: EnvConfig):
+    """Test that set_curriculum can update only specific parameters."""
+    vec_env = VectorEnv(num_envs=1, env_cfg=small_env_cfg)
+    try:
+        # Set initial values
+        vec_env.set_curriculum(
+            weapon_prob=0.5,
+            map_size_range=(40, 60),
+        )
+
+        # Update only weapon_prob
+        vec_env.set_curriculum(weapon_prob=0.8)
+
+        curriculum = vec_env.get_curriculum()
+        assert curriculum["weapon_prob"] == 0.8
+        assert curriculum["map_size_range"] == (40, 60)  # Should be unchanged
+
+        # Update only map_size_range
+        vec_env.set_curriculum(map_size_range=(50, 70))
+
+        curriculum = vec_env.get_curriculum()
+        assert curriculum["weapon_prob"] == 0.8  # Should be unchanged
+        assert curriculum["map_size_range"] == (50, 70)
+    finally:
+        vec_env.close()
