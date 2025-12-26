@@ -2043,17 +2043,17 @@ class EchelonEnv:
             r_death = 0.0
 
             # (1) Move toward objective: potential-style shaping on distance to zone center.
-            # HIGH-7: Use exponential decay based on teammates in zone instead of binary cutoff.
-            # More teammates in zone = less approach reward (encourages spreading out).
-            n_teammates = teammates_in_zone.get(m.team, 0)
-            approach_scale = 0.5**n_teammates  # 1.0 if none, 0.5 if 1, 0.25 if 2, etc.
+            # PBRS-compliant: r = gamma*phi(s') - phi(s) where phi(s) = -distance/max_xy
+            # Using gamma from config ensures strict PBRS compliance (Ng et al., 1999).
+            # Zone tick reward already incentivizes zone entry; approach is just a gradient.
             if not in_zone_by_agent.get(aid, False):  # Only give approach reward if not already in zone
                 d0 = dist_to_zone_before.get(aid)
                 d1 = dist_to_zone_after.get(aid)
                 if d0 is not None and d1 is not None and max_xy > 0.0:
                     phi0 = -float(d0 / max_xy)
                     phi1 = -float(d1 / max_xy)
-                    r_approach = W_APPROACH * (phi1 - phi0) * approach_scale
+                    gamma = self.config.shaping_gamma
+                    r_approach = W_APPROACH * (gamma * phi1 - phi0)
 
             # (2) Zone Control Reward: 2x base divided by number of teammates.
             # First agent in zone gets 2x reward (jackpot for taking point).
@@ -2100,6 +2100,31 @@ class EchelonEnv:
                 "death": float(r_death),
                 "terminal": 0.0,
             }
+
+        # Team reward mixing (MED-10): blend individual and team rewards to help credit assignment
+        # alpha=1.0 is fully individual, alpha=0.0 is fully team-based
+        alpha = self.config.team_reward_alpha
+        if alpha < 1.0:
+            # Compute team average rewards
+            team_rewards_sum: dict[str, float] = {"blue": 0.0, "red": 0.0}
+            team_counts: dict[str, int] = {"blue": 0, "red": 0}
+            for aid in self.agents:
+                m = sim.mechs[aid]
+                if m.alive or m.died:  # Only include agents that are alive or just died
+                    team_rewards_sum[m.team] += rewards[aid]
+                    team_counts[m.team] += 1
+
+            team_avg: dict[str, float] = {
+                team: (team_rewards_sum[team] / max(1, team_counts[team])) for team in ["blue", "red"]
+            }
+
+            # Blend individual and team rewards
+            for aid in self.agents:
+                m = sim.mechs[aid]
+                if m.alive or m.died:
+                    r_individual = rewards[aid]
+                    r_team = team_avg[m.team]
+                    rewards[aid] = alpha * r_individual + (1.0 - alpha) * r_team
 
         # Episode end conditions (King of the Hill is the primary win condition).
         hp_after = self.team_hp()
