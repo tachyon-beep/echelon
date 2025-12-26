@@ -35,7 +35,15 @@ from echelon import EchelonEnv, EnvConfig, WorldConfig
 from echelon.arena.glicko2 import GameResult
 from echelon.arena.league import League, LeagueEntry
 from echelon.arena.match import play_match
-from echelon.constants import PACK_SIZE
+from echelon.constants import (
+    PACK_HEAVY_IDX,
+    PACK_LEADER_IDX,
+    PACK_LIGHT_IDX,
+    PACK_MEDIUM_IDX,
+    PACK_SCOUT_A_IDX,
+    PACK_SCOUT_B_IDX,
+    PACK_SIZE,
+)
 from echelon.rl.lstm_state import LSTMState
 from echelon.rl.model import ActorCriticLSTM
 from echelon.training import PPOConfig, PPOTrainer, RolloutBuffer, VectorEnv, evaluate_vs_heuristic
@@ -43,16 +51,24 @@ from echelon.training.spatial import SpatialAccumulator
 
 
 def _role_for_agent(agent_id: str) -> str:
-    """Get role name for an agent ID (e.g., 'blue_0' -> 'heavy')."""
+    """Get role name for an agent ID based on pack composition.
+
+    Pack structure (PACK_SIZE=6):
+      0: Scout A, 1: Scout B, 2: Light, 3: Medium, 4: Heavy, 5: Pack Leader
+    """
     idx = int(agent_id.split("_")[1]) % PACK_SIZE
-    if idx == 0:
-        return "heavy"
-    elif idx <= 2:
-        return "medium"
-    elif idx == 3:
-        return "light"
-    else:
+    if idx in (PACK_SCOUT_A_IDX, PACK_SCOUT_B_IDX):
         return "scout"
+    elif idx == PACK_LIGHT_IDX:
+        return "light"
+    elif idx == PACK_MEDIUM_IDX:
+        return "medium"
+    elif idx == PACK_HEAVY_IDX:
+        return "heavy"
+    elif idx == PACK_LEADER_IDX:
+        return "leader"
+    else:
+        return "unknown"
 
 
 # ====================================================================
