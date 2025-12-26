@@ -103,14 +103,20 @@ def compute_combat_stats(recent_combat: list[dict[str, float]], num_agents: int)
 
     Args:
         recent_combat: List of per-episode combat stat dicts with keys:
-            damage_blue, damage_red, kills_blue, kills_red, assists_blue, deaths_blue.
+            damage_blue, damage_red, kills_blue, kills_red, assists_blue, paints_blue, deaths_blue.
         num_agents: Number of agents on the learning team (for survival rate calc).
 
     Returns:
-        Dictionary with keys: damage_dealt, damage_ratio, kill_participation, survival_rate.
+        Dictionary with keys: damage_dealt, damage_ratio, kill_participation, paint_rate, survival_rate.
     """
     if not recent_combat:
-        return {"damage_dealt": 0.0, "damage_ratio": 1.0, "kill_participation": 0.0, "survival_rate": 1.0}
+        return {
+            "damage_dealt": 0.0,
+            "damage_ratio": 1.0,
+            "kill_participation": 0.0,
+            "paint_rate": 0.0,
+            "survival_rate": 1.0,
+        }
 
     avg_damage_blue = float(np.mean([s["damage_blue"] for s in recent_combat]))
     avg_damage_red = float(np.mean([s["damage_red"] for s in recent_combat]))
@@ -119,10 +125,14 @@ def compute_combat_stats(recent_combat: list[dict[str, float]], num_agents: int)
     avg_kills = float(np.mean([s["kills_blue"] for s in recent_combat]))
     avg_deaths = float(np.mean([s["deaths_blue"] for s in recent_combat]))
     avg_assists = float(np.mean([s["assists_blue"] for s in recent_combat]))
+    avg_paints = float(np.mean([s.get("paints_blue", 0.0) for s in recent_combat]))
 
     # Kill participation = (kills + assists) / blue_team_kills
     # Measures team coordination: 1.0 = solo kills, 2.0 = every kill has 1 assist
     kill_participation = (avg_kills + avg_assists) / max(avg_kills, 1.0)
+
+    # Paint rate = paint locks per episode (measures scout/support role effectiveness)
+    paint_rate = avg_paints
 
     # Survival rate = agents alive at end / total agents
     survival_rate = 1.0 - (avg_deaths / max(num_agents, 1))
@@ -131,6 +141,7 @@ def compute_combat_stats(recent_combat: list[dict[str, float]], num_agents: int)
         "damage_dealt": avg_damage_blue,
         "damage_ratio": damage_ratio,
         "kill_participation": kill_participation,
+        "paint_rate": paint_rate,
         "survival_rate": survival_rate,
     }
 
@@ -206,7 +217,7 @@ def compute_perception_stats(recent_coord: list[dict[str, float]]) -> dict[str, 
     Args:
         recent_coord: List of per-episode coordination stat dicts with keys:
             visible_contacts_sum, visible_contacts_count, hostile_filter_on_count,
-            ecm_on_ticks, eccm_on_ticks, scout_ticks.
+            ecm_on_ticks, eccm_on_ticks, light_ticks.
 
     Returns:
         Dictionary with keys: visible_contacts, hostile_filter_usage, ecm_usage, eccm_usage.
@@ -220,8 +231,9 @@ def compute_perception_stats(recent_coord: list[dict[str, float]]) -> dict[str, 
     hostile_filter_usage = float(
         np.mean([s["hostile_filter_on_count"] / max(s["visible_contacts_count"], 1) for s in recent_coord])
     )
-    ecm_usage = float(np.mean([s["ecm_on_ticks"] / max(s["scout_ticks"], 1) for s in recent_coord]))
-    eccm_usage = float(np.mean([s["eccm_on_ticks"] / max(s["scout_ticks"], 1) for s in recent_coord]))
+    # ECM/ECCM moved from Scout to Light (2025-12-27)
+    ecm_usage = float(np.mean([s["ecm_on_ticks"] / max(s["light_ticks"], 1) for s in recent_coord]))
+    eccm_usage = float(np.mean([s["eccm_on_ticks"] / max(s["light_ticks"], 1) for s in recent_coord]))
 
     return {
         "visible_contacts": visible_contacts,
@@ -836,7 +848,17 @@ def main() -> None:
     episodic_coord_stats: list[dict[str, float]] = []
 
     # Per-component reward tracking (aggregate across all blue agents)
-    COMPONENTS = ["approach", "zone", "arrival", "damage", "kill", "assist", "death", "terminal"]
+    COMPONENTS = [
+        "approach",
+        "zone",
+        "arrival",
+        "damage",
+        "kill",
+        "assist",
+        "death",
+        "paint_assist",
+        "terminal",
+    ]
     current_ep_components: list[dict[str, float]] = [dict.fromkeys(COMPONENTS, 0.0) for _ in range(num_envs)]
     episodic_components: list[dict[str, float]] = []  # list of per-episode {component: total}
 
@@ -1194,6 +1216,7 @@ def main() -> None:
                         "kills_blue": 0.0,
                         "kills_red": 0.0,
                         "assists_blue": 0.0,
+                        "paints_blue": 0.0,
                         "deaths_blue": 0.0,
                     }
                     if outcome is not None:
@@ -1203,6 +1226,7 @@ def main() -> None:
                         ep_combat["kills_blue"] = float(stats.get("kills_blue", 0.0))
                         ep_combat["kills_red"] = float(stats.get("kills_red", 0.0))
                         ep_combat["assists_blue"] = float(stats.get("assists_blue", 0.0))
+                        ep_combat["paints_blue"] = float(stats.get("paints_blue", 0.0))
                         # Count deaths from blue team alive status
                         deaths = sum(
                             1 for bid in blue_ids if not infos_list[env_idx].get(bid, {}).get("alive", True)
@@ -1231,10 +1255,10 @@ def main() -> None:
                         "visible_contacts_sum": float(stats.get("visible_contacts_sum", 0.0)),
                         "visible_contacts_count": float(stats.get("visible_contacts_count", 1.0)),
                         "hostile_filter_on_count": float(stats.get("hostile_filter_on_count", 0.0)),
-                        # EWAR metrics
+                        # EWAR metrics (ECM/ECCM moved from Scout to Light 2025-12-27)
                         "ecm_on_ticks": float(stats.get("ecm_on_ticks", 0.0)),
                         "eccm_on_ticks": float(stats.get("eccm_on_ticks", 0.0)),
-                        "scout_ticks": float(stats.get("scout_ticks", 1.0)),
+                        "light_ticks": float(stats.get("light_ticks", 1.0)),
                     }
                     episodic_coord_stats.append(ep_coord)
 
