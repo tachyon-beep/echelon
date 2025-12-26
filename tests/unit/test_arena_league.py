@@ -581,3 +581,171 @@ class TestRatingPeriod:
         league.apply_rating_period(results)
 
         assert league.entries["p1"].games == 8  # 5 + 3
+
+
+class TestCommanderRetirement:
+    """Test commander retirement functionality."""
+
+    def test_retire_stale_commanders(self):
+        """Test that old, low-rated commanders can be retired."""
+        league = League()
+
+        # Add some commanders with varying ratings and game counts
+        for i in range(10):
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                commander_name=f"Commander {i}",
+                rating=Glicko2Rating(
+                    rating=1500 - i * 50,  # Decreasing ratings
+                    rd=50.0,
+                    vol=0.06,
+                ),
+                games=100,
+            )
+            league.entries[entry.entry_id] = entry
+
+        # Retire bottom 3 commanders
+        retired = league.retire_commanders(keep_top=7)
+
+        assert len(retired) == 3
+        assert len([e for e in league.entries.values() if e.kind == "commander"]) == 7
+
+        # Verify the lowest rated were retired
+        retired_ids = {e.entry_id for e in retired}
+        assert "cmd_7" in retired_ids
+        assert "cmd_8" in retired_ids
+        assert "cmd_9" in retired_ids
+
+    def test_retire_commanders_min_games(self):
+        """Don't retire commanders that haven't played enough games."""
+        league = League()
+
+        # Add commanders: some new (low games), some established
+        for i in range(6):
+            games = 5 if i < 3 else 100  # First 3 are new
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                commander_name=f"Commander {i}",
+                rating=Glicko2Rating(rating=1500 - i * 100, rd=50.0, vol=0.06),
+                games=games,
+            )
+            league.entries[entry.entry_id] = entry
+
+        # Try to retire to keep 4, but require 20 games minimum
+        retired = league.retire_commanders(keep_top=4, min_games=20)
+
+        # Only cmd_4 and cmd_5 (established + low rating) should be retired
+        assert len(retired) == 2
+        for e in retired:
+            assert e.games >= 20
+
+    def test_retire_commanders_empty_league(self):
+        """retire_commanders handles empty league gracefully."""
+        league = League()
+        retired = league.retire_commanders(keep_top=5)
+        assert retired == []
+
+    def test_retire_commanders_fewer_than_keep_top(self):
+        """retire_commanders does nothing when pool is smaller than keep_top."""
+        league = League()
+
+        # Add only 3 commanders
+        for i in range(3):
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                rating=Glicko2Rating(rating=1500, rd=50.0, vol=0.06),
+                games=100,
+            )
+            league.entries[entry.entry_id] = entry
+
+        # Try to keep top 5 (more than exist)
+        retired = league.retire_commanders(keep_top=5)
+        assert retired == []
+        assert len([e for e in league.entries.values() if e.kind == "commander"]) == 3
+
+    def test_retire_commanders_uses_conservative_rating(self):
+        """retire_commanders ranks by conservative rating (rating - 2*RD)."""
+        league = League()
+
+        # Commander with high rating but high RD (uncertain)
+        league.entries["uncertain"] = LeagueEntry(
+            entry_id="uncertain",
+            ckpt_path="/uncertain.pt",
+            kind="commander",
+            rating=Glicko2Rating(rating=1600, rd=150, vol=0.06),  # Conservative: 1300
+            games=100,
+        )
+
+        # Commander with lower rating but low RD (confident)
+        league.entries["confident"] = LeagueEntry(
+            entry_id="confident",
+            ckpt_path="/confident.pt",
+            kind="commander",
+            rating=Glicko2Rating(rating=1500, rd=30, vol=0.06),  # Conservative: 1440
+            games=100,
+        )
+
+        # Keep only 1 - uncertain should be retired despite higher rating
+        retired = league.retire_commanders(keep_top=1)
+
+        assert len(retired) == 1
+        assert retired[0].entry_id == "uncertain"
+
+    def test_retire_commanders_marks_as_retired(self):
+        """retire_commanders sets kind='retired' to preserve history."""
+        league = League()
+
+        for i in range(3):
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                rating=Glicko2Rating(rating=1500 - i * 100, rd=50.0, vol=0.06),
+                games=100,
+            )
+            league.entries[entry.entry_id] = entry
+
+        retired = league.retire_commanders(keep_top=2)
+
+        assert len(retired) == 1
+        assert retired[0].entry_id == "cmd_2"
+        # Entry should still exist but be marked as retired
+        assert league.entries["cmd_2"].kind == "retired"
+
+    def test_retire_commanders_excludes_candidates(self):
+        """retire_commanders only considers commanders, not candidates."""
+        league = League()
+
+        # Add 2 commanders
+        for i in range(2):
+            league.entries[f"cmd_{i}"] = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/cmd_{i}.pt",
+                kind="commander",
+                rating=Glicko2Rating(rating=1500, rd=50.0, vol=0.06),
+                games=100,
+            )
+
+        # Add 3 candidates (should not be touched)
+        for i in range(3):
+            league.entries[f"cand_{i}"] = LeagueEntry(
+                entry_id=f"cand_{i}",
+                ckpt_path=f"/cand_{i}.pt",
+                kind="candidate",
+                rating=Glicko2Rating(rating=1200, rd=50.0, vol=0.06),  # Low rating
+                games=100,
+            )
+
+        retired = league.retire_commanders(keep_top=1)
+
+        assert len(retired) == 1
+        assert retired[0].kind == "retired"
+        # Candidates should be untouched
+        for i in range(3):
+            assert league.entries[f"cand_{i}"].kind == "candidate"
