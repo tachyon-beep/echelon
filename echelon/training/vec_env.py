@@ -80,6 +80,8 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig, initial_weapon_p
                             size_y=new_size,
                         )
                         new_cfg = replace(base_env_cfg, world=new_world)
+                        # Close old env to prevent resource leak (P1 fix)
+                        env.close()
                         env = env_fn(new_cfg)
                 obs, info = env.reset(seed=data)
                 remote.send((obs, info))

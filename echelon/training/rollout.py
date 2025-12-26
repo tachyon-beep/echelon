@@ -101,6 +101,7 @@ class RolloutBuffer:
     advantages: torch.Tensor | None = None
     returns: torch.Tensor | None = None
     role_indices: torch.Tensor | None = None  # [agents] int64, role index per agent
+    gae_computed: bool = False  # Flag to ensure compute_gae was called before update
 
     @classmethod
     def create(
@@ -187,3 +188,6 @@ class RolloutBuffer:
         # Returns are advantages + values (advantage definition: A = Q - V, Q = R)
         # Use in-place copy to avoid allocation
         self.returns.copy_(self.advantages + self.values)
+
+        # Mark GAE as computed (P2 fix: ensures PPO doesn't silently use zeroed values)
+        self.gae_computed = True

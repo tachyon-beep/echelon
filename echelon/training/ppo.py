@@ -139,7 +139,7 @@ class PPOTrainer:
                 - approx_kl: Approximate KL divergence (for monitoring)
                 - clipfrac: Fraction of ratios that were clipped
         """
-        if buffer.advantages is None or buffer.returns is None:
+        if buffer.advantages is None or buffer.returns is None or not buffer.gae_computed:
             raise ValueError("Buffer must have advantages and returns computed (call compute_gae first)")
 
         # Normalize advantages (standard practice for stability)

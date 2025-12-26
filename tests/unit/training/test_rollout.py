@@ -50,6 +50,34 @@ class TestRolloutBufferCreation:
         assert (buffer.advantages == 0).all()
         assert (buffer.returns == 0).all()
 
+        # gae_computed should be False until compute_gae is called
+        assert buffer.gae_computed is False
+
+    def test_gae_computed_flag_set_after_compute_gae(self):
+        """Verify gae_computed is True only after compute_gae is called."""
+        buffer = RolloutBuffer.create(
+            num_steps=5,
+            num_agents=2,
+            obs_dim=8,
+            action_dim=4,
+            device=torch.device("cpu"),
+        )
+
+        # Before compute_gae
+        assert buffer.gae_computed is False
+
+        # Fill with some data
+        buffer.rewards[:] = 1.0
+        buffer.values[:] = 0.5
+
+        # Call compute_gae
+        next_value = torch.zeros(2)
+        next_done = torch.zeros(2)
+        buffer.compute_gae(next_value, next_done, gamma=0.99, gae_lambda=0.95)
+
+        # After compute_gae
+        assert buffer.gae_computed is True
+
     def test_create_allocates_zeros(self):
         """Test create() initializes tensors to zero."""
         device = torch.device("cpu")
