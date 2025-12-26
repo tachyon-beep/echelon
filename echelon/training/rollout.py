@@ -160,8 +160,8 @@ class RolloutBuffer:
             Sets self.advantages and self.returns to computed tensors [steps, agents]
         """
         # Use pre-allocated buffers, ensure they exist
-        assert self.advantages is not None, "Buffer must be created with create()"
-        assert self.returns is not None, "Buffer must be created with create()"
+        if self.advantages is None or self.returns is None:
+            raise ValueError("Buffer must be created with create() - advantages/returns not pre-allocated")
 
         num_steps = self.rewards.size(0)
         lastgaelam = torch.zeros(self.rewards.size(1), device=self.rewards.device)
