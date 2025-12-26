@@ -23,6 +23,18 @@ from .suite import SUITE_DESCRIPTOR_DIM, DeepSetEncoder
 # Epsilon for numerical stability in tanh squashing
 TANH_EPS = 1e-6
 
+# Computed flat observation dimension for default parameters
+# This must match the layout in flat_obs_to_suite_obs()
+FLAT_OBS_DIM = (
+    20 * 25  # contacts: max_contacts * contact_dim
+    + 20  # contact_mask: max_contacts
+    + 12 * 10  # squad: max_squad * squad_dim
+    + 12  # squad_mask: max_squad
+    + 32  # ego_state: ego_dim
+    + SUITE_DESCRIPTOR_DIM  # suite_descriptor: 14
+    + 8  # panel_stats: panel_dim
+)  # = 500 + 20 + 120 + 12 + 32 + 14 + 8 = 706
+
 
 def _atanh(x: Tensor) -> Tensor:
     """Inverse hyperbolic tangent with clamping for stability."""
@@ -315,8 +327,41 @@ def flat_obs_to_suite_obs(
     [contacts, contact_mask, squad, squad_mask, ego_state, suite_descriptor, panel_stats]
 
     In practice, you'd build SuiteObservation directly in the env.
+
+    Args:
+        flat_obs: [batch, flat_dim] flat observation tensor
+        max_contacts: Maximum number of contacts
+        contact_dim: Dimension of each contact feature
+        max_squad: Maximum squad size
+        squad_dim: Dimension of each squad member feature
+        ego_dim: Dimension of ego state
+        panel_dim: Dimension of panel stats
+
+    Returns:
+        SuiteObservation with properly shaped tensors
+
+    Raises:
+        ValueError: If flat_obs dimension doesn't match expected layout
     """
     batch_size = flat_obs.shape[0]
+
+    # Calculate expected dimension
+    expected_dim = (
+        max_contacts * contact_dim
+        + max_contacts
+        + max_squad * squad_dim
+        + max_squad
+        + ego_dim
+        + SUITE_DESCRIPTOR_DIM
+        + panel_dim
+    )
+
+    if flat_obs.shape[1] != expected_dim:
+        raise ValueError(
+            f"flat_obs has {flat_obs.shape[1]} dims, expected {expected_dim}. "
+            f"Check observation dimension alignment."
+        )
+
     idx = 0
 
     # Contacts
@@ -347,6 +392,10 @@ def flat_obs_to_suite_obs(
 
     # Panel stats
     panel_stats = flat_obs[:, idx : idx + panel_dim]
+    idx += panel_dim
+
+    # Sanity check: we should have consumed exactly all dimensions
+    assert idx == expected_dim, f"Consumed {idx} dims but expected {expected_dim}"
 
     return SuiteObservation(
         contacts=contacts,

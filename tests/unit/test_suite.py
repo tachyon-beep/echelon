@@ -15,9 +15,11 @@ from echelon.rl.suite import (
     get_suite_for_role,
 )
 from echelon.rl.suite_model import (
+    FLAT_OBS_DIM,
     CombatSuiteActorCritic,
     SuiteObservation,
     SuiteStreamEncoder,
+    flat_obs_to_suite_obs,
 )
 
 
@@ -592,3 +594,87 @@ class TestEnvSuiteIntegration:
             scout_visible > heavy_visible
         ), f"Scout should see more contacts than Heavy: scout={scout_visible}, heavy={heavy_visible}"
         assert heavy_visible <= 5, f"Heavy should see at most 5 contacts: {heavy_visible}"
+
+
+# === Flat Observation Dimension Alignment Tests ===
+
+
+class TestFlatObsDimensionAlignment:
+    """Tests for flat_obs_to_suite_obs dimension alignment."""
+
+    def test_flat_obs_to_suite_obs_dimension_alignment(self):
+        """Verify flat observation dimensions match structured observation."""
+        # Default parameters
+        max_contacts = 20
+        contact_dim = 25
+        max_squad = 12
+        squad_dim = 10
+        ego_dim = 32
+        panel_dim = 8
+
+        # Calculate expected flat dim
+        expected_dim = (
+            max_contacts * contact_dim  # contacts
+            + max_contacts  # contact_mask
+            + max_squad * squad_dim  # squad
+            + max_squad  # squad_mask
+            + ego_dim  # ego_state
+            + SUITE_DESCRIPTOR_DIM  # suite_descriptor
+            + panel_dim  # panel_stats
+        )
+
+        # Verify constant matches
+        assert expected_dim == FLAT_OBS_DIM, f"FLAT_OBS_DIM={FLAT_OBS_DIM} != expected={expected_dim}"
+
+        # Verify round-trip
+        batch_size = 4
+        flat_obs = torch.randn(batch_size, FLAT_OBS_DIM)
+
+        suite_obs = flat_obs_to_suite_obs(flat_obs)
+
+        # Verify shapes
+        assert suite_obs.contacts.shape == (batch_size, max_contacts, contact_dim)
+        assert suite_obs.contact_mask.shape == (batch_size, max_contacts)
+        assert suite_obs.squad.shape == (batch_size, max_squad, squad_dim)
+        assert suite_obs.squad_mask.shape == (batch_size, max_squad)
+        assert suite_obs.ego_state.shape == (batch_size, ego_dim)
+        assert suite_obs.suite_descriptor.shape == (batch_size, SUITE_DESCRIPTOR_DIM)
+        assert suite_obs.panel_stats.shape == (batch_size, panel_dim)
+
+    def test_flat_obs_consumes_all_dimensions(self):
+        """Verify flat_obs_to_suite_obs uses exactly all input dimensions."""
+        batch_size = 2
+        flat_obs = torch.arange(FLAT_OBS_DIM).unsqueeze(0).expand(batch_size, -1).float()
+
+        suite_obs = flat_obs_to_suite_obs(flat_obs)
+
+        # Reconstruct flat from structured and verify
+        reconstructed = torch.cat(
+            [
+                suite_obs.contacts.reshape(batch_size, -1),
+                suite_obs.contact_mask,
+                suite_obs.squad.reshape(batch_size, -1),
+                suite_obs.squad_mask,
+                suite_obs.ego_state,
+                suite_obs.suite_descriptor,
+                suite_obs.panel_stats,
+            ],
+            dim=-1,
+        )
+
+        assert reconstructed.shape[-1] == FLAT_OBS_DIM
+        assert torch.allclose(flat_obs, reconstructed)
+
+    def test_flat_obs_dimension_mismatch_raises(self):
+        """Verify flat_obs_to_suite_obs raises on dimension mismatch."""
+        batch_size = 2
+
+        # Too few dimensions
+        wrong_dim_obs = torch.randn(batch_size, FLAT_OBS_DIM - 10)
+        with pytest.raises(ValueError, match="expected"):
+            flat_obs_to_suite_obs(wrong_dim_obs)
+
+        # Too many dimensions
+        wrong_dim_obs = torch.randn(batch_size, FLAT_OBS_DIM + 10)
+        with pytest.raises(ValueError, match="expected"):
+            flat_obs_to_suite_obs(wrong_dim_obs)
