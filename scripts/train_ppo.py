@@ -104,9 +104,9 @@ def compute_combat_stats(recent_combat: list[dict[str, float]], num_agents: int)
     avg_deaths = float(np.mean([s["deaths_blue"] for s in recent_combat]))
     avg_assists = float(np.mean([s["assists_blue"] for s in recent_combat]))
 
-    # Kill participation = (kills + assists) / total_team_kills
-    total_kills = avg_kills + float(np.mean([s["kills_red"] for s in recent_combat]))
-    kill_participation = (avg_kills + avg_assists) / max(total_kills, 1.0)
+    # Kill participation = (kills + assists) / blue_team_kills
+    # Measures team coordination: 1.0 = solo kills, 2.0 = every kill has 1 assist
+    kill_participation = (avg_kills + avg_assists) / max(avg_kills, 1.0)
 
     # Survival rate = agents alive at end / total agents
     survival_rate = 1.0 - (avg_deaths / max(num_agents, 1))
