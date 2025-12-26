@@ -33,6 +33,7 @@ class TestActorCriticGradientFlow:
 
     def test_actor_loss_gradients_flow_to_all_layers(self, model, batch_data):
         """Actor loss should produce gradients in encoder, LSTM, and actor head."""
+        model.zero_grad()
         _action, logprob, _entropy, _value, _ = model.get_action_and_value(
             batch_data["obs"],
             batch_data["state"],
@@ -108,7 +109,7 @@ class TestActorCriticGradientFlow:
         for name, param in model.encoder.named_parameters():
             assert param.grad is not None, f"No gradient for encoder.{name}"
 
-    def test_entropy_gradient_sign(self, model, batch_data):
+    def test_entropy_gradient_exists(self, model, batch_data):
         """Entropy gradient should exist for exploration bonus."""
         model.zero_grad()
 
