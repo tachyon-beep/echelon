@@ -20,6 +20,7 @@ repos:
         additional_dependencies:
           - numpy>=2.1
           - torch>=2.6
+          - wandb
         pass_filenames: false
         entry: mypy echelon/
 

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class SpatialAccumulator:
@@ -42,8 +45,10 @@ class SpatialAccumulator:
         Returns:
             (gx, gy) grid indices, clamped to valid range.
         """
-        gx = int(np.clip(x / world_size[0] * self.grid_size, 0, self.grid_size - 1))
-        gy = int(np.clip(y / world_size[1] * self.grid_size, 0, self.grid_size - 1))
+        # Use max/min instead of np.clip to avoid edge case where int() could
+        # produce grid_size due to float precision near boundaries
+        gx = max(0, min(int(x / world_size[0] * self.grid_size), self.grid_size - 1))
+        gy = max(0, min(int(y / world_size[1] * self.grid_size), self.grid_size - 1))
         return gx, gy
 
     def record_death(self, x: float, y: float, world_size: tuple[float, float]) -> None:
@@ -89,33 +94,35 @@ class SpatialAccumulator:
     def to_images(self) -> dict[str, Any]:
         """Convert accumulators to W&B images with colormaps.
 
+        Requires wandb and matplotlib (imported lazily).
+
         Returns:
             Dict mapping heatmap names to wandb.Image objects.
-            Empty dict if matplotlib is not available or no data recorded.
+            Empty dict if matplotlib or wandb is not available.
         """
-        import wandb
-
         try:
             import matplotlib.pyplot as plt
 
-            images: dict[str, Any] = {}
-
-            for name, data in [
-                ("deaths", self.death_locations),
-                ("damage", self.damage_locations),
-                ("movement", self.movement_density),
-            ]:
-                if data.max() > 0:
-                    normalized = data / data.max()
-                    fig, ax = plt.subplots(figsize=(6, 6))
-                    im = ax.imshow(normalized, cmap="hot", origin="lower")
-                    ax.set_title(f"{name.title()} Heatmap")
-                    plt.colorbar(im, ax=ax)
-                    plt.tight_layout()
-                    images[name] = wandb.Image(fig)  # type: ignore[attr-defined]
-                    plt.close(fig)
-
-            return images
-
-        except ImportError:
+            import wandb
+        except ImportError as e:
+            logger.warning(f"Skipping heatmap generation: {e}")
             return {}
+
+        images: dict[str, Any] = {}
+
+        for name, data in [
+            ("deaths", self.death_locations),
+            ("damage", self.damage_locations),
+            ("movement", self.movement_density),
+        ]:
+            if data.max() > 0:
+                normalized = data / data.max()
+                fig, ax = plt.subplots(figsize=(6, 6))
+                im = ax.imshow(normalized, cmap="hot", origin="lower")
+                ax.set_title(f"{name.title()} Heatmap")
+                plt.colorbar(im, ax=ax)
+                plt.tight_layout()
+                images[name] = wandb.Image(fig)
+                plt.close(fig)
+
+        return images

@@ -5,6 +5,34 @@ import numpy as np
 from echelon.training.spatial import SpatialAccumulator
 
 
+def test_spatial_accumulator_import_does_not_require_wandb() -> None:
+    """Verify importing SpatialAccumulator doesn't require wandb at module level.
+
+    This test verifies that wandb is lazily imported only when to_images() is called,
+    not when spatial.py is first imported. We test the module in isolation to avoid
+    side effects from other training package modules that may import wandb.
+    """
+    import importlib.util
+    import sys
+
+    # Remove wandb from modules if present
+    wandb_modules = [k for k in list(sys.modules.keys()) if k.startswith("wandb")]
+    for m in wandb_modules:
+        del sys.modules[m]
+
+    # Load spatial.py directly (bypassing package __init__.py which imports other modules)
+    spec = importlib.util.spec_from_file_location("spatial_test", "echelon/training/spatial.py")
+    assert spec is not None and spec.loader is not None
+    spatial_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(spatial_module)
+
+    # Verify wandb was NOT imported at module level
+    assert "wandb" not in sys.modules, "wandb should not be imported at module level"
+
+    acc = spatial_module.SpatialAccumulator(grid_size=16)
+    assert acc.grid_size == 16
+
+
 class TestSpatialAccumulator:
     """Tests for SpatialAccumulator class."""
 
