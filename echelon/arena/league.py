@@ -271,12 +271,9 @@ class League:
             raise KeyError(entry_id)
 
         # Decide rank among (existing commanders + this candidate) by conservative score.
-        def conservative(e: LeagueEntry) -> float:
-            return float(e.rating.rating) - 2.0 * float(e.rating.rd)
-
         pool = [e for e in self.entries.values() if e.kind == "commander"]
         pool.append(entry)
-        pool.sort(key=conservative, reverse=True)
+        pool.sort(key=lambda e: e.rating.conservative_rating, reverse=True)
         in_top = entry in pool[: max(1, int(top_k))]
         if not in_top:
             return False
@@ -338,11 +335,8 @@ class League:
         # Split into retirable (established) - new commanders are protected
         retirable = [e for e in commanders if e.games >= min_games]
 
-        def conservative(e: LeagueEntry) -> float:
-            return float(e.rating.rating) - 2.0 * float(e.rating.rd)
-
         # Sort retirable by conservative rating (worst first)
-        retirable.sort(key=conservative)
+        retirable.sort(key=lambda e: e.rating.conservative_rating)
 
         # Calculate how many we need to retire
         # Keep at least keep_top total, but never retire protected
