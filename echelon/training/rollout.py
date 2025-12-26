@@ -15,9 +15,9 @@ from echelon.constants import (
     PACK_HEAVY_IDX,
     PACK_LEADER_IDX,
     PACK_LIGHT_IDX,
-    PACK_MEDIUM_IDX,
-    PACK_SCOUT_A_IDX,
-    PACK_SCOUT_B_IDX,
+    PACK_MEDIUM_A_IDX,
+    PACK_MEDIUM_B_IDX,
+    PACK_SCOUT_IDX,
     PACK_SIZE,
 )
 
@@ -35,8 +35,11 @@ def compute_role_indices(num_agents: int, num_envs: int, device: torch.device) -
     Maps agent indices to role categories based on pack structure:
     - ROLE_SCOUT (0): Scout mechs (recon, painting)
     - ROLE_LIGHT (1): Light mechs including pack leader
-    - ROLE_MEDIUM (2): Medium mechs
+    - ROLE_MEDIUM (2): Medium mechs (2 per pack + squad leader)
     - ROLE_HEAVY (3): Heavy mechs
+
+    Pack composition (6 mechs):
+      idx 0: Scout, idx 1: Light, idx 2-3: Medium, idx 4: Heavy, idx 5: Pack Leader (light)
 
     Args:
         num_agents: Total number of agents (batch_size = agents_per_env * num_envs)
@@ -55,11 +58,11 @@ def compute_role_indices(num_agents: int, num_envs: int, device: torch.device) -
             idx_in_pack = i % PACK_SIZE
             agent_idx = base + i
 
-            if idx_in_pack in (PACK_SCOUT_A_IDX, PACK_SCOUT_B_IDX):
+            if idx_in_pack == PACK_SCOUT_IDX:
                 role_indices[agent_idx] = ROLE_SCOUT
             elif idx_in_pack in (PACK_LIGHT_IDX, PACK_LEADER_IDX):
                 role_indices[agent_idx] = ROLE_LIGHT
-            elif idx_in_pack == PACK_MEDIUM_IDX:
+            elif idx_in_pack in (PACK_MEDIUM_A_IDX, PACK_MEDIUM_B_IDX):
                 role_indices[agent_idx] = ROLE_MEDIUM
             elif idx_in_pack == PACK_HEAVY_IDX:
                 role_indices[agent_idx] = ROLE_HEAVY

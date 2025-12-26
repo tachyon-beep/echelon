@@ -12,9 +12,9 @@ class ActionIndex(IntEnum):
     YAW_RATE = 3
     PRIMARY = 4  # Laser (Med/Heavy), Flamer (Light), Paint (Scout)
     VENT = 5  # Universal
-    SECONDARY = 6  # Missile (Heavy), Laser (Light), ECM/ECCM toggle (Scout)
+    SECONDARY = 6  # Missile (Heavy), Laser (Light), unused (Scout)
     TERTIARY = 7  # Paint (Light/Med), Gauss/AC (Heavy/Med)
-    SPECIAL = 8  # Smoke (Universal)
+    SPECIAL = 8  # Smoke (Med/Heavy/Scout), ECM/ECCM toggle (Light)
 
 
 class OrderType(IntEnum):

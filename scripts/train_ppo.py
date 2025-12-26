@@ -836,7 +836,7 @@ def main() -> None:
     episodic_coord_stats: list[dict[str, float]] = []
 
     # Per-component reward tracking (aggregate across all blue agents)
-    COMPONENTS = ["approach", "zone", "damage", "kill", "assist", "death", "terminal"]
+    COMPONENTS = ["approach", "zone", "arrival", "damage", "kill", "assist", "death", "terminal"]
     current_ep_components: list[dict[str, float]] = [dict.fromkeys(COMPONENTS, 0.0) for _ in range(num_envs)]
     episodic_components: list[dict[str, float]] = []  # list of per-episode {component: total}
 

@@ -5,30 +5,40 @@ from __future__ import annotations
 # ==============================================================================
 
 # Pack: 6 mechs - the basic tactical element
-#   - 1 Scout (recon, painting)
-#   - 1 Light (flanking, mobility)
-#   - 1 Medium (line infantry)
+#   - 1 Scout (recon, painting, target designation)
+#   - 2 Light (flanking, mobility) - includes pack leader
+#   - 2 Medium (line infantry, main battle force)
 #   - 1 Heavy (fire support, protected asset)
-#   - 1 Pack Leader (light-equivalent chassis, pack command suite)
-# Pack Leader sees aggregated pack sensor data and can issue orders to pack members.
+# Pack Leader is light-equivalent chassis with pack command suite.
 PACK_SIZE = 6
 
 # Squad: 13 mechs - two packs + squad leader
-#   - 2 Packs (12 mechs)
+#   - Pack A (6 mechs)
+#   - Pack B (6 mechs)
 #   - 1 Squad Leader (medium-equivalent chassis, squad command suite)
 # Squad Leader sees full squad telemetry and can issue orders to anyone.
 SQUAD_SIZE = 13
 
+# Platoon: 42 mechs
+#   - Platoon HQ (1)
+#   - 2 Strategic Assets (EW, artillery, etc.)
+#   - 3 Squads (3 x 13 = 39)
+PLATOON_SIZE = 42
+
 # Indices within a pack (for roster assignment)
-# Two fire teams for "fix" and "assault" flexibility:
-#   Fire Team A: Scout + Medium + Pack Leader (overwatch)
-#   Fire Team B: Scout + Light + Heavy (maneuver element)
-PACK_SCOUT_A_IDX = 0  # Fire team A recon
-PACK_SCOUT_B_IDX = 1  # Fire team B recon
-PACK_LIGHT_IDX = 2  # Flanker/mobility
-PACK_MEDIUM_IDX = 3  # Line infantry
+# Organized for tactical flexibility:
+#   Fire Team A (fix/overwatch): Scout + Medium + Pack Leader
+#   Fire Team B (assault/maneuver): Light + Medium + Heavy
+PACK_SCOUT_IDX = 0  # Recon, painting, target designation
+PACK_LIGHT_IDX = 1  # Flanker/mobility
+PACK_MEDIUM_A_IDX = 2  # Line infantry (fire team A)
+PACK_MEDIUM_B_IDX = 3  # Line infantry (fire team B)
 PACK_HEAVY_IDX = 4  # Fire support (protected asset)
 PACK_LEADER_IDX = 5  # Light-equivalent with pack command suite
+
+# Legacy aliases (for backwards compatibility during migration)
+PACK_SCOUT_A_IDX = PACK_SCOUT_IDX  # Deprecated: use PACK_SCOUT_IDX
+PACK_SCOUT_B_IDX = PACK_MEDIUM_A_IDX  # Deprecated: was incorrectly a second scout
 
 # Squad leader is always the last mech in the squad
 # Squad layout: [Pack0: 0-5] [Pack1: 6-11] [SL: 12]

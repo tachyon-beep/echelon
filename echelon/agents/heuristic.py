@@ -173,9 +173,28 @@ class HeuristicPolicy:
             dist_to_zone = (
                 float(np.linalg.norm(zone_center[:2] - mech.pos[:2])) if zone_center is not None else 999.0
             )
-            if dist_to_zone < zone_radius * 2 and dist_to_squad > 15.0 and dist > 20.0:
-                # Blend 50% to squad, 50% to objective (less aggressive clustering)
-                move_target = centroid * 0.5 + move_target * 0.5
+
+            # Role-based cohesion: different mechs have different clustering preferences
+            # Heavies want to stay closer to squad (protected asset), scouts/lights spread out
+            # This prevents the "tight ball of death" problem
+            cohesion_threshold: float
+            centroid_weight: float
+            if mech.spec.name == "heavy":
+                # Heavies stay closer - they're the protected fire support
+                cohesion_threshold = 20.0
+                centroid_weight = 0.4
+            elif mech.spec.name in ("scout", "light"):
+                # Scouts and lights spread out - they're flankers/recon
+                cohesion_threshold = 35.0
+                centroid_weight = 0.15
+            else:
+                # Medium/leader - moderate cohesion
+                cohesion_threshold = 28.0
+                centroid_weight = 0.25
+
+            if dist_to_zone < zone_radius * 2 and dist_to_squad > cohesion_threshold and dist > 25.0:
+                # Blend to squad with role-appropriate weight
+                move_target = centroid * centroid_weight + move_target * (1.0 - centroid_weight)
 
         # Re-calculate delta based on move_target
         move_delta = move_target - mech.pos

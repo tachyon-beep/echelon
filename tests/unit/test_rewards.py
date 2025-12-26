@@ -206,12 +206,14 @@ class TestRewardGradients:
         This test verifies the approach reward gradient exists and has the correct
         sign: decreasing distance to zone (phi1 > phi0) gives positive reward.
         """
-        # The approach reward is: W_APPROACH * (phi1 - phi0) * approach_scale
+        # The approach reward is: W_APPROACH * (gamma * phi1 - phi0)
         # where phi = -distance/max_xy (negative potential)
         # If distance decreases: d1 < d0, so phi1 > phi0, giving positive reward
         # This is the desired gradient toward the objective.
+        from echelon.env.rewards import RewardWeights
 
-        W_APPROACH = 0.05  # From env.py
+        weights = RewardWeights()
+        W_APPROACH = weights.approach  # 2.0 after rebalancing
         assert W_APPROACH > 0, "Approach reward weight should be positive"
 
         # Verify the math: if d1 < d0, then -d1/M > -d0/M, so phi1 > phi0
@@ -219,18 +221,120 @@ class TestRewardGradients:
         d0, d1, max_xy = 100.0, 90.0, 200.0
         phi0 = -d0 / max_xy  # -0.5
         phi1 = -d1 / max_xy  # -0.45
-        delta = phi1 - phi0  # 0.05 (positive)
+        delta = weights.shaping_gamma * phi1 - phi0  # ~0.055 (positive)
 
         assert delta > 0, "Decreasing distance should give positive phi delta"
         assert W_APPROACH * delta > 0, "Approach reward should be positive when moving toward zone"
 
     def test_damage_reward_scales_with_damage(self, reward_env):
         """More damage dealt gives proportionally more reward."""
-        # This is implicitly tested by W_DAMAGE being a per-damage multiplier
-        # A more thorough test would compare rewards from different damage amounts
-        # For now, verify the constant exists and is positive
-        W_DAMAGE = 0.005  # From env.py
+        from echelon.env.rewards import RewardWeights
+
+        weights = RewardWeights()
+        W_DAMAGE = weights.damage  # 0.02 after rebalancing
         assert W_DAMAGE > 0, "Damage reward weight should be positive"
+
+
+class TestArrivalBonus:
+    """Verify arrival bonus for first zone entry."""
+
+    def test_arrival_bonus_on_first_zone_entry(self, reward_env):
+        """Agent entering zone for first time gets arrival bonus."""
+        env = reward_env
+
+        zone_cx, zone_cy, _zone_r = capture_zone_params(
+            env.world.meta, size_x=env.world.size_x, size_y=env.world.size_y
+        )
+
+        # Move everyone out of zone first
+        for aid in env.agents:
+            m = env.sim.mechs[aid]
+            m.pos[0], m.pos[1] = 5.0, 5.0
+            m.vel[:] = 0.0
+
+        # Step to establish baseline (no one in zone)
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, _baseline_rewards, _, _, _baseline_infos = env.step(actions)
+
+        # Now move blue_0 into zone
+        env.sim.mechs["blue_0"].pos[0] = zone_cx
+        env.sim.mechs["blue_0"].pos[1] = zone_cy
+
+        _, _rewards, _, _, infos = env.step(actions)
+
+        # Check reward components
+        blue_0_comps = infos["blue_0"]["reward_components"]
+        assert "arrival" in blue_0_comps, "Should have arrival component"
+        assert (
+            blue_0_comps["arrival"] > 0
+        ), f"First zone entry should get arrival bonus, got {blue_0_comps['arrival']}"
+
+    def test_no_arrival_bonus_on_second_entry(self, reward_env):
+        """Agent re-entering zone does NOT get arrival bonus again."""
+        env = reward_env
+
+        zone_cx, zone_cy, _zone_r = capture_zone_params(
+            env.world.meta, size_x=env.world.size_x, size_y=env.world.size_y
+        )
+
+        # Move blue_0 into zone
+        env.sim.mechs["blue_0"].pos[0] = zone_cx
+        env.sim.mechs["blue_0"].pos[1] = zone_cy
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+
+        # First entry - should get bonus
+        _, _, _, _, infos1 = env.step(actions)
+        first_arrival = infos1["blue_0"]["reward_components"]["arrival"]
+        assert first_arrival > 0, "First entry should get arrival bonus"
+
+        # Move out of zone
+        env.sim.mechs["blue_0"].pos[0] = 5.0
+        env.sim.mechs["blue_0"].pos[1] = 5.0
+        _, _, _, _, _ = env.step(actions)
+
+        # Re-enter zone
+        env.sim.mechs["blue_0"].pos[0] = zone_cx
+        env.sim.mechs["blue_0"].pos[1] = zone_cy
+        _, _, _, _, infos2 = env.step(actions)
+
+        second_arrival = infos2["blue_0"]["reward_components"]["arrival"]
+        assert second_arrival == 0, f"Re-entry should NOT get arrival bonus, got {second_arrival}"
+
+
+class TestRewardBalancing:
+    """Verify reward components are properly balanced."""
+
+    def test_zone_reward_dominates_approach(self, reward_env):
+        """Zone control should give significantly more reward than approach."""
+        from echelon.env.rewards import RewardWeights
+
+        weights = RewardWeights()
+
+        # Zone: 5.0 per step (uncontested)
+        # Approach: ~0.025 per step (moving 1 voxel toward zone with max_xy=100)
+        # Ratio should be ~200:1 in favor of zone
+
+        zone_per_step = weights.zone_tick  # 5.0
+        approach_per_step = weights.approach * 0.01  # ~0.02 (typical movement)
+
+        ratio = zone_per_step / max(approach_per_step, 0.001)
+        assert ratio > 100, f"Zone should dominate approach by >100x, actual ratio: {ratio:.1f}"
+
+    def test_death_penalty_reasonable_vs_zone(self, reward_env):
+        """Death penalty should be recoverable with zone control."""
+        from echelon.env.rewards import RewardWeights
+
+        weights = RewardWeights()
+
+        # Death: -2.0
+        # Zone: 5.0 per step
+        # Should recover death penalty in < 1 step of zone control
+
+        steps_to_recover = abs(weights.death) / weights.zone_tick
+        assert (
+            steps_to_recover < 1
+        ), f"Death penalty should be recoverable in <1 zone step, needs {steps_to_recover:.2f}"
 
 
 @pytest.mark.skip(

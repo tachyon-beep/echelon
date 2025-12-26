@@ -417,9 +417,10 @@ class TestEnvSuiteIntegration:
         env = EchelonEnv(cfg)
         env.reset(seed=0)
 
-        # blue_0 and blue_1 should be scouts
+        # blue_0 is the scout (1 scout per pack)
+        # Pack structure: 0=Scout, 1=Light, 2-3=Medium, 4=Heavy, 5=Pack Leader
         assert env._mech_suites["blue_0"].suite_type == SuiteType.SCOUT_RECON
-        assert env._mech_suites["blue_1"].suite_type == SuiteType.SCOUT_RECON
+        assert env._mech_suites["blue_1"].suite_type == SuiteType.LIGHT_SKIRMISH
 
     def test_pack_leader_gets_command_suite(self):
         """Pack leaders get PACK_COMMAND suite."""

@@ -280,7 +280,11 @@ class TestComputeCombatStats:
         assert result["survival_rate"] == pytest.approx(1.0)
 
     def test_kill_participation_with_assists(self) -> None:
-        """Assists count toward kill participation."""
+        """Assists count toward kill participation.
+
+        Kill participation = (kills + assists) / kills
+        Measures team coordination: 1.0 = solo kills, 2.0 = every kill has 1 assist
+        """
         stats = [
             {
                 "damage_blue": 100.0,
@@ -292,8 +296,8 @@ class TestComputeCombatStats:
             }
         ]
         result = compute_combat_stats(stats, num_agents=5)
-        # kill_participation = (2 + 2) / (2 + 2) = 1.0
-        assert result["kill_participation"] == pytest.approx(1.0)
+        # kill_participation = (2 + 2) / 2 = 2.0 (every kill had 1 assist)
+        assert result["kill_participation"] == pytest.approx(2.0)
 
     def test_output_keys_complete(self) -> None:
         """Output has all expected keys."""

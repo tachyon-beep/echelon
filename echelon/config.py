@@ -189,8 +189,9 @@ class EnvConfig:
     record_replay: bool = False
     seed: int | None = None
     # Team reward mixing: alpha=1.0 is fully individual, alpha=0.0 is fully team-based
-    # Mix helps credit assignment in cooperative multi-agent setting (MED-10)
-    team_reward_alpha: float = 1.0
+    # Mix helps credit assignment in cooperative multi-agent setting
+    # Reduced from 1.0 to 0.7: 30% team reward improves coordination (2025-12-27 rebalance)
+    team_reward_alpha: float = 0.7
     # Discount factor for PBRS-compliant approach shaping: r = gamma*phi(s') - phi(s)
     # Should match training gamma for strict PBRS compliance (Ng et al., 1999)
     shaping_gamma: float = 0.99
