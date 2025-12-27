@@ -64,6 +64,7 @@ def create_app(
     """
     from .models import HealthResponse
     from .routes import league as league_routes
+    from .routes import live as live_routes
     from .routes import matches as match_routes
     from .routes import nav, push, stream
     from .sse import sse_manager
@@ -77,6 +78,7 @@ def create_app(
     app.include_router(stream.router)
     app.include_router(push.router)
     app.include_router(nav.router)
+    app.include_router(live_routes.router)
 
     # Include league routes if league_path provided
     if league_path is not None and league_path.exists():
