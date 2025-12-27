@@ -22,39 +22,43 @@ class RewardWeights:
     """Configurable weights for reward components.
 
     These weights are designed to be modified by a curriculum system.
-    Default values are the current production settings (2025-12-27 rebalance v2).
+    Default values are the current production settings (2025-12-27 rebalance v3).
 
-    Key design decisions (2025-12-27 rebalance v2 - fixing approach dominance):
-    - approach: 2.0 (reduced from 15.0) - was 100% of returns, now ~2%
-    - zone_tick: 5.0 (increased from 2.0) - zone control is THE objective
-    - arrival_bonus: 3.0 (NEW) - one-time bonus breaks "approach forever" trap
-    - death: -2.0 (reduced from -5.0) - encourages engagement in zone
-    - contested_floor: 0.5 (increased from 0.25) - contested zone still valuable
-    - team_reward_alpha: 0.7 (reduced from 1.0) - coordination incentive
+    Behavioral objective: "Go to zone. Stay in zone. Fight in zone."
 
-    Mathematical justification:
-    - Approach over full episode: ~5 reward (was ~50)
-    - Zone control over 50 steps: ~250 reward (was ~100)
-    - Ratio zone:approach = 50:1 (was ~2:1)
-    - This makes zone presence the dominant signal, not endless walking
+    Key design (2025-12-27 v3 - zone-centric combat):
+    - approach: 0.1 (TINY gravity well - guides to zone, penalizes leaving)
+    - arrival_bonus: 1.0 (single ping = 10x max approach budget)
+    - in_zone_damage_mult: 10x (fight hard in zone!)
+    - in_zone_death_mult: 0.05x (dying in zone is FREE)
+    - out_zone_death_mult: 2x (dying outside is expensive)
+
+    Reward math:
+    - Max approach: ~0.1 per episode (just beats "do nothing")
+    - Arrival ping: 1.0 (10x approach, signals "you made it")
+    - 1 HP damage in zone: 1.0 pts (10x approach)
+    - Kill in zone: 50 pts (500x approach)
+    - Die in zone: -0.1 (negligible)
+    - Die outside: -4.0 (40x approach penalty)
+    - Leaving zone: negative approach reward (gravity well)
     """
 
     # Zone-based rewards (PRIMARY OBJECTIVE)
-    zone_tick: float = 5.0  # Being IN zone and controlling it (was 2.0)
-    arrival_bonus: float = 3.0  # NEW: one-time bonus for first zone entry
+    zone_tick: float = 5.0  # Being IN zone and controlling it
+    arrival_bonus: float = 1.0  # Single "ping" for reaching zone (dwarfs approach)
 
-    # Approach shaping (WEAK HINT - not the objective)
-    # Reduced 7.5x: shaping should guide, not dominate
-    # ~0.025/step * 200 steps = ~5 per episode (was ~50)
-    approach: float = 2.0  # Moving toward zone (PBRS shaping)
+    # Approach shaping (TINY - just beats "do nothing")
+    # Max approach ≈ 0.1 over entire episode
+    # Arrival ping (1.0) = 10x max approach - getting there is just the start
+    approach: float = 0.1  # Moving toward zone (PBRS shaping, stops at zone)
 
-    # Combat rewards (SECONDARY to zone control)
-    damage: float = 0.02  # Per point of damage dealt (was 0.05)
-    kill: float = 5.0  # Per kill (was 10.0)
-    assist: float = 3.0  # Per assist (was 5.0)
-    # Reduced from -5.0: high zone rewards mean death penalty was too punishing
-    # At -2.0, dying after 1 zone step is still net positive (5.0 - 2.0 = 3.0)
-    death: float = -2.0  # Death penalty (negative)
+    # Combat rewards - HIGH IN ZONE
+    # Base damage = 0.1/HP, in zone = 1.0/HP (10x mult)
+    # 10 HP in-zone damage = 10 pts (50x max approach)
+    damage: float = 0.1  # Per point of damage dealt
+    kill: float = 5.0  # Per kill (in zone = 50 pts)
+    assist: float = 3.0  # Per assist (in zone = 30 pts)
+    death: float = -2.0  # Death penalty (in zone = -0.1, outside = -4.0)
 
     # Zone mechanics
     # Increased from 0.25: contested zone should still give meaningful reward
@@ -67,9 +71,11 @@ class RewardWeights:
     # Reduced from 1.0: 30% team reward helps credit assignment
     team_reward_alpha: float = 0.7  # 1.0 = individual, 0.0 = team average
 
-    # Combat multipliers
-    contested_zone_combat_mult: float = 2.0  # Multiplier for combat in contested zone
-    contested_zone_death_mult: float = 0.3  # Further reduced death penalty in contested zone
+    # Zone-centric combat multipliers (2025-12-27 redesign)
+    # Philosophy: Fight for the zone, don't die outside it
+    in_zone_damage_mult: float = 10.0  # 10x damage/kill/assist IN zone - fight hard!
+    in_zone_death_mult: float = 0.05  # 0.05x death penalty IN zone - deaths are FREE
+    out_zone_death_mult: float = 2.0  # 2x death penalty OUTSIDE zone - don't waste lives
 
     # Paint/support bonuses - scouts who paint targets help the team
     paint_assist_bonus: float = 2.0  # Bonus when teammate uses your paint lock
@@ -231,14 +237,15 @@ class RewardComputer:
 
         # (1) Approach shaping: PBRS-compliant distance-based reward
         # r = gamma * phi(s') - phi(s) where phi(s) = -distance / max_xy
-        # Only applies when NOT in zone (approach should terminate at zone entry)
-        if not ctx.in_zone_by_agent.get(aid, False):
-            d0 = ctx.dist_to_zone_before.get(aid)
-            d1 = ctx.dist_to_zone_after.get(aid)
-            if d0 is not None and d1 is not None and ctx.max_xy > 0.0:
-                phi0 = -d0 / ctx.max_xy
-                phi1 = -d1 / ctx.max_xy
-                comp.approach = w.approach * (w.shaping_gamma * phi1 - phi0)
+        # ALWAYS applies - creates gravity well effect:
+        # - Moving toward zone = positive reward
+        # - Leaving zone = negative reward (penalty for backing out)
+        d0 = ctx.dist_to_zone_before.get(aid)
+        d1 = ctx.dist_to_zone_after.get(aid)
+        if d0 is not None and d1 is not None and ctx.max_xy > 0.0:
+            phi0 = -d0 / ctx.max_xy
+            phi1 = -d1 / ctx.max_xy
+            comp.approach = w.approach * (w.shaping_gamma * phi1 - phi0)
 
         # (1.5) Arrival bonus: one-time reward for first zone entry this episode
         # This breaks the "approach forever" trap by giving a discrete signal for
@@ -256,21 +263,26 @@ class RewardComputer:
             # sqrt(n) instead of n for fairer distribution
             comp.zone = w.zone_tick * team_tick / math.sqrt(n_in_zone)
 
-        # (3) Combat shaping with tactical context
-        # Combat in contested zone gets multiplier
+        # (3) Combat rewards: ZONE-CENTRIC
+        # In zone: high damage rewards, low death penalty (fight for the zone!)
+        # Out of zone: low damage rewards, high death penalty (don't waste lives)
         agent_in_zone = ctx.in_zone_by_agent.get(aid, False)
-        zone_is_contested = ctx.in_zone_tonnage["blue"] > 0 and ctx.in_zone_tonnage["red"] > 0
-        fighting_for_zone = agent_in_zone and zone_is_contested
 
-        combat_mult = w.contested_zone_combat_mult if fighting_for_zone else 1.0
+        if agent_in_zone:
+            # Fight for the zone - damage is valuable, death is cheap
+            damage_mult = w.in_zone_damage_mult  # 5x
+            death_mult = w.in_zone_death_mult  # 0.1x (practically free)
+        else:
+            # Don't die pointlessly outside the zone
+            damage_mult = 1.0  # base damage reward
+            death_mult = w.out_zone_death_mult  # 3x (expensive)
 
-        comp.damage = w.damage * combat_mult * ctx.step_damage_dealt.get(aid, 0.0)
-        comp.kill = w.kill * combat_mult * ctx.step_kills.get(aid, 0)
-        comp.assist = w.assist * combat_mult * ctx.step_assists.get(aid, 0)
+        comp.damage = w.damage * damage_mult * ctx.step_damage_dealt.get(aid, 0.0)
+        comp.kill = w.kill * damage_mult * ctx.step_kills.get(aid, 0)
+        comp.assist = w.assist * damage_mult * ctx.step_assists.get(aid, 0)
 
-        # (4) Death penalty: reduced when fighting in contested zone
+        # (4) Death penalty: zone-dependent
         if ctx.step_deaths.get(aid, False):
-            death_mult = w.contested_zone_death_mult if fighting_for_zone else 1.0
             comp.death = w.death * death_mult
 
         # (5) Paint assist bonus: scouts who paint targets get reward when teammates use the lock

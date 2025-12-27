@@ -1217,6 +1217,8 @@ def main() -> None:
                         "kills_red": 0.0,
                         "assists_blue": 0.0,
                         "paints_blue": 0.0,
+                        "missile_launches_blue": 0.0,
+                        "paint_lock_uses_blue": 0.0,
                         "deaths_blue": 0.0,
                     }
                     if outcome is not None:
@@ -1227,6 +1229,8 @@ def main() -> None:
                         ep_combat["kills_red"] = float(stats.get("kills_red", 0.0))
                         ep_combat["assists_blue"] = float(stats.get("assists_blue", 0.0))
                         ep_combat["paints_blue"] = float(stats.get("paints_blue", 0.0))
+                        ep_combat["missile_launches_blue"] = float(stats.get("missile_launches_blue", 0.0))
+                        ep_combat["paint_lock_uses_blue"] = float(stats.get("paint_lock_uses_blue", 0.0))
                         # Count deaths from blue team alive status
                         deaths = sum(
                             1 for bid in blue_ids if not infos_list[env_idx].get(bid, {}).get("alive", True)

@@ -405,6 +405,8 @@ class EchelonEnv:
             "laser_hits_red": 0.0,
             "missile_launches_blue": 0.0,
             "missile_launches_red": 0.0,
+            "paint_lock_uses_blue": 0.0,  # Missiles fired using teammate paint locks
+            "paint_lock_uses_red": 0.0,
             "kinetic_fires_blue": 0.0,
             "kinetic_fires_red": 0.0,
             "ams_intercepts_blue": 0.0,
@@ -1121,6 +1123,11 @@ class EchelonEnv:
                         self._episode_stats[f"missile_launches_{shooter.team}"] = float(
                             self._episode_stats.get(f"missile_launches_{shooter.team}", 0.0) + 1.0
                         )
+                        # Track paint lock usage separately (missiles using teammate paint locks)
+                        if ev.get("lock") == "paint":
+                            self._episode_stats[f"paint_lock_uses_{shooter.team}"] = float(
+                                self._episode_stats.get(f"paint_lock_uses_{shooter.team}", 0.0) + 1.0
+                            )
                         step_shots_fired[shooter_id] = step_shots_fired.get(shooter_id, 0) + 1
                 elif et == "kinetic_fire":
                     shooter_id = str(ev["shooter"])
