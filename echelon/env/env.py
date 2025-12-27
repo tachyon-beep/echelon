@@ -870,7 +870,7 @@ class EchelonEnv:
         dict[str, float],
         dict[str, bool],
         dict[str, bool],
-        dict[str, dict],
+        dict,  # infos: per-agent dicts + global "events" list
     ]:
         sim = self.sim
         assert sim is not None
@@ -1184,7 +1184,8 @@ class EchelonEnv:
         rewards: dict[str, float] = {}
         terminations: dict[str, bool] = {}
         truncations: dict[str, bool] = {}
-        infos: dict[str, dict] = {}
+        # NOTE: infos has per-agent dicts + global "events" list
+        infos: dict = {}
 
         # Reward encodes desired behaviors:
         # 1) Move toward the objective (dense shaping).
@@ -1315,16 +1316,9 @@ class EchelonEnv:
         winner: str | None = None
         reason: str | None = None
 
-        if (
-            self.team_zone_score["blue"] >= self.zone_score_to_win
-            or self.team_zone_score["red"] >= self.zone_score_to_win
-        ):
-            winner = "blue" if self.team_zone_score["blue"] > self.team_zone_score["red"] else "red"
-            reason = "zone_control"
-            # MED-2: Zone win is a natural termination (objective achieved), not a truncation
-            for aid in terminations:
-                terminations[aid] = True
-        elif (not blue_alive) or (not red_alive):
+        # Zone victory disabled - games run until elimination or time-up
+        # Zone control still gives rewards, just doesn't end the game
+        if (not blue_alive) or (not red_alive):
             if blue_alive and not red_alive:
                 winner = "blue"
             elif red_alive and not blue_alive:
@@ -1389,6 +1383,9 @@ class EchelonEnv:
         if self.last_outcome is not None:
             for aid in infos:
                 infos[aid]["outcome"] = self.last_outcome
+
+        # Global events key for dashboard/logging (lightweight - just reference, no copy)
+        infos["events"] = events if events else []
 
         if self._replay is not None:
             self._replay.append(self._replay_frame(events))

@@ -44,7 +44,8 @@ class RewardWeights:
     """
 
     # Zone-based rewards (PRIMARY OBJECTIVE)
-    zone_tick: float = 5.0  # Being IN zone and controlling it
+    # Reduced from 5.0 - still highest priority but agents can briefly leave for easy kills
+    zone_tick: float = 2.0  # Being IN zone and controlling it
     arrival_bonus: float = 1.0  # Single "ping" for reaching zone (dwarfs approach)
 
     # Approach shaping (TINY - just beats "do nothing")
@@ -54,11 +55,11 @@ class RewardWeights:
 
     # Combat rewards - HIGH IN ZONE
     # Base damage = 0.1/HP, in zone = 1.0/HP (10x mult)
-    # 10 HP in-zone damage = 10 pts (50x max approach)
+    # Kill bonus high enough to incentivize focus fire over damage spreading
     damage: float = 0.1  # Per point of damage dealt
-    kill: float = 5.0  # Per kill (in zone = 50 pts)
-    assist: float = 3.0  # Per assist (in zone = 30 pts)
-    death: float = -2.0  # Death penalty (in zone = -0.1, outside = -4.0)
+    kill: float = 20.0  # Per kill (in zone = 200 pts) - FINISH YOUR TARGETS
+    assist: float = 5.0  # Per assist (in zone = 50 pts)
+    death: float = -2.0  # Death penalty (in zone = -0.1, outside = -2.0)
 
     # Zone mechanics
     # Increased from 0.25: contested zone should still give meaningful reward
@@ -75,7 +76,7 @@ class RewardWeights:
     # Philosophy: Fight for the zone, don't die outside it
     in_zone_damage_mult: float = 10.0  # 10x damage/kill/assist IN zone - fight hard!
     in_zone_death_mult: float = 0.05  # 0.05x death penalty IN zone - deaths are FREE
-    out_zone_death_mult: float = 2.0  # 2x death penalty OUTSIDE zone - don't waste lives
+    out_zone_death_mult: float = 1.0  # 1x death penalty OUTSIDE zone - base penalty
 
     # Paint/support bonuses - scouts who paint targets help the team
     paint_assist_bonus: float = 2.0  # Bonus when teammate uses your paint lock

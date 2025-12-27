@@ -97,12 +97,21 @@ def create_app(
         app.include_router(match_routes.router)
 
     @app.get("/", response_class=HTMLResponse)
+    @app.get("/viewer.html", response_class=HTMLResponse)
     async def get_viewer():
         """Serve the viewer HTML."""
         html_path = Path(__file__).parent.parent.parent / "viewer.html"
         if html_path.exists():
             return HTMLResponse(html_path.read_text(encoding="utf-8"))
         return HTMLResponse("<h1>viewer.html not found</h1>", status_code=404)
+
+    @app.get("/dashboard.html", response_class=HTMLResponse)
+    async def get_dashboard():
+        """Serve the dashboard HTML."""
+        html_path = Path(__file__).parent.parent.parent / "dashboard.html"
+        if html_path.exists():
+            return HTMLResponse(html_path.read_text(encoding="utf-8"))
+        return HTMLResponse("<h1>dashboard.html not found</h1>", status_code=404)
 
     @app.get("/health")
     async def health_check():
