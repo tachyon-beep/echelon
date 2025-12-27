@@ -51,9 +51,20 @@ async def lifespan(app: FastAPI):
     await sse_manager.shutdown()
 
 
-def create_app() -> FastAPI:
-    """Create and configure the FastAPI application."""
+def create_app(
+    *,
+    league_path: Path | None = None,
+    matches_path: Path | None = None,
+) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    Args:
+        league_path: Optional path to league.json for arena API endpoints.
+        matches_path: Optional path to matches directory for match history API.
+    """
     from .models import HealthResponse
+    from .routes import league as league_routes
+    from .routes import matches as match_routes
     from .routes import nav, push, stream
     from .sse import sse_manager
 
@@ -66,6 +77,22 @@ def create_app() -> FastAPI:
     app.include_router(stream.router)
     app.include_router(push.router)
     app.include_router(nav.router)
+
+    # Include league routes if league_path provided
+    if league_path is not None and league_path.exists():
+        from echelon.arena.league import League
+
+        league = League.load(league_path)
+        league_routes.init_league_routes(league)
+        app.include_router(league_routes.router)
+
+    # Include match routes if matches_path provided
+    if matches_path is not None:
+        from echelon.arena.history import MatchHistory
+
+        history = MatchHistory(matches_path)
+        match_routes.init_match_routes(history)
+        app.include_router(match_routes.router)
 
     @app.get("/", response_class=HTMLResponse)
     async def get_viewer():
