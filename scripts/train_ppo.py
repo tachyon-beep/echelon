@@ -1462,7 +1462,14 @@ def main() -> None:
         zone_stats = compute_zone_stats(recent_zone)
 
         # Print primary line
-        opfor_str = f" | opfor {current_weapon_prob:.0%}" if args.train_mode == "heuristic" else ""
+        if args.train_mode == "heuristic":
+            opfor_str = f" | opfor {current_weapon_prob:.0%}"
+        elif args.train_mode == "arena" and arena_opponent_id:
+            # Show current arena opponent
+            opp_name = "Lt. Heuristic" if arena_opponent_is_heuristic else arena_opponent_id[:12]
+            opfor_str = f" | vs {opp_name}"
+        else:
+            opfor_str = ""
         episodes_this_update = episodes - episodes_at_update_start
         episodes_str = f"{episodes} (+{episodes_this_update})" if episodes_this_update > 0 else str(episodes)
         print(
