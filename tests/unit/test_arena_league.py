@@ -163,6 +163,49 @@ class TestLeagueEntry:
         assert abs(restored.rating.rating - original.rating.rating) < 0.01
         assert abs(restored.rating.rd - original.rating.rd) < 0.01
 
+    def test_entry_rating_history(self):
+        """LeagueEntry tracks rating history over time."""
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+        )
+
+        # Initially empty
+        assert entry.rating_history == []
+
+        # Record rating
+        entry.record_rating(1703750400.0)
+        assert len(entry.rating_history) == 1
+        assert entry.rating_history[0] == (1703750400.0, 1500.0)
+
+        # Update rating and record again
+        entry.rating = Glicko2Rating(rating=1550.0)
+        entry.record_rating(1703750500.0)
+        assert len(entry.rating_history) == 2
+        assert entry.rating_history[1] == (1703750500.0, 1550.0)
+
+    def test_entry_serializes_rating_history(self):
+        """Rating history survives serialization round-trip."""
+        cfg = Glicko2Config()
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+            rating_history=[(1703750400.0, 1500.0), (1703750500.0, 1520.0)],
+        )
+
+        d = entry.as_dict()
+        restored = LeagueEntry.from_dict(d, cfg=cfg)
+
+        assert restored.rating_history == entry.rating_history
+
 
 class TestLeague:
     """Test League class."""

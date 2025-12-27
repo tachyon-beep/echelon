@@ -75,6 +75,11 @@ class LeagueEntry:
     rating: Glicko2Rating = field(default_factory=Glicko2Rating)
     games: int = 0
     meta: dict[str, Any] = field(default_factory=dict)
+    rating_history: list[tuple[float, float]] = field(default_factory=list)
+
+    def record_rating(self, timestamp: float) -> None:
+        """Append current rating to history."""
+        self.rating_history.append((timestamp, self.rating.rating))
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -86,11 +91,15 @@ class LeagueEntry:
             "rating": self.rating.as_dict(),
             "games": int(self.games),
             "meta": dict(self.meta),
+            "rating_history": self.rating_history,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any], *, cfg: Glicko2Config) -> LeagueEntry:
         rating = d.get("rating") or {}
+        # Convert rating_history from list of lists (JSON) to list of tuples
+        raw_history = d.get("rating_history") or []
+        rating_history = [(float(ts), float(r)) for ts, r in raw_history]
         return cls(
             entry_id=str(d.get("id")),
             ckpt_path=str(d.get("ckpt_path")),
@@ -100,6 +109,7 @@ class LeagueEntry:
             rating=Glicko2Rating.from_dict(rating).with_defaults(cfg),
             games=int(d.get("games", 0)),
             meta=dict(d.get("meta") or {}),
+            rating_history=rating_history,
         )
 
 
