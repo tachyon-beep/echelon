@@ -616,7 +616,7 @@ class TestFormationModeMultipliers:
 
     def test_formation_mode_enum_values(self):
         """FormationMode enum has expected values."""
-        from echelon.env.rewards import FormationMode
+        from echelon.config import FormationMode
 
         assert FormationMode.CLOSE == 0
         assert FormationMode.STANDARD == 1
@@ -624,7 +624,8 @@ class TestFormationModeMultipliers:
 
     def test_formation_multipliers_exist(self):
         """Each formation mode has multipliers defined."""
-        from echelon.env.rewards import FORMATION_MULTIPLIERS, FormationMode
+        from echelon.config import FormationMode
+        from echelon.env.rewards import FORMATION_MULTIPLIERS
 
         for mode in FormationMode:
             assert mode in FORMATION_MULTIPLIERS
@@ -635,23 +636,43 @@ class TestFormationModeMultipliers:
 
     def test_close_amplifies_zone_rewards(self):
         """CLOSE mode has zone multiplier > 1."""
-        from echelon.env.rewards import FORMATION_MULTIPLIERS, FormationMode
+        from echelon.config import FormationMode
+        from echelon.env.rewards import FORMATION_MULTIPLIERS
 
         assert FORMATION_MULTIPLIERS[FormationMode.CLOSE]["zone"] > 1.0
         assert FORMATION_MULTIPLIERS[FormationMode.CLOSE]["out_death"] > 1.0
 
     def test_loose_reduces_zone_rewards(self):
         """LOOSE mode has zone multiplier < 1."""
-        from echelon.env.rewards import FORMATION_MULTIPLIERS, FormationMode
+        from echelon.config import FormationMode
+        from echelon.env.rewards import FORMATION_MULTIPLIERS
 
         assert FORMATION_MULTIPLIERS[FormationMode.LOOSE]["zone"] < 1.0
         assert FORMATION_MULTIPLIERS[FormationMode.LOOSE]["out_death"] < 1.0
 
     def test_standard_is_neutral(self):
         """STANDARD mode has multipliers of 1.0."""
-        from echelon.env.rewards import FORMATION_MULTIPLIERS, FormationMode
+        from echelon.config import FormationMode
+        from echelon.env.rewards import FORMATION_MULTIPLIERS
 
         mult = FORMATION_MULTIPLIERS[FormationMode.STANDARD]
         assert mult["zone"] == 1.0
         assert mult["out_death"] == 1.0
         assert mult["approach"] == 1.0
+
+    def test_env_config_has_formation_mode(self):
+        """EnvConfig accepts formation_mode parameter."""
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10),
+            formation_mode=FormationMode.CLOSE,
+        )
+        assert cfg.formation_mode == FormationMode.CLOSE
+
+    def test_env_config_defaults_to_standard(self):
+        """EnvConfig defaults to STANDARD formation."""
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+
+        cfg = EnvConfig(world=WorldConfig(size_x=30, size_y=30, size_z=10))
+        assert cfg.formation_mode == FormationMode.STANDARD

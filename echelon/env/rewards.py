@@ -15,22 +15,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from enum import IntEnum
 
-
-class FormationMode(IntEnum):
-    """Formation posture commanded by squad leader.
-
-    Modulates reward weights to train policies that respond to tactical commands:
-    - CLOSE: Tight zone control, penalize straying
-    - STANDARD: Balanced posture (default)
-    - LOOSE: Maneuver freedom, reduced zone pressure
-    """
-
-    CLOSE = 0
-    STANDARD = 1
-    LOOSE = 2
-
+from echelon.config import FormationMode
 
 # Reward multipliers per formation mode
 # Applied to: zone_tick, out_zone_death_mult, approach

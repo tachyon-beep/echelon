@@ -1,6 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntEnum
+
+
+class FormationMode(IntEnum):
+    """Formation posture commanded by squad leader.
+
+    Modulates reward weights to train policies that respond to tactical commands:
+    - CLOSE: Tight zone control, penalize straying
+    - STANDARD: Balanced posture (default)
+    - LOOSE: Maneuver freedom, reduced zone pressure
+    """
+
+    CLOSE = 0
+    STANDARD = 1
+    LOOSE = 2
 
 
 @dataclass(frozen=True)
@@ -195,3 +210,5 @@ class EnvConfig:
     # Discount factor for PBRS-compliant approach shaping: r = gamma*phi(s') - phi(s)
     # Should match training gamma for strict PBRS compliance (Ng et al., 1999)
     shaping_gamma: float = 0.99
+    # Formation mode: CLOSE/STANDARD/LOOSE for commander responsiveness training
+    formation_mode: FormationMode = FormationMode.STANDARD
