@@ -173,8 +173,40 @@ class League:
         self.entries[entry_id] = e
         return e
 
+    def add_heuristic(self) -> LeagueEntry:
+        """Add or get the permanent heuristic baseline entry.
+
+        The heuristic ("Lieutenant Heuristic") is a special commander that:
+        - Always exists in the pool
+        - Never retires
+        - Uses venv.get_heuristic_actions() instead of model inference
+        - Has normal Glicko-2 rating that updates from matches
+
+        Returns:
+            The heuristic LeagueEntry (created or existing)
+        """
+        entry_id = "heuristic"
+        existing = self.entries.get(entry_id)
+        if existing is not None:
+            return existing
+
+        entry = LeagueEntry(
+            entry_id=entry_id,
+            ckpt_path="",
+            kind="heuristic",
+            commander_name="Lieutenant Heuristic",
+            rating=Glicko2Rating(
+                rating=float(self.cfg.rating0),
+                rd=float(self.cfg.rd0),
+                vol=float(self.cfg.vol0),
+            ),
+        )
+        self.entries[entry_id] = entry
+        return entry
+
     def top_commanders(self, n: int) -> list[LeagueEntry]:
-        commanders = [e for e in self.entries.values() if e.kind == "commander"]
+        # Include both commanders and heuristic entries
+        commanders = [e for e in self.entries.values() if e.kind in ("commander", "heuristic")]
         commanders.sort(key=lambda e: float(e.rating.rating), reverse=True)
         return commanders[: max(0, int(n))]
 
@@ -327,6 +359,7 @@ class League:
         Returns:
             List of retired LeagueEntry objects (removed from entries)
         """
+        # Only retire regular commanders - heuristic entries are permanent
         commanders = [e for e in self.entries.values() if e.kind == "commander"]
 
         if len(commanders) <= keep_top:

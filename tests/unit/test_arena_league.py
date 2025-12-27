@@ -749,3 +749,78 @@ class TestCommanderRetirement:
         # Candidates should be untouched
         for i in range(3):
             assert league.entries[f"cand_{i}"].kind == "candidate"
+
+
+class TestHeuristicEntry:
+    """Test heuristic baseline support."""
+
+    def test_add_heuristic_creates_entry(self):
+        """add_heuristic creates a heuristic entry with fixed ID."""
+        league = League()
+        entry = league.add_heuristic()
+
+        assert entry.entry_id == "heuristic"
+        assert entry.kind == "heuristic"
+        assert entry.commander_name == "Lieutenant Heuristic"
+        assert entry.ckpt_path == ""
+        assert entry.rating.rating == league.cfg.rating0
+
+    def test_add_heuristic_idempotent(self):
+        """Calling add_heuristic twice returns same entry."""
+        league = League()
+        entry1 = league.add_heuristic()
+        entry1.rating = Glicko2Rating(rating=1600.0, rd=100.0, vol=0.05)
+        entry2 = league.add_heuristic()
+
+        assert entry1 is entry2
+        assert entry2.rating.rating == 1600.0  # Preserved
+
+    def test_heuristic_included_in_top_commanders(self):
+        """top_commanders includes heuristic entries."""
+        league = League()
+        league.add_heuristic()
+
+        top = league.top_commanders(10)
+        assert len(top) == 1
+        assert top[0].kind == "heuristic"
+
+    def test_heuristic_never_retired(self):
+        """retire_commanders skips heuristic entries."""
+        league = League()
+        heur = league.add_heuristic()
+        heur.games = 100
+        heur.rating = Glicko2Rating(rating=800.0, rd=50.0, vol=0.05)
+
+        for i in range(25):
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                commander_name=f"Commander {i}",
+                rating=Glicko2Rating(rating=1500.0 + i * 10, rd=50.0, vol=0.05),
+                games=50,
+            )
+            league.entries[entry.entry_id] = entry
+
+        retired = league.retire_commanders(keep_top=10, min_games=20)
+
+        assert heur.kind == "heuristic"
+        assert "heuristic" not in [e.entry_id for e in retired]
+
+    def test_heuristic_serialization_roundtrip(self):
+        """Heuristic entry survives save/load cycle."""
+        import tempfile
+        from pathlib import Path
+
+        league = League()
+        league.add_heuristic()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "league.json"
+            league.save(path)
+            loaded = League.load(path)
+
+        assert "heuristic" in loaded.entries
+        entry = loaded.entries["heuristic"]
+        assert entry.kind == "heuristic"
+        assert entry.commander_name == "Lieutenant Heuristic"
