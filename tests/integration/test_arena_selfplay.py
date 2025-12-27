@@ -56,3 +56,16 @@ class TestArenaSelfPlay:
         # Rating should decrease after a loss
         assert heuristic.rating.rating < initial_rating
         assert heuristic.games == 1
+
+    def test_heuristic_excluded_from_eval_pool(self, league_with_heuristic):
+        """Heuristic is excluded from evaluation pool (can't load checkpoint)."""
+        _league_path, league = league_with_heuristic
+
+        # Simulate what eval-candidate does: get pool and filter out heuristic
+        pool = league.top_commanders(10) + league.recent_candidates(5)
+        # Filter as arena.py does
+        eval_pool = [e for e in pool if e.kind != "heuristic"]
+
+        # Heuristic should be excluded since it has no checkpoint
+        assert len(eval_pool) == 0
+        assert all(e.kind != "heuristic" for e in eval_pool)

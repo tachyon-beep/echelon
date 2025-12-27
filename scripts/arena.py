@@ -161,7 +161,8 @@ def cmd_eval_candidate(args: argparse.Namespace) -> None:
     pool = league.top_commanders(top_k) + league.recent_candidates(
         cand_k, exclude_id=candidate_entry.entry_id
     )
-    pool = [e for e in pool if e.entry_id != candidate_entry.entry_id]
+    # Exclude candidate itself and heuristic (can't load checkpoint for heuristic)
+    pool = [e for e in pool if e.entry_id != candidate_entry.entry_id and e.kind != "heuristic"]
     if not pool:
         raise SystemExit("no opponents available (need commanders/candidates in league)")
 
