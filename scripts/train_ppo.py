@@ -922,6 +922,7 @@ def main() -> None:
     arena_cache = LRUModelCache(max_size=20)
     arena_opponent_id: str | None = None
     arena_opponent: ActorCriticLSTM | None = None
+    arena_opponent_is_heuristic: bool = False
     arena_lstm_state = None
     arena_done = torch.zeros(num_envs * len(red_ids), device=opponent_device)
 
@@ -953,9 +954,21 @@ def main() -> None:
         return opp
 
     def arena_sample_opponent(reset_hidden: bool) -> None:
-        nonlocal arena_opponent_id, arena_opponent, arena_lstm_state, arena_done
+        nonlocal arena_opponent_id, arena_opponent, arena_lstm_state, arena_done, arena_opponent_is_heuristic
         entry = arena_rng.choice(arena_pool)
         arena_opponent_id = entry.entry_id
+
+        # Check if this is the heuristic baseline
+        if entry.kind == "heuristic":
+            arena_opponent_is_heuristic = True
+            arena_opponent = None  # No model to load
+            # Still reset LSTM state tracking for consistency
+            if reset_hidden:
+                arena_lstm_state = None
+                arena_done = torch.ones(num_envs * len(red_ids), device=opponent_device)
+            return
+
+        arena_opponent_is_heuristic = False
         cached = arena_cache.get(arena_opponent_id)
         if cached is None:
             cached = arena_load_model(entry.ckpt_path)
@@ -1072,18 +1085,25 @@ def main() -> None:
 
             # Red team (opponent)
             if args.train_mode == "arena":
-                obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
-                obs_r_torch = torch.from_numpy(obs_r_many).to(opponent_device)
-                with torch.no_grad():
-                    assert arena_opponent is not None  # Initialized in arena mode
-                    assert arena_lstm_state is not None
-                    act_r, _, _, _, arena_lstm_state = arena_opponent.get_action_and_value(
-                        obs_r_torch, arena_lstm_state, arena_done
-                    )
-                act_r_np = act_r.detach().cpu().numpy()
-                for env_idx in range(num_envs):
-                    for i, rid in enumerate(red_ids):
-                        all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
+                if arena_opponent_is_heuristic:
+                    # Lieutenant Heuristic - use heuristic actions
+                    heuristic_acts_list = venv.get_heuristic_actions(red_ids)
+                    for env_idx in range(num_envs):
+                        all_actions_dicts[env_idx].update(heuristic_acts_list[env_idx])
+                else:
+                    # Neural network opponent - use model inference
+                    obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
+                    obs_r_torch = torch.from_numpy(obs_r_many).to(opponent_device)
+                    with torch.no_grad():
+                        assert arena_opponent is not None
+                        assert arena_lstm_state is not None
+                        act_r, _, _, _, arena_lstm_state = arena_opponent.get_action_and_value(
+                            obs_r_torch, arena_lstm_state, arena_done
+                        )
+                    act_r_np = act_r.detach().cpu().numpy()
+                    for env_idx in range(num_envs):
+                        for i, rid in enumerate(red_ids):
+                            all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
             elif args.train_mode == "heuristic":
                 heuristic_acts_list = venv.get_heuristic_actions(red_ids)
                 for env_idx in range(num_envs):
