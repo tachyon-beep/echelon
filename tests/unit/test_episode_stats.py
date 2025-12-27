@@ -90,7 +90,7 @@ class TestEpisodeStatsInitialization:
         # EWAR stats
         assert "ecm_on_ticks" in stats
         assert "eccm_on_ticks" in stats
-        assert "scout_ticks" in stats
+        assert "light_ticks" in stats
 
     def test_combat_stats_start_at_zero(self, env: EchelonEnv) -> None:
         """Combat stats (kills, damage, etc.) start at zero after reset."""
@@ -486,8 +486,8 @@ class TestPerceptionMetrics:
         # Visible contacts should have been counted
         assert env._episode_stats["visible_contacts_count"] >= 0.0
 
-    def test_scout_ticks_track_scout_presence(self, env: EchelonEnv) -> None:
-        """Scout ticks are accumulated when scouts are alive."""
+    def test_light_ticks_track_light_presence(self, env: EchelonEnv) -> None:
+        """Light ticks are accumulated when lights are alive."""
         # Run steps
         for _ in range(3):
             actions = make_zero_actions(env)
@@ -495,9 +495,9 @@ class TestPerceptionMetrics:
             if any(terminateds.values()) or any(truncateds.values()):
                 break
 
-        # If there are scouts, they should be tracked
-        # (scout_ticks accumulates only for blue scouts)
-        assert env._episode_stats["scout_ticks"] >= 0.0
+        # If there are lights, they should be tracked
+        # (light_ticks accumulates only for blue lights)
+        assert env._episode_stats["light_ticks"] >= 0.0
 
 
 # -----------------------------------------------------------------------------
@@ -547,7 +547,7 @@ class TestStatsAtEpisodeEnd:
         while not done and step < max_steps:
             actions = make_random_actions(env)
             _, _, terminateds, truncateds, _ = env.step(actions)
-            done = any(terminateds.values()) or any(truncateds.values())
+            done = all(terminateds.values()) or all(truncateds.values()) or env.last_outcome is not None
             step += 1
 
         # Check last_outcome contains stats

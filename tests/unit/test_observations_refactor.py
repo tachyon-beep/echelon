@@ -162,7 +162,7 @@ class TestObservationEquivalence:
         # Run a few steps
         for _ in range(5):
             actions = {aid: np.random.uniform(-1, 1, env.ACTION_DIM).astype(np.float32) for aid in env.agents}
-            obs, _, terms, truncs, _ = env.step(actions)
+            _obs, _, terms, truncs, _ = env.step(actions)
             if all(terms.values()) or all(truncs.values()):
                 break
 

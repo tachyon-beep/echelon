@@ -22,44 +22,41 @@ class RewardWeights:
     """Configurable weights for reward components.
 
     These weights are designed to be modified by a curriculum system.
-    Default values are the current production settings (2025-12-27 rebalance v3).
+    Default values are the current production settings (2025-12-28 rebalance v4).
 
     Behavioral objective: "Go to zone. Stay in zone. Fight in zone."
 
-    Key design (2025-12-27 v3 - zone-centric combat):
-    - approach: 0.1 (TINY gravity well - guides to zone, penalizes leaving)
-    - arrival_bonus: 1.0 (single ping = 10x max approach budget)
-    - in_zone_damage_mult: 10x (fight hard in zone!)
-    - in_zone_death_mult: 0.05x (dying in zone is FREE)
-    - out_zone_death_mult: 2x (dying outside is expensive)
+    Key design (2025-12-28 v4 - post-termination-bug fix):
+    Previous 10x multipliers were fighting a DATA DISTRIBUTION problem
+    (episodes truncated at first death), not a reward magnitude problem.
+    With full episodes now running, we use moderate weights:
 
-    Reward math:
-    - Max approach: ~0.1 per episode (just beats "do nothing")
-    - Arrival ping: 1.0 (10x approach, signals "you made it")
-    - 1 HP damage in zone: 1.0 pts (10x approach)
-    - Kill in zone: 50 pts (500x approach)
-    - Die in zone: -0.1 (negligible)
-    - Die outside: -4.0 (40x approach penalty)
-    - Leaving zone: negative approach reward (gravity well)
+    - approach: 0.05 (tiny gravity well)
+    - arrival_bonus: 2.0 (clear milestone for reaching zone)
+    - zone_tick: 1.0 (zone presence dominates returns over full episode)
+    - in_zone_damage_mult: 2x (fight in zone, but zone control matters more)
+    - in_zone_death_mult: 0.5x (deaths in zone still hurt)
+    - out_zone_death_mult: 2x (deaths outside are expensive)
+
+    Expected returns over full episode (~200 steps):
+    - Zone presence: ~200 pts (1.0 per step x 200 steps)
+    - Combat in zone: ~20 pts (kills + damage, 2x multiplier)
+    - Terminal win: 10-25 pts (now 3-8% of return, was 2%)
+    - Deaths hurt: -1.5 in zone, -6.0 outside
     """
 
     # Zone-based rewards (PRIMARY OBJECTIVE)
-    # Reduced from 5.0 - still highest priority but agents can briefly leave for easy kills
-    zone_tick: float = 2.0  # Being IN zone and controlling it
-    arrival_bonus: float = 1.0  # Single "ping" for reaching zone (dwarfs approach)
+    zone_tick: float = 1.0  # Being IN zone and controlling it
+    arrival_bonus: float = 2.0  # Single "ping" for reaching zone
 
-    # Approach shaping (TINY - just beats "do nothing")
-    # Max approach ≈ 0.1 over entire episode
-    # Arrival ping (1.0) = 10x max approach - getting there is just the start
-    approach: float = 0.1  # Moving toward zone (PBRS shaping, stops at zone)
+    # Approach shaping (TINY gravity well)
+    approach: float = 0.05  # Moving toward zone (PBRS shaping)
 
-    # Combat rewards - HIGH IN ZONE
-    # Base damage = 0.1/HP, in zone = 1.0/HP (10x mult)
-    # Kill bonus high enough to incentivize focus fire over damage spreading
-    damage: float = 0.1  # Per point of damage dealt
-    kill: float = 20.0  # Per kill (in zone = 200 pts) - FINISH YOUR TARGETS
-    assist: float = 5.0  # Per assist (in zone = 50 pts)
-    death: float = -2.0  # Death penalty (in zone = -0.1, outside = -2.0)
+    # Combat rewards
+    damage: float = 0.05  # Per point of damage dealt
+    kill: float = 5.0  # Per kill (in zone = 10 pts)
+    assist: float = 2.0  # Per assist (in zone = 4 pts)
+    death: float = -3.0  # Death penalty (in zone = -1.5, outside = -6.0)
 
     # Zone mechanics
     # Increased from 0.25: contested zone should still give meaningful reward
@@ -72,14 +69,19 @@ class RewardWeights:
     # Reduced from 1.0: 30% team reward helps credit assignment
     team_reward_alpha: float = 0.7  # 1.0 = individual, 0.0 = team average
 
-    # Zone-centric combat multipliers (2025-12-27 redesign)
+    # Zone-centric combat multipliers (2025-12-28 v4)
     # Philosophy: Fight for the zone, don't die outside it
-    in_zone_damage_mult: float = 10.0  # 10x damage/kill/assist IN zone - fight hard!
-    in_zone_death_mult: float = 0.05  # 0.05x death penalty IN zone - deaths are FREE
-    out_zone_death_mult: float = 1.0  # 1x death penalty OUTSIDE zone - base penalty
+    in_zone_damage_mult: float = 2.0  # 2x damage/kill/assist IN zone
+    in_zone_death_mult: float = 0.5  # 0.5x death penalty IN zone (still hurts)
+    out_zone_death_mult: float = 2.0  # 2x death penalty OUTSIDE zone (expensive)
 
     # Paint/support bonuses - scouts who paint targets help the team
-    paint_assist_bonus: float = 2.0  # Bonus when teammate uses your paint lock
+    paint_assist_bonus: float = 1.0  # Bonus when teammate uses your paint lock
+
+    # Paint credit assignment (2025-12-28) - per DRL specialist review
+    paint_applied: float = 0.3  # Immediate reward for NEW paint on valid target
+    paint_expired_unused: float = -0.1  # Penalty if paint expires without enabling damage
+    paint_kill_fraction: float = 0.4  # Painter gets 40% of kill reward when painted target dies
 
 
 @dataclass
@@ -265,18 +267,18 @@ class RewardComputer:
             comp.zone = w.zone_tick * team_tick / math.sqrt(n_in_zone)
 
         # (3) Combat rewards: ZONE-CENTRIC
-        # In zone: high damage rewards, low death penalty (fight for the zone!)
-        # Out of zone: low damage rewards, high death penalty (don't waste lives)
+        # In zone: higher damage rewards, lower death penalty
+        # Out of zone: base damage rewards, higher death penalty
         agent_in_zone = ctx.in_zone_by_agent.get(aid, False)
 
         if agent_in_zone:
-            # Fight for the zone - damage is valuable, death is cheap
-            damage_mult = w.in_zone_damage_mult  # 5x
-            death_mult = w.in_zone_death_mult  # 0.1x (practically free)
+            # Fight for the zone
+            damage_mult = w.in_zone_damage_mult  # 2x
+            death_mult = w.in_zone_death_mult  # 0.5x
         else:
             # Don't die pointlessly outside the zone
             damage_mult = 1.0  # base damage reward
-            death_mult = w.out_zone_death_mult  # 3x (expensive)
+            death_mult = w.out_zone_death_mult  # 2x
 
         comp.damage = w.damage * damage_mult * ctx.step_damage_dealt.get(aid, 0.0)
         comp.kill = w.kill * damage_mult * ctx.step_kills.get(aid, 0)

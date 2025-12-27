@@ -105,6 +105,27 @@ def test_shutdown_keeps_physics(make_mech):
     assert mech.vel[0] != 0.0 and mech.vel[0] < vel0[0], "Shutdown mech should damp"
 
 
+def test_smoke_is_not_available_to_light(make_mech):
+    world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
+    world.voxels.fill(VoxelWorld.AIR)
+
+    sim = Sim(world, 0.05, np.random.default_rng(0))
+    light = make_mech("light", "blue", [5.0, 5.0, 1.0], "light")
+    heavy = make_mech("heavy", "blue", [7.0, 5.0, 1.0], "heavy")
+    sim.reset({"light": light, "heavy": heavy})
+
+    action = np.zeros(ACTION_DIM, dtype=np.float32)
+    action[ActionIndex.SPECIAL] = 1.0
+
+    events = sim._try_fire_smoke(light, action)
+    assert len(events) == 0
+    assert len(sim.projectiles) == 0
+
+    events = sim._try_fire_smoke(heavy, action)
+    assert len(events) == 1
+    assert len(sim.projectiles) == 1
+
+
 def test_autocannon_auto_pitch(make_mech):
     world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
     world.voxels.fill(VoxelWorld.AIR)

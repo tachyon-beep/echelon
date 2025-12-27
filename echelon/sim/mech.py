@@ -81,6 +81,7 @@ class MechState:
     painter_cooldown: float = 0.0
     painted_remaining: float = 0.0
     last_painter_id: str | None = None
+    paint_damage_accumulated: float = 0.0  # Damage dealt while painted (for credit)
     noise_level: float = 0.0  # Acoustic footprint
     alive: bool = True
 

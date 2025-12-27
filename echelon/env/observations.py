@@ -350,6 +350,9 @@ class ObservationContext:
     # Episode stats (for tracking)
     episode_stats: dict[str, float]
 
+    # Paint usage feedback (for credit assignment)
+    paint_used_this_step: dict[str, int]
+
     @classmethod
     def from_env(cls, env: EchelonEnv) -> ObservationContext:
         """Create ObservationContext from environment state.
@@ -380,6 +383,7 @@ class ObservationContext:
             team_zone_score=env.team_zone_score,
             zone_score_to_win=env.zone_score_to_win,
             episode_stats=env._episode_stats,
+            paint_used_this_step=env._paint_used_this_step,
         )
 
 
@@ -417,8 +421,8 @@ class ObservationBuilder:
         # heat_headroom, stability_risk, damage_dir_local(3), incoming_missile, sensor_quality,
         # jam_level, ecm_on, eccm_on, suppressed, ams_cd, self_vel(3), cooldowns(4), in_zone,
         # vec_to_zone(3), zone_radius, my_control, my_score, enemy_score, time_frac,
-        # obs_sort_onehot(3), hostile_only = 47
-        self.self_dim = 47
+        # obs_sort_onehot(3), hostile_only, my_paint_used = 48
+        self.self_dim = 48
 
     def obs_dim(self) -> int:
         """Compute total observation dimension."""
@@ -512,6 +516,7 @@ class ObservationBuilder:
             pack_ids = ctx.packmates.get(aid, [])
             sort_mode = int(ctx.contact_sort_mode.get(aid, 0))
             hostile_only = bool(ctx.contact_filter_hostile.get(aid, False))
+            my_paint_used = ctx.paint_used_this_step.get(aid, 0) > 0
 
             sensor_quality, jam_level, _eccm_level = compute_ewar_levels(viewer, sim)
             radar_range = float(base_radar_range) * float(sensor_quality)
@@ -815,6 +820,7 @@ class ObservationBuilder:
                         1.0 if sort_mode == 1 else 0.0,
                         1.0 if sort_mode == 2 else 0.0,
                         1.0 if hostile_only else 0.0,
+                        1.0 if my_paint_used else 0.0,  # Paint feedback for credit assignment
                     ],
                     dtype=np.float32,
                 )

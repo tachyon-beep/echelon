@@ -442,8 +442,16 @@ class EchelonEnv:
             "ecm_on_ticks": 0.0,
             "eccm_on_ticks": 0.0,
             "light_ticks": 0.0,  # ECM/ECCM is on Light now, not Scout
+            # Paint effectiveness metrics (2025-12-28)
+            # painted_target_attacks: when team attacks a painted target
+            # paint_enabled_damage: damage dealt to painted targets
+            "painted_target_attacks_blue": 0.0,
+            "painted_target_attacks_red": 0.0,
+            "paint_enabled_damage_blue": 0.0,
+            "paint_enabled_damage_red": 0.0,
         }
         self._damage_by_target: dict[str, float] = {}  # target_id -> damage received
+        self._paint_used_this_step: dict[str, int] = {}  # For observation feedback
         self._prev_fallen = {}
         self._prev_legged = {}
         self._prev_shutdown = {}
@@ -1054,6 +1062,11 @@ class EchelonEnv:
         step_deaths: dict[str, bool] = dict.fromkeys(self.agents, False)
         step_shots_fired: dict[str, int] = dict.fromkeys(self.agents, 0)  # Aggression tracking
 
+        # Paint credit assignment tracking (2025-12-28)
+        step_paint_applied: dict[str, int] = dict.fromkeys(self.agents, 0)
+        step_paint_expired_unused: dict[str, int] = dict.fromkeys(self.agents, 0)
+        step_paint_kills: dict[str, int] = dict.fromkeys(self.agents, 0)
+
         # Episode stats (for logging/debugging) and per-agent combat tracking (HIGH-6).
         # NOTE: Event dict access uses [] not .get() to fail loudly on schema mismatch.
         if events:
@@ -1063,6 +1076,7 @@ class EchelonEnv:
                     shooter_id = str(ev["shooter"])
                     target_id = str(ev["target"])
                     shooter = sim.mechs.get(shooter_id)
+                    target = sim.mechs.get(target_id)
                     if shooter is not None:
                         self._episode_stats[f"kills_{shooter.team}"] = float(
                             self._episode_stats.get(f"kills_{shooter.team}", 0.0) + 1.0
@@ -1070,6 +1084,12 @@ class EchelonEnv:
                         step_kills[shooter_id] = step_kills.get(shooter_id, 0) + 1
                     if target_id in step_deaths:
                         step_deaths[target_id] = True
+                    # Paint kill bonus: credit painter if target was painted
+                    if target is not None and target.last_painter_id:
+                        painter_id = target.last_painter_id
+                        # Only credit if painter != shooter (no self-credit)
+                        if painter_id in step_paint_kills and painter_id != shooter_id:
+                            step_paint_kills[painter_id] += 1
                 elif et == "assist":
                     painter_id = str(ev["painter"])
                     painter = sim.mechs.get(painter_id)
@@ -1079,15 +1099,26 @@ class EchelonEnv:
                         )
                         step_assists[painter_id] = step_assists.get(painter_id, 0) + 1
                 elif et == "paint":
-                    shooter = sim.mechs.get(str(ev["shooter"]))
+                    shooter_id = str(ev["shooter"])
+                    shooter = sim.mechs.get(shooter_id)
                     if shooter is not None:
                         self._episode_stats[f"paints_{shooter.team}"] = float(
                             self._episode_stats.get(f"paints_{shooter.team}", 0.0) + 1.0
                         )
+                        # Track for immediate paint reward
+                        if shooter_id in step_paint_applied:
+                            step_paint_applied[shooter_id] += 1
+                elif et == "paint_expired":
+                    painter_id = ev["painter"]
+                    damage_accumulated = float(ev["damage_accumulated"])
+                    # Penalty only if paint wasn't used (no damage enabled)
+                    if painter_id and painter_id in step_paint_expired_unused and damage_accumulated <= 0.0:
+                        step_paint_expired_unused[painter_id] += 1
                 elif et == "laser_hit":
                     shooter_id = str(ev["shooter"])
                     target_id = str(ev["target"])
                     shooter = sim.mechs.get(shooter_id)
+                    target = sim.mechs.get(target_id)
                     if shooter is not None:
                         self._episode_stats[f"laser_hits_{shooter.team}"] = float(
                             self._episode_stats.get(f"laser_hits_{shooter.team}", 0.0) + 1.0
@@ -1102,10 +1133,19 @@ class EchelonEnv:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
                         # Track damage by target for focus fire metric
                         self._damage_by_target[target_id] = self._damage_by_target.get(target_id, 0.0) + dmg
+                        # Track attacks on painted targets (2025-12-28)
+                        if target is not None and target.painted_remaining > 0:
+                            self._episode_stats[f"painted_target_attacks_{shooter.team}"] = float(
+                                self._episode_stats.get(f"painted_target_attacks_{shooter.team}", 0.0) + 1.0
+                            )
+                            self._episode_stats[f"paint_enabled_damage_{shooter.team}"] = float(
+                                self._episode_stats.get(f"paint_enabled_damage_{shooter.team}", 0.0) + dmg
+                            )
                 elif et == "projectile_hit":
                     shooter_id = str(ev["shooter"])
                     target_id = str(ev["target"])
                     shooter = sim.mechs.get(shooter_id)
+                    target = sim.mechs.get(target_id)
                     if shooter is not None:
                         dmg = float(ev["damage"])
                         self._episode_stats[f"damage_{shooter.team}"] = float(
@@ -1116,6 +1156,14 @@ class EchelonEnv:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
                         # Track damage by target for focus fire metric
                         self._damage_by_target[target_id] = self._damage_by_target.get(target_id, 0.0) + dmg
+                        # Track attacks on painted targets (2025-12-28)
+                        if target is not None and target.painted_remaining > 0:
+                            self._episode_stats[f"painted_target_attacks_{shooter.team}"] = float(
+                                self._episode_stats.get(f"painted_target_attacks_{shooter.team}", 0.0) + 1.0
+                            )
+                            self._episode_stats[f"paint_enabled_damage_{shooter.team}"] = float(
+                                self._episode_stats.get(f"paint_enabled_damage_{shooter.team}", 0.0) + dmg
+                            )
                 elif et == "missile_launch":
                     shooter_id = str(ev["shooter"])
                     shooter = sim.mechs.get(shooter_id)
@@ -1301,9 +1349,40 @@ class EchelonEnv:
 
         rewards, reward_components = self._reward_computer.compute(reward_ctx)
 
-        # Store component breakdown in infos for training script analysis
+        # Paint credit assignment rewards (2025-12-28)
+        # Applied outside RewardComputer for simplicity - these are additive bonuses
+        w = self._reward_weights
         for aid in self.agents:
-            infos[aid]["reward_components"] = reward_components[aid].to_dict()
+            # Immediate paint reward (+0.3 per new paint)
+            paint_count = step_paint_applied.get(aid, 0)
+            if paint_count > 0:
+                paint_reward = w.paint_applied * paint_count
+                rewards[aid] += paint_reward
+                reward_components[aid].paint_assist += paint_reward
+
+            # Paint expired unused penalty (-0.1 per wasted paint)
+            expired_count = step_paint_expired_unused.get(aid, 0)
+            if expired_count > 0:
+                penalty = w.paint_expired_unused * expired_count
+                rewards[aid] += penalty  # negative value
+                reward_components[aid].paint_assist += penalty
+
+            # Paint kill bonus (40% of kill reward when painted target dies)
+            kill_count = step_paint_kills.get(aid, 0)
+            if kill_count > 0:
+                # Use zone multiplier if painter is in zone
+                in_zone = in_zone_by_agent.get(aid, False)
+                damage_mult = w.in_zone_damage_mult if in_zone else 1.0
+                kill_bonus = w.kill * w.paint_kill_fraction * damage_mult * kill_count
+                rewards[aid] += kill_bonus
+                reward_components[aid].kill += kill_bonus
+
+        # Store for observation context - combine all paint-related feedback
+        # This gives scouts complete feedback: paint applied, paint used, paint kills
+        self._paint_used_this_step = {
+            aid: (step_paint_applied.get(aid, 0) + step_assists.get(aid, 0) + step_paint_kills.get(aid, 0))
+            for aid in self.agents
+        }
 
         # Episode end conditions (King of the Hill is the primary win condition).
         hp_after = self.team_hp()
@@ -1332,19 +1411,30 @@ class EchelonEnv:
             for aid in truncations:
                 truncations[aid] = True
             eps = 1e-3
-            if self.team_zone_score["blue"] > self.team_zone_score["red"] + eps:
+            blue_full_control = in_zone_tonnage["blue"] > 0.0 and in_zone_tonnage["red"] <= 0.0
+            red_full_control = in_zone_tonnage["red"] > 0.0 and in_zone_tonnage["blue"] <= 0.0
+
+            # Time-up tiebreakers: uncontested zone control -> fewer losses -> more damage dealt.
+            if blue_full_control and not red_full_control:
                 winner = "blue"
-            elif self.team_zone_score["red"] > self.team_zone_score["blue"] + eps:
+            elif red_full_control and not blue_full_control:
                 winner = "red"
             else:
-                # Fallback tiebreaker: remaining team HP.
-                hp = hp_after
-                if hp["blue"] > hp["red"] + eps:
+                blue_losses = sum(1 for mid in self.blue_ids if not sim.mechs[mid].alive)
+                red_losses = sum(1 for mid in self.red_ids if not sim.mechs[mid].alive)
+                if blue_losses < red_losses:
                     winner = "blue"
-                elif hp["red"] > hp["blue"] + eps:
+                elif red_losses < blue_losses:
                     winner = "red"
                 else:
-                    winner = "draw"
+                    blue_damage = float(self._episode_stats.get("damage_blue", 0.0))
+                    red_damage = float(self._episode_stats.get("damage_red", 0.0))
+                    if blue_damage > red_damage + eps:
+                        winner = "blue"
+                    elif red_damage > blue_damage + eps:
+                        winner = "red"
+                    else:
+                        winner = "draw"
             reason = "time_up"
 
         # Attach score/state to infos.
@@ -1362,6 +1452,11 @@ class EchelonEnv:
             else:
                 self._episode_stats["focus_fire_concentration"] = 0.0
 
+            # NOTE: No terminal win/loss rewards. Dense per-step rewards (zone_tick,
+            # combat) directly encode desired behavior. Terminal rewards are sparse,
+            # cause credit assignment problems, and can encourage degenerate strategies
+            # that "win somehow" rather than "play correctly".
+
             self.last_outcome = {
                 "reason": reason,
                 "winner": winner or "draw",
@@ -1371,10 +1466,9 @@ class EchelonEnv:
                 "stats": dict(self._episode_stats),
             }
 
-            # NOTE: Terminal win/loss rewards removed. They dominated the learning signal
-            # (98%) and didn't provide gradient information. Mission success is now shaped
-            # entirely through zone approach/control rewards. Dead agents learn from death
-            # penalty (W_DEATH) and the shaping rewards they received while alive.
+        # Store component breakdown in infos for training script analysis
+        for aid in self.agents:
+            infos[aid]["reward_components"] = reward_components[aid].to_dict()
 
         # Attach aggregated events to all infos (for now).
         if events:

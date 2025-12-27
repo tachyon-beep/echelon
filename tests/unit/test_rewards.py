@@ -311,30 +311,174 @@ class TestRewardBalancing:
 
         weights = RewardWeights()
 
-        # Zone: 5.0 per step (uncontested)
+        # Zone: 2.0 per step (uncontested)
         # Approach: ~0.025 per step (moving 1 voxel toward zone with max_xy=100)
         # Ratio should be ~200:1 in favor of zone
 
-        zone_per_step = weights.zone_tick  # 5.0
+        zone_per_step = weights.zone_tick  # 2.0
         approach_per_step = weights.approach * 0.01  # ~0.02 (typical movement)
 
         ratio = zone_per_step / max(approach_per_step, 0.001)
         assert ratio > 100, f"Zone should dominate approach by >100x, actual ratio: {ratio:.1f}"
 
     def test_death_penalty_reasonable_vs_zone(self, reward_env):
-        """Death penalty should be recoverable with zone control."""
+        """Death penalty should be recoverable with zone control in reasonable time."""
         from echelon.env.rewards import RewardWeights
 
         weights = RewardWeights()
 
-        # Death: -2.0
-        # Zone: 5.0 per step
-        # Should recover death penalty in < 1 step of zone control
+        # 2025-12-28 v4: Deaths should hurt, but be recoverable
+        # death = -3.0, zone_tick = 1.0 -> 3 steps to recover
+        # This is intentional - dying isn't free, but 3 steps out of ~200 is reasonable
 
         steps_to_recover = abs(weights.death) / weights.zone_tick
         assert (
-            steps_to_recover < 1
-        ), f"Death penalty should be recoverable in <1 zone step, needs {steps_to_recover:.2f}"
+            steps_to_recover <= 5
+        ), f"Death penalty should be recoverable in <=5 zone steps, needs {steps_to_recover:.2f}"
+
+
+class TestPaintCreditAssignment:
+    """Verify paint credit assignment rewards for scouts."""
+
+    def test_immediate_paint_reward(self, reward_env):
+        """Scout painting a target gets immediate +0.3 paint_assist reward."""
+        env = reward_env
+
+        # blue_0 is scout with PAINTER as primary
+        scout = env.sim.mechs["blue_0"]
+        target = env.sim.mechs["red_0"]
+
+        # Position scout to face target
+        scout.pos[0], scout.pos[1] = 10.0, 10.0
+        target.pos[0], target.pos[1] = 20.0, 10.0  # Target 10 voxels away in +x
+        scout.yaw = 0.0  # Facing +x toward target
+        scout.painter_cooldown = 0.0  # Ensure can fire
+
+        # Move everyone else away
+        for aid in env.agents:
+            if aid not in ["blue_0", "red_0"]:
+                m = env.sim.mechs[aid]
+                m.pos[0], m.pos[1] = 5.0, 5.0
+
+        # Fire painter
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        actions["blue_0"][4] = 1.0  # PRIMARY = PAINTER for scout
+
+        # Run a few steps to ensure paint hits
+        paint_reward_found = False
+        for _ in range(5):
+            _, _rewards, _, _, infos = env.step(actions)
+            # Check reward components for paint_assist
+            comps = infos["blue_0"]["reward_components"]
+            if comps.get("paint_assist", 0.0) > 0:
+                paint_reward_found = True
+                assert (
+                    comps["paint_assist"] >= 0.3
+                ), f"Paint reward should be >= 0.3, got {comps['paint_assist']}"
+                break
+
+        # If paint didn't land, that's okay - geometry might prevent it
+        # But if we got here and have no paint reward, check if target is painted
+        if not paint_reward_found and target.painted_remaining > 0:
+            pytest.fail("Target was painted but no paint_assist reward given")
+
+    def test_paint_expired_unused_penalty(self, reward_env):
+        """Paint expiring without enabling damage gives -0.1 penalty."""
+        env = reward_env
+
+        # Manually set up paint that will expire unused
+        target = env.sim.mechs["red_0"]
+        scout_id = "blue_0"
+
+        # Set paint state to expire on next step
+        target.painted_remaining = 0.01  # Will expire immediately
+        target.last_painter_id = scout_id
+        target.paint_damage_accumulated = 0.0  # No damage dealt while painted
+
+        # Move everyone far apart so no combat happens
+        for aid in env.agents:
+            m = env.sim.mechs[aid]
+            m.pos[0] = 5.0 + (hash(aid) % 20)
+            m.pos[1] = 5.0 + (hash(aid) % 10)
+            m.vel[:] = 0.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, _rewards, _, _, infos = env.step(actions)
+
+        # Scout should get penalty for wasted paint
+        comps = infos["blue_0"]["reward_components"]
+        paint_assist = comps.get("paint_assist", 0.0)
+        # Penalty is -0.1, so paint_assist should be negative
+        assert paint_assist < 0, f"Wasted paint should give negative reward, got {paint_assist}"
+
+    def test_paint_expired_with_damage_no_penalty(self, reward_env):
+        """Paint expiring after enabling damage does NOT give penalty."""
+        env = reward_env
+
+        target = env.sim.mechs["red_0"]
+        scout_id = "blue_0"
+
+        # Set paint state to expire, but with damage accumulated
+        target.painted_remaining = 0.01  # Will expire immediately
+        target.last_painter_id = scout_id
+        target.paint_damage_accumulated = 50.0  # Damage was dealt while painted
+
+        # Move everyone far apart
+        for aid in env.agents:
+            m = env.sim.mechs[aid]
+            m.pos[0] = 5.0 + (hash(aid) % 20)
+            m.pos[1] = 5.0 + (hash(aid) % 10)
+            m.vel[:] = 0.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, _rewards, _, _, infos = env.step(actions)
+
+        # Scout should NOT get penalty (paint was useful)
+        comps = infos["blue_0"]["reward_components"]
+        paint_assist = comps.get("paint_assist", 0.0)
+        assert paint_assist >= 0, f"Used paint should not give penalty, got {paint_assist}"
+
+    def test_paint_kill_fraction_bonus(self, reward_env):
+        """Painter gets 40% of kill reward when painted target dies."""
+        env = reward_env
+
+        scout_id = "blue_0"
+        killer_id = "blue_3"  # Medium with LASER
+
+        # Setup: target is painted by scout, about to be killed by teammate
+        target = env.sim.mechs["red_0"]
+        target.painted_remaining = 5.0  # Active paint
+        target.last_painter_id = scout_id
+        target.hp = 1.0  # One-shot kill
+
+        # Position killer to hit target
+        killer = env.sim.mechs[killer_id]
+        killer.pos[0], killer.pos[1] = target.pos[0] - 5.0, target.pos[1]
+        killer.yaw = 0.0  # Facing +x toward target
+
+        # Move scout away (shouldn't affect kill credit)
+        env.sim.mechs[scout_id].pos[0] = 5.0
+        env.sim.mechs[scout_id].pos[1] = 5.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        actions[killer_id][4] = 1.0  # Fire laser
+
+        # Run until kill happens
+        kill_occurred = False
+        for _ in range(10):
+            was_alive = target.alive
+            _, _rewards, _, _, infos = env.step(actions)
+            if was_alive and not target.alive and target.died:
+                kill_occurred = True
+                # Scout (painter) should get kill component from paint_kill_fraction
+                scout_comps = infos[scout_id]["reward_components"]
+                scout_kill = scout_comps.get("kill", 0.0)
+
+                # 40% of W_KILL (5.0) = 2.0 (base, no zone multiplier)
+                assert scout_kill > 0, f"Painter should get kill bonus, got {scout_kill}"
+                break
+
+        assert kill_occurred, "Target should have been killed"
 
 
 @pytest.mark.skip(

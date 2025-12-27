@@ -1125,7 +1125,6 @@ def main() -> None:
             done_flat = np.zeros(batch_size, dtype=np.float32)
             arena_done_np = np.zeros(num_envs * len(red_ids), dtype=np.float32)
 
-            team_alive_list = venv.get_team_alive()
             last_outcomes = venv.get_last_outcomes()
 
             for env_idx in range(num_envs):
@@ -1193,14 +1192,11 @@ def main() -> None:
                                 spatial_acc.record_death(dx, dy, world_size)
 
                 # Check episode termination
-                # NOTE: Zone wins set terminations=True (objective achieved).
-                #       Time limits set truncations=True (time ran out).
-                #       Eliminations are detected via team_alive.
-                blue_alive = team_alive_list[env_idx]["blue"]
-                red_alive = team_alive_list[env_idx]["red"]
-                has_termination = any(terminations_list[env_idx].values())
-                has_truncation = any(truncations_list[env_idx].values())
-                ep_over = has_termination or has_truncation or (not blue_alive) or (not red_alive)
+                # NOTE: last_outcome is set ONLY when the game actually ends:
+                #       - Team elimination (all agents on one team dead)
+                #       - Time limit (max_episode_seconds reached)
+                #       Individual agent deaths do NOT end the episode.
+                ep_over = last_outcomes[env_idx] is not None
 
                 if ep_over:
                     ep_ret = float(current_ep_returns[env_idx])
@@ -1215,14 +1211,14 @@ def main() -> None:
                     winner = outcome.get("winner", "draw")
                     if winner not in ("blue", "red"):
                         winner = "draw"
-                    termination_type = outcome.get("reason", "timeout")
-                    # Map reason to expected termination types
-                    if termination_type in ("zone", "elimination", "timeout"):
-                        pass  # Already valid
-                    elif has_termination and not has_truncation:
-                        termination_type = "zone" if blue_alive and red_alive else "elimination"
-                    else:
+                    # outcome.reason is "elimination" or "time_up" from env.py
+                    reason = outcome.get("reason", "timeout")
+                    if reason == "time_up":
                         termination_type = "timeout"
+                    elif reason == "elimination":
+                        termination_type = "elimination"
+                    else:
+                        termination_type = reason  # Future-proof for new reasons
                     opponent_id: str
                     if args.train_mode == "arena" and arena_opponent_id is not None:
                         opponent_id = arena_opponent_id

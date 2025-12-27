@@ -83,7 +83,7 @@ def coord_stats_dict() -> st.SearchStrategy[dict[str, float]]:
             "hostile_filter_on_count": non_negative_float,
             "ecm_on_ticks": non_negative_float,
             "eccm_on_ticks": non_negative_float,
-            "scout_ticks": positive_float,
+            "light_ticks": positive_float,
         }
     )
 
@@ -198,6 +198,7 @@ class TestComputeCombatStats:
             "damage_dealt": 0.0,
             "damage_ratio": 1.0,
             "kill_participation": 0.0,
+            "paint_rate": 0.0,
             "survival_rate": 1.0,
         }
 
@@ -302,7 +303,13 @@ class TestComputeCombatStats:
     def test_output_keys_complete(self) -> None:
         """Output has all expected keys."""
         result = compute_combat_stats([], num_agents=5)
-        assert set(result.keys()) == {"damage_dealt", "damage_ratio", "kill_participation", "survival_rate"}
+        assert set(result.keys()) == {
+            "damage_dealt",
+            "damage_ratio",
+            "kill_participation",
+            "paint_rate",
+            "survival_rate",
+        }
 
     def test_multiple_episodes_averaged(self) -> None:
         """Multiple episodes are averaged correctly."""
@@ -607,7 +614,7 @@ class TestComputePerceptionStats:
                 "hostile_filter_on_count": 50.0,
                 "ecm_on_ticks": 30.0,
                 "eccm_on_ticks": 20.0,
-                "scout_ticks": 0.0,
+                "light_ticks": 0.0,
             }
         ]
         result = compute_perception_stats(stats)
@@ -624,7 +631,7 @@ class TestComputePerceptionStats:
                 "hostile_filter_on_count": 10.0,
                 "ecm_on_ticks": 100.0,
                 "eccm_on_ticks": 100.0,
-                "scout_ticks": 100.0,
+                "light_ticks": 100.0,
             }
         ]
         result = compute_perception_stats(stats)
@@ -640,7 +647,7 @@ class TestComputePerceptionStats:
                 "hostile_filter_on_count": 25.0,  # Half of observations
                 "ecm_on_ticks": 0.0,
                 "eccm_on_ticks": 0.0,
-                "scout_ticks": 100.0,
+                "light_ticks": 100.0,
             }
         ]
         result = compute_perception_stats(stats)
@@ -740,7 +747,7 @@ class TestMetricInvariants:
                         "hostile_filter_on_count": 5.0,
                         "ecm_on_ticks": 30.0,
                         "eccm_on_ticks": 20.0,
-                        "scout_ticks": 100.0,
+                        "light_ticks": 100.0,
                     }
                 ]
             ),

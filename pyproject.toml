@@ -55,6 +55,7 @@ dev = [
   "pytest-timeout>=2.4.0",
   "pytest>=8.0",
   "pytest-cov>=6.0",
+  "pytest-playwright>=0.5.2",
   "ruff>=0.8",
   "vulture>=2.14",
   "httpx>=0.28.1",
@@ -121,6 +122,8 @@ testpaths = ["tests"]
 norecursedirs = ["mutants", "scripts", ".venv", ".hypothesis", "runs", "__pycache__"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "e2e: marks tests as E2E browser tests (deselect with '-m \"not e2e\"')",
+    "visual: marks tests as visual regression tests",
 ]
 addopts = "--cov=echelon --cov-report=term-missing --cov-fail-under=0"
 

@@ -148,3 +148,66 @@ class TestSelfState:
         assert not np.allclose(
             obs_a, obs_b
         ), "Mechs at different positions should have different observations"
+
+
+class TestPaintUsageObservation:
+    """Verify paint usage feedback in observations.
+
+    The my_paint_used observation combines three signals:
+    - paint_applied: scout successfully painted a target
+    - paint_assists: painted target took damage from teammates
+    - paint_kills: painted target was killed
+    """
+
+    def test_my_paint_used_updates_on_paint_activity(self, obs_env):
+        """my_paint_used observation reflects any paint-related activity."""
+        env = obs_env
+        env.reset(seed=0)
+
+        scout_id = "blue_0"
+
+        # Manually set up paint state - could be paint applied, assist, or kill
+        env._paint_used_this_step = {scout_id: 1}
+
+        obs = env._obs()
+        scout_obs = obs[scout_id]
+
+        # my_paint_used is the last self feature (self_dim = 48)
+        self_features_end = scout_obs[-48:]
+        my_paint_used_value = self_features_end[-1]
+        assert my_paint_used_value == 1.0, f"my_paint_used should be 1.0, got {my_paint_used_value}"
+
+    def test_my_paint_used_zero_without_activity(self, obs_env):
+        """my_paint_used is 0 when no paint activity this step."""
+        env = obs_env
+        env.reset(seed=0)
+
+        scout_id = "blue_0"
+
+        # No paint activity
+        env._paint_used_this_step = {}
+
+        obs = env._obs()
+        scout_obs = obs[scout_id]
+
+        self_features_end = scout_obs[-48:]
+        my_paint_used_value = self_features_end[-1]
+        assert my_paint_used_value == 0.0, f"my_paint_used should be 0.0, got {my_paint_used_value}"
+
+    def test_my_paint_used_combines_multiple_events(self, obs_env):
+        """my_paint_used reflects combined count of paint events."""
+        env = obs_env
+        env.reset(seed=0)
+
+        scout_id = "blue_0"
+
+        # Multiple paint events: 1 applied + 2 assists = 3 total
+        env._paint_used_this_step = {scout_id: 3}
+
+        obs = env._obs()
+        scout_obs = obs[scout_id]
+
+        self_features_end = scout_obs[-48:]
+        my_paint_used_value = self_features_end[-1]
+        # Observation is binary (> 0), so still 1.0
+        assert my_paint_used_value == 1.0, f"my_paint_used should be 1.0, got {my_paint_used_value}"
