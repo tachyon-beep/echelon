@@ -24,6 +24,7 @@ from echelon.arena.league import (
     _now_iso,
     _stable_id,
 )
+from echelon.arena.stats import TeamStats
 
 
 class TestHelperFunctions:
@@ -867,3 +868,147 @@ class TestHeuristicEntry:
         entry = loaded.entries["heuristic"]
         assert entry.kind == "heuristic"
         assert entry.commander_name == "Lieutenant Heuristic"
+
+
+class TestAggregateStats:
+    """Test aggregate stats tracking in LeagueEntry."""
+
+    def test_league_entry_aggregate_stats(self):
+        """LeagueEntry accumulates stats from matches."""
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+        )
+
+        # Initially zero
+        assert entry.aggregate_stats.kills == 0
+
+        # Add match stats
+        match_stats = TeamStats(kills=3, deaths=1, damage_dealt=150.0)
+        entry.add_match_stats(match_stats)
+
+        assert entry.aggregate_stats.kills == 3
+        assert entry.aggregate_stats.deaths == 1
+        assert entry.aggregate_stats.damage_dealt == 150.0
+
+        # Add another match
+        match_stats2 = TeamStats(kills=2, deaths=2, damage_dealt=100.0)
+        entry.add_match_stats(match_stats2)
+
+        assert entry.aggregate_stats.kills == 5
+        assert entry.aggregate_stats.deaths == 3
+        assert entry.aggregate_stats.damage_dealt == 250.0
+
+    def test_aggregate_stats_all_fields(self):
+        """All TeamStats fields are accumulated correctly."""
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+        )
+
+        # Add stats with all fields
+        match_stats = TeamStats(
+            kills=3,
+            deaths=1,
+            damage_dealt=150.0,
+            damage_taken=75.0,
+            zone_ticks=10,
+            primary_uses=20,
+            secondary_uses=5,
+            tertiary_uses=3,
+            vents=8,
+            smokes=2,
+            ecm_toggles=4,
+            paints=6,
+            overheats=1,
+            knockdowns=2,
+            orders_issued={"attack": 3, "defend": 2},
+            orders_acknowledged=4,
+            orders_overridden=1,
+        )
+        entry.add_match_stats(match_stats)
+
+        # Add more stats
+        match_stats2 = TeamStats(
+            kills=2,
+            deaths=2,
+            damage_dealt=100.0,
+            damage_taken=50.0,
+            zone_ticks=5,
+            primary_uses=15,
+            secondary_uses=3,
+            tertiary_uses=2,
+            vents=4,
+            smokes=1,
+            ecm_toggles=2,
+            paints=3,
+            overheats=0,
+            knockdowns=1,
+            orders_issued={"attack": 2, "retreat": 1},
+            orders_acknowledged=2,
+            orders_overridden=0,
+        )
+        entry.add_match_stats(match_stats2)
+
+        agg = entry.aggregate_stats
+        assert agg.kills == 5
+        assert agg.deaths == 3
+        assert agg.damage_dealt == 250.0
+        assert agg.damage_taken == 125.0
+        assert agg.zone_ticks == 15
+        assert agg.primary_uses == 35
+        assert agg.secondary_uses == 8
+        assert agg.tertiary_uses == 5
+        assert agg.vents == 12
+        assert agg.smokes == 3
+        assert agg.ecm_toggles == 6
+        assert agg.paints == 9
+        assert agg.overheats == 1
+        assert agg.knockdowns == 3
+        assert agg.orders_issued == {"attack": 5, "defend": 2, "retreat": 1}
+        assert agg.orders_acknowledged == 6
+        assert agg.orders_overridden == 1
+
+    def test_aggregate_stats_serialization_roundtrip(self):
+        """Aggregate stats survive serialization round-trip."""
+        cfg = Glicko2Config()
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+        )
+
+        # Add some stats
+        match_stats = TeamStats(
+            kills=5,
+            deaths=2,
+            damage_dealt=200.0,
+            damage_taken=100.0,
+            zone_ticks=15,
+            primary_uses=30,
+            orders_issued={"attack": 5},
+        )
+        entry.add_match_stats(match_stats)
+
+        # Round-trip through serialization
+        d = entry.as_dict()
+        restored = LeagueEntry.from_dict(d, cfg=cfg)
+
+        assert restored.aggregate_stats.kills == 5
+        assert restored.aggregate_stats.deaths == 2
+        assert restored.aggregate_stats.damage_dealt == 200.0
+        assert restored.aggregate_stats.damage_taken == 100.0
+        assert restored.aggregate_stats.zone_ticks == 15
+        assert restored.aggregate_stats.primary_uses == 30
+        assert restored.aggregate_stats.orders_issued == {"attack": 5}

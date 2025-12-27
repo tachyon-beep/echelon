@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .glicko2 import GameResult, Glicko2Config, Glicko2Rating, rate
+from .stats import TeamStats
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,10 +77,33 @@ class LeagueEntry:
     games: int = 0
     meta: dict[str, Any] = field(default_factory=dict)
     rating_history: list[tuple[float, float]] = field(default_factory=list)
+    aggregate_stats: TeamStats = field(default_factory=TeamStats)
 
     def record_rating(self, timestamp: float) -> None:
         """Append current rating to history."""
         self.rating_history.append((timestamp, self.rating.rating))
+
+    def add_match_stats(self, stats: TeamStats) -> None:
+        """Accumulate stats from a match."""
+        agg = self.aggregate_stats
+        agg.kills += stats.kills
+        agg.deaths += stats.deaths
+        agg.damage_dealt += stats.damage_dealt
+        agg.damage_taken += stats.damage_taken
+        agg.zone_ticks += stats.zone_ticks
+        agg.primary_uses += stats.primary_uses
+        agg.secondary_uses += stats.secondary_uses
+        agg.tertiary_uses += stats.tertiary_uses
+        agg.vents += stats.vents
+        agg.smokes += stats.smokes
+        agg.ecm_toggles += stats.ecm_toggles
+        agg.paints += stats.paints
+        agg.overheats += stats.overheats
+        agg.knockdowns += stats.knockdowns
+        for order_type, count in stats.orders_issued.items():
+            agg.orders_issued[order_type] = agg.orders_issued.get(order_type, 0) + count
+        agg.orders_acknowledged += stats.orders_acknowledged
+        agg.orders_overridden += stats.orders_overridden
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +116,7 @@ class LeagueEntry:
             "games": int(self.games),
             "meta": dict(self.meta),
             "rating_history": self.rating_history,
+            "aggregate_stats": self.aggregate_stats.to_dict(),
         }
 
     @classmethod
@@ -100,6 +125,9 @@ class LeagueEntry:
         # Convert rating_history from list of lists (JSON) to list of tuples
         raw_history = d.get("rating_history") or []
         rating_history = [(float(ts), float(r)) for ts, r in raw_history]
+        # Deserialize aggregate_stats if present
+        raw_stats = d.get("aggregate_stats") or {}
+        aggregate_stats = TeamStats.from_dict(raw_stats)
         return cls(
             entry_id=str(d.get("id")),
             ckpt_path=str(d.get("ckpt_path")),
@@ -110,6 +138,7 @@ class LeagueEntry:
             games=int(d.get("games", 0)),
             meta=dict(d.get("meta") or {}),
             rating_history=rating_history,
+            aggregate_stats=aggregate_stats,
         )
 
 
