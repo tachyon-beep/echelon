@@ -974,7 +974,8 @@ def main() -> None:
             cached = arena_load_model(entry.ckpt_path)
             arena_cache.put(arena_opponent_id, cached)
         arena_opponent = cached
-        if reset_hidden:
+        # Always init LSTM state if None (switching from heuristic) or if reset requested
+        if reset_hidden or arena_lstm_state is None:
             arena_lstm_state = arena_opponent.initial_state(
                 batch_size=num_envs * len(red_ids), device=opponent_device
             )
