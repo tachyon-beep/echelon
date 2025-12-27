@@ -97,6 +97,21 @@ def cmd_add(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_bootstrap(args: argparse.Namespace) -> None:
+    """Bootstrap a new league with Lieutenant Heuristic."""
+    league_path = Path(args.league)
+
+    if league_path.exists() and not args.force:
+        raise SystemExit(f"League already exists: {league_path} (use --force to overwrite)")
+
+    league = League()
+    heuristic = league.add_heuristic()
+    league.save(league_path)
+
+    print(f"ok: bootstrapped {league_path}")
+    print(f"  - {heuristic.commander_name} (rating={heuristic.rating.rating:.0f})")
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     league_path = Path(args.league)
     if not league_path.exists():
@@ -260,6 +275,10 @@ def main() -> None:
     p_init = sub.add_parser("init")
     p_init.add_argument("--force", action="store_true")
     p_init.set_defaults(func=cmd_init)
+
+    p_boot = sub.add_parser("bootstrap", help="Initialize league with Lieutenant Heuristic")
+    p_boot.add_argument("--force", action="store_true", help="Overwrite existing league")
+    p_boot.set_defaults(func=cmd_bootstrap)
 
     p_add = sub.add_parser("add")
     p_add.add_argument("ckpt", type=str)
