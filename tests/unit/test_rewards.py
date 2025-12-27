@@ -609,3 +609,49 @@ class TestTerminalRewards:
         assert (
             rewards["blue_0"] >= 5.0
         ), f"Dead agent on winning team should get W_WIN, got {rewards['blue_0']}"
+
+
+class TestFormationModeMultipliers:
+    """Verify formation mode reward multipliers."""
+
+    def test_formation_mode_enum_values(self):
+        """FormationMode enum has expected values."""
+        from echelon.env.rewards import FormationMode
+
+        assert FormationMode.CLOSE == 0
+        assert FormationMode.STANDARD == 1
+        assert FormationMode.LOOSE == 2
+
+    def test_formation_multipliers_exist(self):
+        """Each formation mode has multipliers defined."""
+        from echelon.env.rewards import FORMATION_MULTIPLIERS, FormationMode
+
+        for mode in FormationMode:
+            assert mode in FORMATION_MULTIPLIERS
+            mult = FORMATION_MULTIPLIERS[mode]
+            assert "zone" in mult
+            assert "out_death" in mult
+            assert "approach" in mult
+
+    def test_close_amplifies_zone_rewards(self):
+        """CLOSE mode has zone multiplier > 1."""
+        from echelon.env.rewards import FORMATION_MULTIPLIERS, FormationMode
+
+        assert FORMATION_MULTIPLIERS[FormationMode.CLOSE]["zone"] > 1.0
+        assert FORMATION_MULTIPLIERS[FormationMode.CLOSE]["out_death"] > 1.0
+
+    def test_loose_reduces_zone_rewards(self):
+        """LOOSE mode has zone multiplier < 1."""
+        from echelon.env.rewards import FORMATION_MULTIPLIERS, FormationMode
+
+        assert FORMATION_MULTIPLIERS[FormationMode.LOOSE]["zone"] < 1.0
+        assert FORMATION_MULTIPLIERS[FormationMode.LOOSE]["out_death"] < 1.0
+
+    def test_standard_is_neutral(self):
+        """STANDARD mode has multipliers of 1.0."""
+        from echelon.env.rewards import FORMATION_MULTIPLIERS, FormationMode
+
+        mult = FORMATION_MULTIPLIERS[FormationMode.STANDARD]
+        assert mult["zone"] == 1.0
+        assert mult["out_death"] == 1.0
+        assert mult["approach"] == 1.0
