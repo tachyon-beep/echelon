@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
 
 from echelon import EchelonEnv, EnvConfig, WorldConfig
 from echelon.arena.glicko2 import GameResult
+from echelon.arena.history import MatchHistory
 from echelon.arena.league import League, LeagueEntry
 from echelon.arena.match import play_match
 from echelon.constants import (
@@ -48,6 +49,7 @@ from echelon.rl.lstm_state import LSTMState
 from echelon.rl.model import ActorCriticLSTM
 from echelon.training import PPOConfig, PPOTrainer, RolloutBuffer, VectorEnv, evaluate_vs_heuristic
 from echelon.training.spatial import SpatialAccumulator
+from echelon.training.stats_collector import MatchStatsCollector
 
 
 def _role_for_agent(agent_id: str) -> str:
@@ -769,6 +771,10 @@ def main() -> None:
     spatial_acc = SpatialAccumulator(grid_size=32)
     world_size = (float(env_cfg.world.size_x), float(env_cfg.world.size_y))
 
+    # Initialize match stats collection for dashboard
+    stats_collector = MatchStatsCollector(num_envs=num_envs)
+    match_history = MatchHistory(Path(run_dir) / "matches")
+
     # Initialize model and trainer
     model = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
     trainer = PPOTrainer(model, ppo_cfg, device)
@@ -1160,6 +1166,9 @@ def main() -> None:
                 # Events are attached to agent infos; pick any agent to get them
                 first_info = env_infos.get(blue_ids[0], {})
                 events = first_info.get("events", [])
+
+                # Collect stats from events for dashboard
+                stats_collector.on_step(env_idx, {"events": events})
                 # Track last damage position per target for kill events (kills don't include pos)
                 last_damage_pos: dict[str, tuple[float, float]] = {}
                 for event in events:
@@ -1201,6 +1210,33 @@ def main() -> None:
 
                     outcome = last_outcomes[env_idx] or {"winner": "unknown"}
                     episodic_outcomes.append(outcome.get("winner", "unknown"))
+
+                    # Save match record for dashboard
+                    winner = outcome.get("winner", "draw")
+                    if winner not in ("blue", "red"):
+                        winner = "draw"
+                    termination_type = outcome.get("reason", "timeout")
+                    # Map reason to expected termination types
+                    if termination_type in ("zone", "elimination", "timeout"):
+                        pass  # Already valid
+                    elif has_termination and not has_truncation:
+                        termination_type = "zone" if blue_alive and red_alive else "elimination"
+                    else:
+                        termination_type = "timeout"
+                    opponent_id: str
+                    if args.train_mode == "arena" and arena_opponent_id is not None:
+                        opponent_id = arena_opponent_id
+                    else:
+                        opponent_id = "heuristic"
+                    record = stats_collector.on_episode_end(
+                        env_idx=env_idx,
+                        winner=winner,
+                        termination=termination_type,
+                        duration_steps=ep_len,
+                        blue_entry_id="contender",
+                        red_entry_id=opponent_id,
+                    )
+                    match_history.save(record)
 
                     metrics_f.write(
                         json.dumps(
