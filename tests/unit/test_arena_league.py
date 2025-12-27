@@ -24,6 +24,7 @@ from echelon.arena.league import (
     _now_iso,
     _stable_id,
 )
+from echelon.arena.stats import TeamStats
 
 
 class TestHelperFunctions:
@@ -162,6 +163,49 @@ class TestLeagueEntry:
         assert restored.meta == original.meta
         assert abs(restored.rating.rating - original.rating.rating) < 0.01
         assert abs(restored.rating.rd - original.rating.rd) < 0.01
+
+    def test_entry_rating_history(self):
+        """LeagueEntry tracks rating history over time."""
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+        )
+
+        # Initially empty
+        assert entry.rating_history == []
+
+        # Record rating
+        entry.record_rating(1703750400.0)
+        assert len(entry.rating_history) == 1
+        assert entry.rating_history[0] == (1703750400.0, 1500.0)
+
+        # Update rating and record again
+        entry.rating = Glicko2Rating(rating=1550.0)
+        entry.record_rating(1703750500.0)
+        assert len(entry.rating_history) == 2
+        assert entry.rating_history[1] == (1703750500.0, 1550.0)
+
+    def test_entry_serializes_rating_history(self):
+        """Rating history survives serialization round-trip."""
+        cfg = Glicko2Config()
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+            rating_history=[(1703750400.0, 1500.0), (1703750500.0, 1520.0)],
+        )
+
+        d = entry.as_dict()
+        restored = LeagueEntry.from_dict(d, cfg=cfg)
+
+        assert restored.rating_history == entry.rating_history
 
 
 class TestLeague:
@@ -581,3 +625,390 @@ class TestRatingPeriod:
         league.apply_rating_period(results)
 
         assert league.entries["p1"].games == 8  # 5 + 3
+
+
+class TestCommanderRetirement:
+    """Test commander retirement functionality."""
+
+    def test_retire_stale_commanders(self):
+        """Test that old, low-rated commanders can be retired."""
+        league = League()
+
+        # Add some commanders with varying ratings and game counts
+        for i in range(10):
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                commander_name=f"Commander {i}",
+                rating=Glicko2Rating(
+                    rating=1500 - i * 50,  # Decreasing ratings
+                    rd=50.0,
+                    vol=0.06,
+                ),
+                games=100,
+            )
+            league.entries[entry.entry_id] = entry
+
+        # Retire bottom 3 commanders
+        retired = league.retire_commanders(keep_top=7)
+
+        assert len(retired) == 3
+        assert len([e for e in league.entries.values() if e.kind == "commander"]) == 7
+
+        # Verify the lowest rated were retired
+        retired_ids = {e.entry_id for e in retired}
+        assert "cmd_7" in retired_ids
+        assert "cmd_8" in retired_ids
+        assert "cmd_9" in retired_ids
+
+    def test_retire_commanders_min_games(self):
+        """Don't retire commanders that haven't played enough games."""
+        league = League()
+
+        # Add commanders: some new (low games), some established
+        for i in range(6):
+            games = 5 if i < 3 else 100  # First 3 are new
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                commander_name=f"Commander {i}",
+                rating=Glicko2Rating(rating=1500 - i * 100, rd=50.0, vol=0.06),
+                games=games,
+            )
+            league.entries[entry.entry_id] = entry
+
+        # Try to retire to keep 4, but require 20 games minimum
+        retired = league.retire_commanders(keep_top=4, min_games=20)
+
+        # Only cmd_4 and cmd_5 (established + low rating) should be retired
+        assert len(retired) == 2
+        for e in retired:
+            assert e.games >= 20
+
+    def test_retire_commanders_empty_league(self):
+        """retire_commanders handles empty league gracefully."""
+        league = League()
+        retired = league.retire_commanders(keep_top=5)
+        assert retired == []
+
+    def test_retire_commanders_fewer_than_keep_top(self):
+        """retire_commanders does nothing when pool is smaller than keep_top."""
+        league = League()
+
+        # Add only 3 commanders
+        for i in range(3):
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                rating=Glicko2Rating(rating=1500, rd=50.0, vol=0.06),
+                games=100,
+            )
+            league.entries[entry.entry_id] = entry
+
+        # Try to keep top 5 (more than exist)
+        retired = league.retire_commanders(keep_top=5)
+        assert retired == []
+        assert len([e for e in league.entries.values() if e.kind == "commander"]) == 3
+
+    def test_retire_commanders_uses_conservative_rating(self):
+        """retire_commanders ranks by conservative rating (rating - 2*RD)."""
+        league = League()
+
+        # Commander with high rating but high RD (uncertain)
+        league.entries["uncertain"] = LeagueEntry(
+            entry_id="uncertain",
+            ckpt_path="/uncertain.pt",
+            kind="commander",
+            rating=Glicko2Rating(rating=1600, rd=150, vol=0.06),  # Conservative: 1300
+            games=100,
+        )
+
+        # Commander with lower rating but low RD (confident)
+        league.entries["confident"] = LeagueEntry(
+            entry_id="confident",
+            ckpt_path="/confident.pt",
+            kind="commander",
+            rating=Glicko2Rating(rating=1500, rd=30, vol=0.06),  # Conservative: 1440
+            games=100,
+        )
+
+        # Keep only 1 - uncertain should be retired despite higher rating
+        retired = league.retire_commanders(keep_top=1)
+
+        assert len(retired) == 1
+        assert retired[0].entry_id == "uncertain"
+
+    def test_retire_commanders_marks_as_retired(self):
+        """retire_commanders sets kind='retired' to preserve history."""
+        league = League()
+
+        for i in range(3):
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                rating=Glicko2Rating(rating=1500 - i * 100, rd=50.0, vol=0.06),
+                games=100,
+            )
+            league.entries[entry.entry_id] = entry
+
+        retired = league.retire_commanders(keep_top=2)
+
+        assert len(retired) == 1
+        assert retired[0].entry_id == "cmd_2"
+        # Entry should still exist but be marked as retired
+        assert league.entries["cmd_2"].kind == "retired"
+
+    def test_retire_commanders_excludes_candidates(self):
+        """retire_commanders only considers commanders, not candidates."""
+        league = League()
+
+        # Add 2 commanders
+        for i in range(2):
+            league.entries[f"cmd_{i}"] = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/cmd_{i}.pt",
+                kind="commander",
+                rating=Glicko2Rating(rating=1500, rd=50.0, vol=0.06),
+                games=100,
+            )
+
+        # Add 3 candidates (should not be touched)
+        for i in range(3):
+            league.entries[f"cand_{i}"] = LeagueEntry(
+                entry_id=f"cand_{i}",
+                ckpt_path=f"/cand_{i}.pt",
+                kind="candidate",
+                rating=Glicko2Rating(rating=1200, rd=50.0, vol=0.06),  # Low rating
+                games=100,
+            )
+
+        retired = league.retire_commanders(keep_top=1)
+
+        assert len(retired) == 1
+        assert retired[0].kind == "retired"
+        # Candidates should be untouched
+        for i in range(3):
+            assert league.entries[f"cand_{i}"].kind == "candidate"
+
+
+class TestHeuristicEntry:
+    """Test heuristic baseline support."""
+
+    def test_add_heuristic_creates_entry(self):
+        """add_heuristic creates a heuristic entry with fixed ID."""
+        league = League()
+        entry = league.add_heuristic()
+
+        assert entry.entry_id == "heuristic"
+        assert entry.kind == "heuristic"
+        assert entry.commander_name == "Lieutenant Heuristic"
+        assert entry.ckpt_path == ""
+        assert entry.rating.rating == league.cfg.rating0
+
+    def test_add_heuristic_idempotent(self):
+        """Calling add_heuristic twice returns same entry."""
+        league = League()
+        entry1 = league.add_heuristic()
+        entry1.rating = Glicko2Rating(rating=1600.0, rd=100.0, vol=0.05)
+        entry2 = league.add_heuristic()
+
+        assert entry1 is entry2
+        assert entry2.rating.rating == 1600.0  # Preserved
+
+    def test_heuristic_included_in_top_commanders(self):
+        """top_commanders includes heuristic entries."""
+        league = League()
+        league.add_heuristic()
+
+        top = league.top_commanders(10)
+        assert len(top) == 1
+        assert top[0].kind == "heuristic"
+
+    def test_heuristic_never_retired(self):
+        """retire_commanders skips heuristic entries."""
+        league = League()
+        heur = league.add_heuristic()
+        heur.games = 100
+        heur.rating = Glicko2Rating(rating=800.0, rd=50.0, vol=0.05)
+
+        for i in range(25):
+            entry = LeagueEntry(
+                entry_id=f"cmd_{i}",
+                ckpt_path=f"/fake/path_{i}.pt",
+                kind="commander",
+                commander_name=f"Commander {i}",
+                rating=Glicko2Rating(rating=1500.0 + i * 10, rd=50.0, vol=0.05),
+                games=50,
+            )
+            league.entries[entry.entry_id] = entry
+
+        retired = league.retire_commanders(keep_top=10, min_games=20)
+
+        assert heur.kind == "heuristic"
+        assert "heuristic" not in [e.entry_id for e in retired]
+
+    def test_heuristic_serialization_roundtrip(self):
+        """Heuristic entry survives save/load cycle."""
+        import tempfile
+        from pathlib import Path
+
+        league = League()
+        league.add_heuristic()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "league.json"
+            league.save(path)
+            loaded = League.load(path)
+
+        assert "heuristic" in loaded.entries
+        entry = loaded.entries["heuristic"]
+        assert entry.kind == "heuristic"
+        assert entry.commander_name == "Lieutenant Heuristic"
+
+
+class TestAggregateStats:
+    """Test aggregate stats tracking in LeagueEntry."""
+
+    def test_league_entry_aggregate_stats(self):
+        """LeagueEntry accumulates stats from matches."""
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+        )
+
+        # Initially zero
+        assert entry.aggregate_stats.kills == 0
+
+        # Add match stats
+        match_stats = TeamStats(kills=3, deaths=1, damage_dealt=150.0)
+        entry.add_match_stats(match_stats)
+
+        assert entry.aggregate_stats.kills == 3
+        assert entry.aggregate_stats.deaths == 1
+        assert entry.aggregate_stats.damage_dealt == 150.0
+
+        # Add another match
+        match_stats2 = TeamStats(kills=2, deaths=2, damage_dealt=100.0)
+        entry.add_match_stats(match_stats2)
+
+        assert entry.aggregate_stats.kills == 5
+        assert entry.aggregate_stats.deaths == 3
+        assert entry.aggregate_stats.damage_dealt == 250.0
+
+    def test_aggregate_stats_all_fields(self):
+        """All TeamStats fields are accumulated correctly."""
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+        )
+
+        # Add stats with all fields
+        match_stats = TeamStats(
+            kills=3,
+            deaths=1,
+            damage_dealt=150.0,
+            damage_taken=75.0,
+            zone_ticks=10,
+            primary_uses=20,
+            secondary_uses=5,
+            tertiary_uses=3,
+            vents=8,
+            smokes=2,
+            ecm_toggles=4,
+            paints=6,
+            overheats=1,
+            knockdowns=2,
+            orders_issued={"attack": 3, "defend": 2},
+            orders_acknowledged=4,
+            orders_overridden=1,
+        )
+        entry.add_match_stats(match_stats)
+
+        # Add more stats
+        match_stats2 = TeamStats(
+            kills=2,
+            deaths=2,
+            damage_dealt=100.0,
+            damage_taken=50.0,
+            zone_ticks=5,
+            primary_uses=15,
+            secondary_uses=3,
+            tertiary_uses=2,
+            vents=4,
+            smokes=1,
+            ecm_toggles=2,
+            paints=3,
+            overheats=0,
+            knockdowns=1,
+            orders_issued={"attack": 2, "retreat": 1},
+            orders_acknowledged=2,
+            orders_overridden=0,
+        )
+        entry.add_match_stats(match_stats2)
+
+        agg = entry.aggregate_stats
+        assert agg.kills == 5
+        assert agg.deaths == 3
+        assert agg.damage_dealt == 250.0
+        assert agg.damage_taken == 125.0
+        assert agg.zone_ticks == 15
+        assert agg.primary_uses == 35
+        assert agg.secondary_uses == 8
+        assert agg.tertiary_uses == 5
+        assert agg.vents == 12
+        assert agg.smokes == 3
+        assert agg.ecm_toggles == 6
+        assert agg.paints == 9
+        assert agg.overheats == 1
+        assert agg.knockdowns == 3
+        assert agg.orders_issued == {"attack": 5, "defend": 2, "retreat": 1}
+        assert agg.orders_acknowledged == 6
+        assert agg.orders_overridden == 1
+
+    def test_aggregate_stats_serialization_roundtrip(self):
+        """Aggregate stats survive serialization round-trip."""
+        cfg = Glicko2Config()
+        entry = LeagueEntry(
+            entry_id="test",
+            ckpt_path="",
+            kind="commander",
+            commander_name="Test",
+            rating=Glicko2Rating(),
+            games=0,
+        )
+
+        # Add some stats
+        match_stats = TeamStats(
+            kills=5,
+            deaths=2,
+            damage_dealt=200.0,
+            damage_taken=100.0,
+            zone_ticks=15,
+            primary_uses=30,
+            orders_issued={"attack": 5},
+        )
+        entry.add_match_stats(match_stats)
+
+        # Round-trip through serialization
+        d = entry.as_dict()
+        restored = LeagueEntry.from_dict(d, cfg=cfg)
+
+        assert restored.aggregate_stats.kills == 5
+        assert restored.aggregate_stats.deaths == 2
+        assert restored.aggregate_stats.damage_dealt == 200.0
+        assert restored.aggregate_stats.damage_taken == 100.0
+        assert restored.aggregate_stats.zone_ticks == 15
+        assert restored.aggregate_stats.primary_uses == 30
+        assert restored.aggregate_stats.orders_issued == {"attack": 5}

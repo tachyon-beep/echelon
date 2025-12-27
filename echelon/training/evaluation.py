@@ -89,16 +89,14 @@ def evaluate_vs_heuristic(
 
             # env.sim is guaranteed to be non-None after step
             assert env.sim is not None
-            blue_alive = env.sim.team_alive("blue")
-            red_alive = env.sim.team_alive("red")
             done = torch.tensor(
                 [terminations[bid] or truncations[bid] for bid in blue_ids],
                 dtype=torch.float32,
                 device=device,
             )
 
-            # Episode ends on: termination (zone win), truncation (time limit), or elimination
-            if any(terminations.values()) or any(truncations.values()) or (not blue_alive) or (not red_alive):
+            # Episode ends when env sets last_outcome (elimination or time limit)
+            if env.last_outcome is not None:
                 outcome = env.last_outcome or {"winner": "draw", "hp": env.team_hp()}
                 winner = outcome.get("winner", "draw")
                 wins[winner] += 1

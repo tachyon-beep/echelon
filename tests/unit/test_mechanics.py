@@ -70,12 +70,13 @@ def test_paint_lock_is_pack_scoped(make_mech):
     sim = Sim(world, 0.05, np.random.default_rng(0))
 
     heavy = make_mech("blue_0", "blue", [5.0, 10.0, 1.0], "heavy")
-    painter_other_pack = make_mech("blue_10", "blue", [6.0, 10.0, 1.0], "light")
+    # Use blue_11 to be in a different pack (PACK_SIZE=11, so 11/11=1 vs 0/11=0)
+    painter_other_pack = make_mech("blue_11", "blue", [6.0, 10.0, 1.0], "light")
     enemy = make_mech("red_0", "red", [15.0, 10.0, 1.0], "medium")
     enemy.painted_remaining = 5.0
     enemy.last_painter_id = painter_other_pack.mech_id
 
-    sim.reset({"blue_0": heavy, "blue_10": painter_other_pack, "red_0": enemy})
+    sim.reset({"blue_0": heavy, "blue_11": painter_other_pack, "red_0": enemy})
 
     fire_action = np.zeros(ACTION_DIM, dtype=np.float32)
     fire_action[ActionIndex.SECONDARY] = 1.0
@@ -102,6 +103,27 @@ def test_shutdown_keeps_physics(make_mech):
     assert mech.pos[2] < pos0[2], "Shutdown mech should fall under gravity"
     assert mech.pos[0] > pos0[0], "Shutdown mech should coast"
     assert mech.vel[0] != 0.0 and mech.vel[0] < vel0[0], "Shutdown mech should damp"
+
+
+def test_smoke_is_not_available_to_light(make_mech):
+    world = VoxelWorld.generate(WorldConfig(), np.random.default_rng(0))
+    world.voxels.fill(VoxelWorld.AIR)
+
+    sim = Sim(world, 0.05, np.random.default_rng(0))
+    light = make_mech("light", "blue", [5.0, 5.0, 1.0], "light")
+    heavy = make_mech("heavy", "blue", [7.0, 5.0, 1.0], "heavy")
+    sim.reset({"light": light, "heavy": heavy})
+
+    action = np.zeros(ACTION_DIM, dtype=np.float32)
+    action[ActionIndex.SPECIAL] = 1.0
+
+    events = sim._try_fire_smoke(light, action)
+    assert len(events) == 0
+    assert len(sim.projectiles) == 0
+
+    events = sim._try_fire_smoke(heavy, action)
+    assert len(events) == 1
+    assert len(sim.projectiles) == 1
 
 
 def test_autocannon_auto_pitch(make_mech):
@@ -262,15 +284,17 @@ def test_shutdown_zeroes_observed_velocity():
 
     obs = env._obs()
     obs_v = obs[viewer_id]
-    contacts_total = int(env.CONTACT_SLOTS * env.CONTACT_DIM)
+    contacts_total = int(env.MAX_CONTACT_SLOTS * env.CONTACT_DIM)
     comm_total = PACK_SIZE * int(cfg.comm_dim)
     telemetry_dim = 16 * 16
     offset = contacts_total + comm_total + int(env.LOCAL_MAP_DIM) + telemetry_dim
 
     self_features = obs_v[offset:]
-    assert self_features.size >= 30
+    # acoustic(4) + hull(4) + suite_desc(14) + order_obs(10) + panel_stats(8) + scalars(>=22) = 62+
+    assert self_features.size >= 62
 
-    self_vel_offset = 27  # acoustic(4) + hull(4) + 19 slots before self_vel
+    # self_vel is after: acoustic(4) + hull(4) + suite_desc(14) + order_obs(10) + panel_stats(8) + 19 scalar slots
+    self_vel_offset = 59
     self_vel = self_features[self_vel_offset : self_vel_offset + 3]
     assert np.allclose(self_vel, 0.0)
 
@@ -329,6 +353,11 @@ def test_partial_visibility_is_pack_scoped():
 
 
 def test_topk_contact_quota_and_repurpose():
+    """Test that contact selection respects suite-variable slots.
+
+    Uses Heavy mech (blue_4, index 4) which has visual_contact_slots=5.
+    With 8 visible entities (6 friendly + 2 hostile), should only fill 5 slots.
+    """
     cfg = EnvConfig(
         world=WorldConfig(size_x=40, size_y=40, size_z=20, obstacle_fill=0.0, ensure_connectivity=False),
         num_packs=2,  # Need enough agents for contact quota test
@@ -340,29 +369,31 @@ def test_topk_contact_quota_and_repurpose():
     env = EchelonEnv(cfg)
     env.reset(seed=0)
 
-    viewer_id = "blue_0"
+    # Use blue_4 (Heavy, index 4) which has visual_contact_slots=5
+    viewer_id = "blue_4"
     viewer = env.sim.mechs[viewer_id]
 
-    keep = {viewer_id, "blue_1", "blue_2", "blue_3", "blue_4", "blue_5", "blue_6", "red_0", "red_1"}
+    keep = {viewer_id, "blue_0", "blue_1", "blue_2", "blue_3", "blue_5", "blue_6", "red_0", "red_1"}
     for mid, m in env.sim.mechs.items():
         m.alive = mid in keep
 
     viewer.pos[:] = np.array([10.0, 10.0, 1.0], dtype=np.float32)
-    for i, mid in enumerate(["blue_1", "blue_2", "blue_3", "blue_4", "blue_5", "blue_6"], start=1):
+    for i, mid in enumerate(["blue_0", "blue_1", "blue_2", "blue_3", "blue_5", "blue_6"], start=1):
         env.sim.mechs[mid].pos[:] = np.array([10.0 + i, 10.0, 1.0], dtype=np.float32)
     env.sim.mechs["red_0"].pos[:] = np.array([30.0, 10.0, 1.0], dtype=np.float32)
     env.sim.mechs["red_1"].pos[:] = np.array([31.0, 10.0, 1.0], dtype=np.float32)
 
     obs, *_ = env.step({})
     obs_v = obs[viewer_id]
-    contacts_total = int(env.CONTACT_SLOTS * env.CONTACT_DIM)
-    contacts = obs_v[:contacts_total].reshape(env.CONTACT_SLOTS, env.CONTACT_DIM)
+    contacts_total = int(env.MAX_CONTACT_SLOTS * env.CONTACT_DIM)
+    contacts = obs_v[:contacts_total].reshape(env.MAX_CONTACT_SLOTS, env.CONTACT_DIM)
 
     rel = contacts[:, 13:16]
     n_friendly = int((rel[:, 0] > 0.5).sum())
     n_hostile = int((rel[:, 1] > 0.5).sum())
     # visible flag is at index 21 in contact features (see _contact_features)
     n_visible = int((contacts[:, 21] > 0.5).sum())
+    # Heavy has visual_contact_slots=5, so only 5 contacts should be filled
     assert n_visible == 5
     assert n_hostile == 2
     assert n_friendly == 3

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import random
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .glicko2 import GameResult, Glicko2Config, Glicko2Rating, rate
+from .stats import TeamStats
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -73,6 +76,34 @@ class LeagueEntry:
     rating: Glicko2Rating = field(default_factory=Glicko2Rating)
     games: int = 0
     meta: dict[str, Any] = field(default_factory=dict)
+    rating_history: list[tuple[float, float]] = field(default_factory=list)
+    aggregate_stats: TeamStats = field(default_factory=TeamStats)
+
+    def record_rating(self, timestamp: float) -> None:
+        """Append current rating to history."""
+        self.rating_history.append((timestamp, self.rating.rating))
+
+    def add_match_stats(self, stats: TeamStats) -> None:
+        """Accumulate stats from a match."""
+        agg = self.aggregate_stats
+        agg.kills += stats.kills
+        agg.deaths += stats.deaths
+        agg.damage_dealt += stats.damage_dealt
+        agg.damage_taken += stats.damage_taken
+        agg.zone_ticks += stats.zone_ticks
+        agg.primary_uses += stats.primary_uses
+        agg.secondary_uses += stats.secondary_uses
+        agg.tertiary_uses += stats.tertiary_uses
+        agg.vents += stats.vents
+        agg.smokes += stats.smokes
+        agg.ecm_toggles += stats.ecm_toggles
+        agg.paints += stats.paints
+        agg.overheats += stats.overheats
+        agg.knockdowns += stats.knockdowns
+        for order_type, count in stats.orders_issued.items():
+            agg.orders_issued[order_type] = agg.orders_issued.get(order_type, 0) + count
+        agg.orders_acknowledged += stats.orders_acknowledged
+        agg.orders_overridden += stats.orders_overridden
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -84,11 +115,19 @@ class LeagueEntry:
             "rating": self.rating.as_dict(),
             "games": int(self.games),
             "meta": dict(self.meta),
+            "rating_history": self.rating_history,
+            "aggregate_stats": self.aggregate_stats.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any], *, cfg: Glicko2Config) -> LeagueEntry:
         rating = d.get("rating") or {}
+        # Convert rating_history from list of lists (JSON) to list of tuples
+        raw_history = d.get("rating_history") or []
+        rating_history = [(float(ts), float(r)) for ts, r in raw_history]
+        # Deserialize aggregate_stats if present
+        raw_stats = d.get("aggregate_stats") or {}
+        aggregate_stats = TeamStats.from_dict(raw_stats)
         return cls(
             entry_id=str(d.get("id")),
             ckpt_path=str(d.get("ckpt_path")),
@@ -98,6 +137,8 @@ class LeagueEntry:
             rating=Glicko2Rating.from_dict(rating).with_defaults(cfg),
             games=int(d.get("games", 0)),
             meta=dict(d.get("meta") or {}),
+            rating_history=rating_history,
+            aggregate_stats=aggregate_stats,
         )
 
 
@@ -171,8 +212,40 @@ class League:
         self.entries[entry_id] = e
         return e
 
+    def add_heuristic(self) -> LeagueEntry:
+        """Add or get the permanent heuristic baseline entry.
+
+        The heuristic ("Lieutenant Heuristic") is a special commander that:
+        - Always exists in the pool
+        - Never retires
+        - Uses venv.get_heuristic_actions() instead of model inference
+        - Has normal Glicko-2 rating that updates from matches
+
+        Returns:
+            The heuristic LeagueEntry (created or existing)
+        """
+        entry_id = "heuristic"
+        existing = self.entries.get(entry_id)
+        if existing is not None:
+            return existing
+
+        entry = LeagueEntry(
+            entry_id=entry_id,
+            ckpt_path="",
+            kind="heuristic",
+            commander_name="Lieutenant Heuristic",
+            rating=Glicko2Rating(
+                rating=float(self.cfg.rating0),
+                rd=float(self.cfg.rd0),
+                vol=float(self.cfg.vol0),
+            ),
+        )
+        self.entries[entry_id] = entry
+        return entry
+
     def top_commanders(self, n: int) -> list[LeagueEntry]:
-        commanders = [e for e in self.entries.values() if e.kind == "commander"]
+        # Include both commanders and heuristic entries
+        commanders = [e for e in self.entries.values() if e.kind in ("commander", "heuristic")]
         commanders.sort(key=lambda e: float(e.rating.rating), reverse=True)
         return commanders[: max(0, int(n))]
 
@@ -182,18 +255,96 @@ class League:
         cands.sort(key=lambda e: str(e.created_at), reverse=True)
         return cands[: max(0, int(n))]
 
+    def sample_pfsp_opponent(
+        self,
+        pool: list[LeagueEntry],
+        candidate_rating: float,
+        rng: random.Random | None = None,
+        sigma: float = 200.0,
+        candidate_games: int | None = None,
+        warmup_games: int = 20,
+        warmup_rating_range: float = 200.0,
+    ) -> LeagueEntry:
+        """Sample opponent using Prioritized Fictitious Self-Play (PFSP).
+
+        PFSP weights opponents by skill match - opponents with similar ratings
+        provide the best learning signal. Uses a Gaussian bell curve centered
+        on the candidate's rating.
+
+        Cold-start warmup: New policies (< warmup_games) are matched only against
+        opponents within warmup_rating_range to prevent being crushed by
+        established commanders while their rating stabilizes.
+
+        Reference: Vinyals et al., "Grandmaster level in StarCraft II using
+        multi-agent reinforcement learning", Nature 2019.
+
+        Args:
+            pool: List of potential opponents.
+            candidate_rating: Current rating of the learning agent.
+            rng: Random number generator (uses global random if None).
+            sigma: Standard deviation for the Gaussian weighting (default 200).
+                   Larger values = more uniform sampling.
+            candidate_games: Number of games played by candidate (for warmup).
+            warmup_games: Number of games before full pool is available (default 20).
+            warmup_rating_range: Rating range for warmup matchmaking (default 200).
+
+        Returns:
+            Selected opponent entry.
+        """
+        if not pool:
+            raise ValueError("Pool must not be empty")
+
+        rng = rng or random.Random()
+
+        # Cold-start warmup: restrict pool for new policies with progressive expansion
+        # Start with tight rating range, expand if needed to find at least 1 opponent
+        effective_pool = pool
+        if candidate_games is not None and candidate_games < warmup_games:
+            # Try progressively wider rating ranges until we find at least 1 opponent
+            for range_mult in [1.0, 2.0, 4.0]:
+                current_range = warmup_rating_range * range_mult
+                nearby = [e for e in pool if abs(e.rating.rating - candidate_rating) <= current_range]
+                if nearby:
+                    effective_pool = nearby
+                    break
+            # If still empty after 4x range, use full pool (fallback)
+
+        if len(effective_pool) == 1:
+            return effective_pool[0]
+
+        # Compute Gaussian weights: exp(-(rating_diff)^2 / (2*sigma^2))
+        weights: list[float] = []
+        for entry in effective_pool:
+            diff = entry.rating.rating - candidate_rating
+            weight = math.exp(-(diff * diff) / (2 * sigma * sigma))
+            weights.append(weight)
+
+        # Normalize weights
+        total = sum(weights)
+        if total < 1e-10:
+            # Fallback to uniform if all weights are ~0 (shouldn't happen with Gaussian)
+            return rng.choice(effective_pool)
+
+        # Sample using weights
+        r = rng.random() * total
+        cumsum = 0.0
+        for entry, weight in zip(effective_pool, weights, strict=True):
+            cumsum += weight
+            if r <= cumsum:
+                return entry
+
+        # Fallback (shouldn't reach here due to floating point)
+        return effective_pool[-1]
+
     def promote_if_topk(self, entry_id: str, *, top_k: int) -> bool:
         entry = self.entries.get(entry_id)
         if entry is None:
             raise KeyError(entry_id)
 
         # Decide rank among (existing commanders + this candidate) by conservative score.
-        def conservative(e: LeagueEntry) -> float:
-            return float(e.rating.rating) - 2.0 * float(e.rating.rd)
-
         pool = [e for e in self.entries.values() if e.kind == "commander"]
         pool.append(entry)
-        pool.sort(key=conservative, reverse=True)
+        pool.sort(key=lambda e: e.rating.conservative_rating, reverse=True)
         in_top = entry in pool[: max(1, int(top_k))]
         if not in_top:
             return False
@@ -228,3 +379,50 @@ class League:
             if entry is not None:
                 entry.rating = new_rating
                 entry.games += game_count
+
+    def retire_commanders(
+        self,
+        keep_top: int = 20,
+        min_games: int = 20,
+    ) -> list[LeagueEntry]:
+        """Retire underperforming commanders to keep pool manageable.
+
+        Commanders are ranked by conservative rating (rating - 2*RD).
+        Only commanders with sufficient games can be retired (new commanders
+        are protected until their rating stabilizes).
+
+        Args:
+            keep_top: Number of top commanders to retain
+            min_games: Minimum games before a commander can be retired
+
+        Returns:
+            List of retired LeagueEntry objects (removed from entries)
+        """
+        # Only retire regular commanders - heuristic entries are permanent
+        commanders = [e for e in self.entries.values() if e.kind == "commander"]
+
+        if len(commanders) <= keep_top:
+            return []
+
+        # Split into retirable (established) - new commanders are protected
+        retirable = [e for e in commanders if e.games >= min_games]
+
+        # Sort retirable by conservative rating (worst first)
+        retirable.sort(key=lambda e: e.rating.conservative_rating)
+
+        # Calculate how many we need to retire
+        # Keep at least keep_top total, but never retire protected
+        current_total = len(commanders)
+        num_to_retire = max(0, current_total - keep_top)
+
+        # Can only retire from retirable pool
+        num_to_retire = min(num_to_retire, len(retirable))
+
+        # Retire the worst performers
+        retired = retirable[:num_to_retire]
+
+        for entry in retired:
+            # Change kind to "retired" rather than deleting (preserves history)
+            entry.kind = "retired"
+
+        return retired

@@ -1,18 +1,24 @@
 # echelon/server/__main__.py
 """Entry point: python -m echelon.server"""
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import signal
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import uvicorn
 
 from .config import settings
 
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
-async def run_server(host: str, port: int) -> None:
+
+async def run_server(app: FastAPI, host: str, port: int) -> None:
     """Run the server with proper shutdown handling."""
-    from . import app
     from .sse import sse_manager
 
     config = uvicorn.Config(app, host=host, port=port)
@@ -40,9 +46,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Echelon Replay Server")
     parser.add_argument("--host", type=str, default=settings.HOST)
     parser.add_argument("--port", type=int, default=settings.PORT)
+    parser.add_argument(
+        "--league",
+        type=Path,
+        default=Path("runs/arena/league.json"),
+        help="Path to league.json for arena API endpoints",
+    )
+    parser.add_argument(
+        "--matches",
+        type=Path,
+        default=None,
+        help="Path to matches directory for match history API",
+    )
     args = parser.parse_args()
 
-    asyncio.run(run_server(args.host, args.port))
+    from . import create_app
+
+    app = create_app(league_path=args.league, matches_path=args.matches)
+    asyncio.run(run_server(app, args.host, args.port))
 
 
 if __name__ == "__main__":

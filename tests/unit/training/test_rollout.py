@@ -23,8 +23,60 @@ class TestRolloutBufferCreation:
         assert buffer.rewards.shape == (10, 5)
         assert buffer.dones.shape == (10, 5)
         assert buffer.values.shape == (10, 5)
-        assert buffer.advantages is None
-        assert buffer.returns is None
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+        assert buffer.advantages.shape == (10, 5)
+        assert buffer.returns.shape == (10, 5)
+
+    def test_preallocates_advantages_and_returns(self):
+        """Verify advantages and returns are pre-allocated in create()."""
+        buffer = RolloutBuffer.create(
+            num_steps=10,
+            num_agents=5,
+            obs_dim=32,
+            action_dim=9,
+            device=torch.device("cpu"),
+        )
+
+        # Should be pre-allocated, not None
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+
+        # Correct shape
+        assert buffer.advantages.shape == (10, 5)
+        assert buffer.returns.shape == (10, 5)
+
+        # Should be zeros initially
+        assert (buffer.advantages == 0).all()
+        assert (buffer.returns == 0).all()
+
+        # gae_computed should be False until compute_gae is called
+        assert buffer.gae_computed is False
+
+    def test_gae_computed_flag_set_after_compute_gae(self):
+        """Verify gae_computed is True only after compute_gae is called."""
+        buffer = RolloutBuffer.create(
+            num_steps=5,
+            num_agents=2,
+            obs_dim=8,
+            action_dim=4,
+            device=torch.device("cpu"),
+        )
+
+        # Before compute_gae
+        assert buffer.gae_computed is False
+
+        # Fill with some data
+        buffer.rewards[:] = 1.0
+        buffer.values[:] = 0.5
+
+        # Call compute_gae
+        next_value = torch.zeros(2)
+        next_done = torch.zeros(2)
+        buffer.compute_gae(next_value, next_done, gamma=0.99, gae_lambda=0.95)
+
+        # After compute_gae
+        assert buffer.gae_computed is True
 
     def test_create_allocates_zeros(self):
         """Test create() initializes tensors to zero."""
@@ -37,6 +89,10 @@ class TestRolloutBufferCreation:
         assert torch.all(buffer.rewards == 0.0)
         assert torch.all(buffer.dones == 0.0)
         assert torch.all(buffer.values == 0.0)
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+        assert torch.all(buffer.advantages == 0.0)
+        assert torch.all(buffer.returns == 0.0)
 
     def test_create_uses_device(self):
         """Test create() allocates tensors on specified device."""
@@ -49,6 +105,10 @@ class TestRolloutBufferCreation:
         assert buffer.rewards.device == device
         assert buffer.dones.device == device
         assert buffer.values.device == device
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+        assert buffer.advantages.device == device
+        assert buffer.returns.device == device
 
 
 class TestGAESingleStep:

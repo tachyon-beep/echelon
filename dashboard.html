@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Echelon Arena</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --surface: #16213e;
+            --primary: #0f3460;
+            --accent: #e94560;
+            --text: #eee;
+            --text-dim: #888;
+            --win: #4ade80;
+            --loss: #e94560;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 1.5rem;
+            color: var(--accent);
+            letter-spacing: 0.05em;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+
+        .card {
+            background: var(--surface);
+            border-radius: 8px;
+            padding: 1.5rem;
+        }
+
+        .card h2 {
+            font-size: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--text-dim);
+            margin-bottom: 1rem;
+            border-bottom: 1px solid var(--primary);
+            padding-bottom: 0.5rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--primary);
+        }
+
+        th {
+            color: var(--text-dim);
+            font-weight: 500;
+            font-size: 0.85rem;
+        }
+
+        tr:hover {
+            background: rgba(233, 69, 96, 0.1);
+        }
+
+        .rank {
+            color: var(--text-dim);
+            width: 2rem;
+        }
+
+        .commander-name {
+            font-weight: 600;
+        }
+
+        .rating {
+            font-weight: bold;
+            font-variant-numeric: tabular-nums;
+            color: var(--accent);
+        }
+
+        .games, .kd {
+            font-variant-numeric: tabular-nums;
+            color: var(--text-dim);
+        }
+
+        .sparkline {
+            width: 80px;
+            height: 24px;
+            vertical-align: middle;
+        }
+
+        .match-list {
+            list-style: none;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .match-list li {
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--primary);
+            display: grid;
+            grid-template-columns: 1fr auto 1fr auto;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .match-list li:hover {
+            background: rgba(233, 69, 96, 0.1);
+        }
+
+        .match-blue {
+            text-align: right;
+        }
+
+        .match-red {
+            text-align: left;
+        }
+
+        .match-vs {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+        }
+
+        .match-term {
+            color: var(--text-dim);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+        }
+
+        .win { color: var(--win); font-weight: 600; }
+        .loss { color: var(--loss); }
+        .draw { color: var(--text-dim); font-style: italic; }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding: 0.5rem 1rem;
+            background: var(--surface);
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--win);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .last-updated {
+            color: var(--text-dim);
+        }
+
+        .empty-state {
+            color: var(--text-dim);
+            text-align: center;
+            padding: 2rem;
+            font-style: italic;
+        }
+
+        @media (max-width: 768px) {
+            .grid { grid-template-columns: 1fr; }
+            body { padding: 1rem; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Echelon Arena</h1>
+
+    <div class="status-bar">
+        <div class="status-indicator">
+            <div class="status-dot"></div>
+            <span>Auto-refreshing</span>
+        </div>
+        <span class="last-updated" id="last-updated">-</span>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Leaderboard</h2>
+            <table id="standings">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Commander</th>
+                        <th>Rating</th>
+                        <th>Games</th>
+                        <th>K/D</th>
+                        <th>History</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            <div id="standings-empty" class="empty-state" style="display: none;">
+                No commanders in league yet.
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Recent Matches</h2>
+            <ul id="matches" class="match-list"></ul>
+            <div id="matches-empty" class="empty-state" style="display: none;">
+                No matches played yet.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';  // Same origin
+
+        function formatTime(date) {
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        function updateLastUpdated() {
+            document.getElementById('last-updated').textContent =
+                'Last updated: ' + formatTime(new Date());
+        }
+
+        async function fetchStandings() {
+            try {
+                const res = await fetch(`${API_BASE}/api/league/standings`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+
+                const tbody = document.querySelector('#standings tbody');
+                const emptyState = document.getElementById('standings-empty');
+
+                if (!data || data.length === 0) {
+                    tbody.innerHTML = '';
+                    emptyState.style.display = 'block';
+                    return;
+                }
+
+                emptyState.style.display = 'none';
+                tbody.innerHTML = data.map((entry, i) => {
+                    const stats = entry.aggregate_stats || {};
+                    const kills = stats.kills || 0;
+                    const deaths = stats.deaths || 0;
+                    const kd = deaths > 0
+                        ? (kills / deaths).toFixed(2)
+                        : kills.toString();
+                    return `
+                        <tr>
+                            <td class="rank">${i + 1}</td>
+                            <td class="commander-name">${escapeHtml(entry.commander_name)}</td>
+                            <td class="rating">${Math.round(entry.rating)}</td>
+                            <td class="games">${entry.games}</td>
+                            <td class="kd">${kd}</td>
+                            <td><canvas class="sparkline" data-id="${escapeHtml(entry.entry_id)}"></canvas></td>
+                        </tr>
+                    `;
+                }).join('');
+
+                // Fetch rating history for sparklines
+                data.forEach(entry => fetchSparkline(entry.entry_id));
+            } catch (e) {
+                console.warn('Failed to fetch standings:', e);
+            }
+        }
+
+        async function fetchSparkline(entryId) {
+            try {
+                const res = await fetch(`${API_BASE}/api/commanders/${encodeURIComponent(entryId)}`);
+                if (!res.ok) return;
+                const data = await res.json();
+
+                const canvas = document.querySelector(`canvas[data-id="${CSS.escape(entryId)}"]`);
+                if (!canvas || !data.rating_history || data.rating_history.length === 0) return;
+
+                const ctx = canvas.getContext('2d');
+                const dpr = window.devicePixelRatio || 1;
+
+                // Set canvas size accounting for device pixel ratio
+                canvas.width = canvas.offsetWidth * dpr;
+                canvas.height = canvas.offsetHeight * dpr;
+                ctx.scale(dpr, dpr);
+
+                const width = canvas.offsetWidth;
+                const height = canvas.offsetHeight;
+
+                const history = data.rating_history;
+                const ratings = history.map(h => h[1]);
+
+                // Add padding to min/max for visual appeal
+                const dataMin = Math.min(...ratings);
+                const dataMax = Math.max(...ratings);
+                const range = dataMax - dataMin || 100;
+                const padding = range * 0.1;
+                const min = dataMin - padding;
+                const max = dataMax + padding;
+
+                // Clear canvas
+                ctx.clearRect(0, 0, width, height);
+
+                // Draw sparkline
+                ctx.strokeStyle = '#e94560';
+                ctx.lineWidth = 1.5;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.beginPath();
+
+                const xStep = ratings.length > 1 ? width / (ratings.length - 1) : width;
+
+                ratings.forEach((r, i) => {
+                    const x = ratings.length > 1 ? i * xStep : width / 2;
+                    const y = height - ((r - min) / (max - min)) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+
+                ctx.stroke();
+
+                // Draw end dot
+                if (ratings.length > 0) {
+                    const lastX = ratings.length > 1 ? (ratings.length - 1) * xStep : width / 2;
+                    const lastY = height - ((ratings[ratings.length - 1] - min) / (max - min)) * height;
+                    ctx.fillStyle = '#e94560';
+                    ctx.beginPath();
+                    ctx.arc(lastX, lastY, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            } catch (e) {
+                console.warn('Failed to fetch sparkline for', entryId, e);
+            }
+        }
+
+        async function fetchMatches() {
+            try {
+                const res = await fetch(`${API_BASE}/api/matches?limit=20`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+
+                const ul = document.getElementById('matches');
+                const emptyState = document.getElementById('matches-empty');
+
+                if (!data || data.length === 0) {
+                    ul.innerHTML = '';
+                    emptyState.style.display = 'block';
+                    return;
+                }
+
+                emptyState.style.display = 'none';
+                ul.innerHTML = data.map(match => {
+                    const blueWon = match.winner === 'blue';
+                    const redWon = match.winner === 'red';
+                    const isDraw = match.winner === 'draw';
+
+                    let blueClass = isDraw ? 'draw' : (blueWon ? 'win' : 'loss');
+                    let redClass = isDraw ? 'draw' : (redWon ? 'win' : 'loss');
+
+                    return `
+                        <li>
+                            <span class="match-blue ${blueClass}">
+                                ${escapeHtml(match.blue_entry_id)}
+                            </span>
+                            <span class="match-vs">vs</span>
+                            <span class="match-red ${redClass}">
+                                ${escapeHtml(match.red_entry_id)}
+                            </span>
+                            <span class="match-term">${escapeHtml(match.termination)}</span>
+                        </li>
+                    `;
+                }).join('');
+            } catch (e) {
+                console.warn('Failed to fetch matches:', e);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function refresh() {
+            await Promise.all([fetchStandings(), fetchMatches()]);
+            updateLastUpdated();
+        }
+
+        // Initial load
+        refresh();
+
+        // Refresh every 30 seconds
+        setInterval(refresh, 30000);
+    </script>
+</body>
+</html>
