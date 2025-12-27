@@ -34,6 +34,7 @@ from ..config import (
     SENSOR_QUALITY_MIN,
     SUPPRESS_DURATION_S,
     EnvConfig,
+    FormationMode,
 )
 from ..constants import PACK_SIZE
 from ..gen.objective import capture_zone_params
@@ -421,8 +422,8 @@ class ObservationBuilder:
         # heat_headroom, stability_risk, damage_dir_local(3), incoming_missile, sensor_quality,
         # jam_level, ecm_on, eccm_on, suppressed, ams_cd, self_vel(3), cooldowns(4), in_zone,
         # vec_to_zone(3), zone_radius, my_control, my_score, enemy_score, time_frac,
-        # obs_sort_onehot(3), hostile_only, my_paint_used = 48
-        self.self_dim = 48
+        # obs_sort_onehot(3), hostile_only, my_paint_used, formation_mode_onehot(3) = 51
+        self.self_dim = 51
 
     def obs_dim(self) -> int:
         """Compute total observation dimension."""
@@ -821,6 +822,10 @@ class ObservationBuilder:
                         1.0 if sort_mode == 2 else 0.0,
                         1.0 if hostile_only else 0.0,
                         1.0 if my_paint_used else 0.0,  # Paint feedback for credit assignment
+                        # Formation mode one-hot (for commander responsiveness training)
+                        1.0 if ctx.config.formation_mode == FormationMode.CLOSE else 0.0,
+                        1.0 if ctx.config.formation_mode == FormationMode.STANDARD else 0.0,
+                        1.0 if ctx.config.formation_mode == FormationMode.LOOSE else 0.0,
                     ],
                     dtype=np.float32,
                 )

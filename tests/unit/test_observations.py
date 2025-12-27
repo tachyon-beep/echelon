@@ -172,9 +172,10 @@ class TestPaintUsageObservation:
         obs = env._obs()
         scout_obs = obs[scout_id]
 
-        # my_paint_used is the last self feature (self_dim = 48)
-        self_features_end = scout_obs[-48:]
-        my_paint_used_value = self_features_end[-1]
+        # my_paint_used is in self features, before formation_mode_onehot (self_dim = 51)
+        # Layout: ...my_paint_used, formation_close, formation_standard, formation_loose
+        self_features_end = scout_obs[-51:]
+        my_paint_used_value = self_features_end[-4]  # 4th from end (before 3 formation one-hots)
         assert my_paint_used_value == 1.0, f"my_paint_used should be 1.0, got {my_paint_used_value}"
 
     def test_my_paint_used_zero_without_activity(self, obs_env):
@@ -190,8 +191,8 @@ class TestPaintUsageObservation:
         obs = env._obs()
         scout_obs = obs[scout_id]
 
-        self_features_end = scout_obs[-48:]
-        my_paint_used_value = self_features_end[-1]
+        self_features_end = scout_obs[-51:]
+        my_paint_used_value = self_features_end[-4]  # 4th from end
         assert my_paint_used_value == 0.0, f"my_paint_used should be 0.0, got {my_paint_used_value}"
 
     def test_my_paint_used_combines_multiple_events(self, obs_env):
@@ -207,7 +208,75 @@ class TestPaintUsageObservation:
         obs = env._obs()
         scout_obs = obs[scout_id]
 
-        self_features_end = scout_obs[-48:]
-        my_paint_used_value = self_features_end[-1]
+        self_features_end = scout_obs[-51:]
+        my_paint_used_value = self_features_end[-4]  # 4th from end
         # Observation is binary (> 0), so still 1.0
         assert my_paint_used_value == 1.0, f"my_paint_used should be 1.0, got {my_paint_used_value}"
+
+
+class TestFormationModeObservation:
+    """Verify formation mode appears in observations."""
+
+    def test_formation_mode_in_observation(self, obs_env):
+        """Formation mode one-hot is in self-features."""
+
+        env = obs_env
+        # Default is STANDARD
+        env.reset(seed=0)
+
+        obs = env._obs()
+        scout_obs = obs["blue_0"]
+
+        # self_dim increased by 3 (one-hot for formation)
+        # Formation mode is in self-features, after my_paint_used
+        self_features = scout_obs[-51:]  # 48 + 3 = 51
+
+        # STANDARD = [0, 1, 0]
+        formation_one_hot = self_features[-3:]
+        assert formation_one_hot[0] == 0.0  # not CLOSE
+        assert formation_one_hot[1] == 1.0  # STANDARD
+        assert formation_one_hot[2] == 0.0  # not LOOSE
+
+    def test_formation_mode_close_encoding(self, obs_env):
+        """CLOSE formation encodes as [1, 0, 0]."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=15),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.CLOSE,
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+
+        obs = env._obs()
+        scout_obs = obs["blue_0"]
+        formation_one_hot = scout_obs[-3:]
+
+        assert formation_one_hot[0] == 1.0  # CLOSE
+        assert formation_one_hot[1] == 0.0
+        assert formation_one_hot[2] == 0.0
+
+    def test_formation_mode_loose_encoding(self, obs_env):
+        """LOOSE formation encodes as [0, 0, 1]."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=15),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.LOOSE,
+        )
+        env = EchelonEnv(cfg)
+        env.reset(seed=0)
+
+        obs = env._obs()
+        scout_obs = obs["blue_0"]
+        formation_one_hot = scout_obs[-3:]
+
+        assert formation_one_hot[0] == 0.0
+        assert formation_one_hot[1] == 0.0
+        assert formation_one_hot[2] == 1.0  # LOOSE
