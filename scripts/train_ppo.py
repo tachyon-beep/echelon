@@ -7,6 +7,9 @@ Usage:
     uv run python scripts/train_ppo.py --size 100 --updates 200
     uv run python scripts/train_ppo.py --wandb --wandb-run-name "experiment-01"
     uv run python scripts/train_ppo.py --resume latest --total-steps 500000
+
+    # With curriculum schedules (recommended for long runs):
+    uv run python scripts/train_ppo.py --lr 3e-4 --lr-decay 0.9 --ent-coef 0.05 --ent-decay 0.9
 """
 
 from __future__ import annotations
