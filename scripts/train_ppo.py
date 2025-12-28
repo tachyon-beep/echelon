@@ -585,6 +585,34 @@ def parse_args() -> argparse.Namespace:
         help="Each team gets independent random formation (CLOSE/STANDARD/LOOSE) on reset",
     )
 
+    # Learning rate schedule
+    parser.add_argument(
+        "--lr-decay",
+        type=float,
+        default=0.0,
+        help="LR decay factor (0.9 = decay to 10%% of initial by end). 0 disables.",
+    )
+    parser.add_argument(
+        "--lr-min",
+        type=float,
+        default=1e-5,
+        help="Minimum learning rate floor (default: 1e-5)",
+    )
+
+    # Entropy coefficient schedule
+    parser.add_argument(
+        "--ent-decay",
+        type=float,
+        default=0.0,
+        help="Entropy decay factor (0.9 = decay to 10%% of initial by end). 0 disables.",
+    )
+    parser.add_argument(
+        "--ent-min",
+        type=float,
+        default=0.005,
+        help="Minimum entropy coefficient floor (default: 0.005)",
+    )
+
     # Weights & Biases
     parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
     parser.add_argument(
