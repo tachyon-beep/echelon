@@ -1489,6 +1489,18 @@ def main() -> None:
         # PPO update
         metrics = trainer.update(buffer, init_state)
 
+        # Apply learning rate decay schedule
+        if args.lr_decay > 0:
+            progress = (update - start_update) / max(1, end_update - start_update)
+            new_lr = compute_linear_decay(
+                initial=args.lr,
+                decay_factor=args.lr_decay,
+                progress=progress,
+                floor=args.lr_min,
+            )
+            for pg in trainer.optimizer.param_groups:
+                pg["lr"] = new_lr
+
         # Extract metrics
         pg_loss = metrics["pg_loss"]
         v_loss = metrics["vf_loss"]
