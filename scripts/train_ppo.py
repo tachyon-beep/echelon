@@ -1809,6 +1809,7 @@ def main() -> None:
                 "train/approx_kl": approx_kl,
                 "train/clipfrac": clipfrac,
                 "train/learning_rate": trainer.optimizer.param_groups[0]["lr"],
+                "train/entropy_coef": trainer.config.ent_coef,
                 "train/sps": sps,
                 "train/global_step": global_step,
                 "train/episodes": episodes,
