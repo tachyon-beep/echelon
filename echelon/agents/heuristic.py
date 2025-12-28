@@ -6,9 +6,20 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..actions import ActionIndex
+from ..config import FormationMode
 from ..constants import PACK_SIZE
 from ..gen.objective import capture_zone_params
 from ..sim.los import has_los
+
+# Formation-based cohesion multipliers
+# CLOSE: tighter clustering (lower threshold, higher centroid weight)
+# LOOSE: spread out (higher threshold, lower centroid weight)
+FORMATION_COHESION_MULT: dict[FormationMode, tuple[float, float]] = {
+    # (threshold_mult, centroid_weight_mult)
+    FormationMode.CLOSE: (0.7, 1.5),  # Tighter clustering
+    FormationMode.STANDARD: (1.0, 1.0),  # Default
+    FormationMode.LOOSE: (1.5, 0.5),  # Spread out
+}
 
 if TYPE_CHECKING:
     from ..env.env import EchelonEnv
@@ -191,6 +202,14 @@ class HeuristicPolicy:
                 # Medium/leader - moderate cohesion
                 cohesion_threshold = 28.0
                 centroid_weight = 0.25
+
+            # Apply formation-based scaling
+            # CLOSE formation = tighter clustering, LOOSE = spread out
+            team = "blue" if mech_id.startswith("blue") else "red"
+            formation = env.get_team_formation(team)
+            thresh_mult, weight_mult = FORMATION_COHESION_MULT[formation]
+            cohesion_threshold *= thresh_mult
+            centroid_weight = min(0.8, centroid_weight * weight_mult)  # Cap at 0.8
 
             if dist_to_zone < zone_radius * 2 and dist_to_squad > cohesion_threshold and dist > 25.0:
                 # Blend to squad with role-appropriate weight

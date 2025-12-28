@@ -215,3 +215,6 @@ class EnvConfig:
     shaping_gamma: float = 0.99
     # Formation mode: CLOSE/STANDARD/LOOSE for commander responsiveness training
     formation_mode: FormationMode = FormationMode.STANDARD
+    # Random formations: each team gets independent random formation on reset
+    # Enables training against varied opponent postures
+    random_formations: bool = False

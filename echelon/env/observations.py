@@ -354,8 +354,8 @@ class ObservationContext:
     # Paint usage feedback (for credit assignment)
     paint_used_this_step: dict[str, int]
 
-    # Formation mode (may override config for curriculum)
-    formation_mode: FormationMode
+    # Per-team formation modes (may override config for curriculum)
+    team_formations: dict[str, FormationMode]
 
     @classmethod
     def from_env(cls, env: EchelonEnv) -> ObservationContext:
@@ -388,7 +388,10 @@ class ObservationContext:
             zone_score_to_win=env.zone_score_to_win,
             episode_stats=env._episode_stats,
             paint_used_this_step=env._paint_used_this_step,
-            formation_mode=env.formation_mode,
+            team_formations={
+                "blue": env.get_team_formation("blue"),
+                "red": env.get_team_formation("red"),
+            },
         )
 
 
@@ -827,10 +830,10 @@ class ObservationBuilder:
                         1.0 if hostile_only else 0.0,
                         1.0 if my_paint_used else 0.0,  # Paint feedback for credit assignment
                         # Formation mode one-hot (for commander responsiveness training)
-                        # Uses ctx.formation_mode (may override config for curriculum)
-                        1.0 if ctx.formation_mode == FormationMode.CLOSE else 0.0,
-                        1.0 if ctx.formation_mode == FormationMode.STANDARD else 0.0,
-                        1.0 if ctx.formation_mode == FormationMode.LOOSE else 0.0,
+                        # Per-team formation: each agent sees their team's formation command
+                        1.0 if ctx.team_formations.get(my_team) == FormationMode.CLOSE else 0.0,
+                        1.0 if ctx.team_formations.get(my_team) == FormationMode.STANDARD else 0.0,
+                        1.0 if ctx.team_formations.get(my_team) == FormationMode.LOOSE else 0.0,
                     ],
                     dtype=np.float32,
                 )

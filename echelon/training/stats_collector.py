@@ -77,44 +77,95 @@ class MatchStatsCollector:
         for event in events:
             self._process_event(ep, event)
 
+    def _team_from_id(self, mech_id: str) -> str:
+        """Extract team from mech ID (e.g., 'blue_0' -> 'blue')."""
+        return "blue" if mech_id.startswith("blue") else "red"
+
     def _process_event(self, ep: EpisodeStats, event: dict[str, Any]) -> None:
-        """Process a single event and update episode stats."""
+        """Process a single event and update episode stats.
+
+        The simulation emits specific event types:
+        - kill: shooter killed target
+        - laser_hit: laser damage dealt (primary weapon for most mechs)
+        - projectile_hit: missile/kinetic damage dealt
+        - missile_launch: missile fired (secondary for heavy)
+        - smoke_launch: smoke grenade used (special slot)
+        - paint: target painted (primary for scout, tertiary for light)
+        - kinetic_fire: gauss/autocannon fired (tertiary for heavy/medium)
+        """
         etype = event.get("type")
 
         if etype == "kill":
-            team = event.get("team", "blue")
-            ep_stats = ep.blue if team == "blue" else ep.red
-            target_stats = ep.red if team == "blue" else ep.blue
-            ep_stats["kills"] += 1
+            # Kill event: shooter killed target
+            shooter_id = event["shooter"]
+            target_id = event["target"]
+            shooter_team = self._team_from_id(shooter_id)
+            target_team = self._team_from_id(target_id)
+
+            shooter_stats = ep.blue if shooter_team == "blue" else ep.red
+            target_stats = ep.blue if target_team == "blue" else ep.red
+            shooter_stats["kills"] += 1
             target_stats["deaths"] += 1
 
-        elif etype == "damage":
-            team = event.get("attacker_team", "blue")
-            amount = event.get("amount", 0.0)
-            attacker_stats = ep.blue if team == "blue" else ep.red
-            target_stats = ep.red if team == "blue" else ep.blue
-            attacker_stats["damage_dealt"] += amount
-            target_stats["damage_taken"] += amount
+        elif etype == "laser_hit":
+            # Laser damage: counts as primary weapon use + damage
+            shooter_id = event["shooter"]
+            target_id = event["target"]
+            damage = event.get("damage", 0.0)
 
-        elif etype == "weapon_fired":
-            team = event.get("team", "blue")
-            weapon = event.get("weapon", "primary")
-            stats = ep.blue if team == "blue" else ep.red
-            key = f"{weapon}_uses"
-            if key in stats:
-                stats[key] += 1
+            shooter_team = self._team_from_id(shooter_id)
+            target_team = self._team_from_id(target_id)
 
-        elif etype == "utility_used":
-            team = event.get("team", "blue")
-            utility = event.get("utility", "")
-            stats = ep.blue if team == "blue" else ep.red
-            if utility in stats:
-                stats[utility] += 1
+            shooter_stats = ep.blue if shooter_team == "blue" else ep.red
+            target_stats = ep.blue if target_team == "blue" else ep.red
 
-        elif etype == "zone_tick":
-            team = event.get("team", "blue")
-            stats = ep.blue if team == "blue" else ep.red
-            stats["zone_ticks"] += 1
+            shooter_stats["damage_dealt"] += damage
+            target_stats["damage_taken"] += damage
+            shooter_stats["primary_uses"] += 1
+
+        elif etype == "projectile_hit":
+            # Projectile damage: missile or kinetic hit
+            shooter_id = event["shooter"]
+            target_id = event["target"]
+            damage = event.get("damage", 0.0)
+
+            shooter_team = self._team_from_id(shooter_id)
+            target_team = self._team_from_id(target_id)
+
+            shooter_stats = ep.blue if shooter_team == "blue" else ep.red
+            target_stats = ep.blue if target_team == "blue" else ep.red
+
+            shooter_stats["damage_dealt"] += damage
+            target_stats["damage_taken"] += damage
+            # Note: weapon firing counted at launch, not hit
+
+        elif etype == "missile_launch":
+            # Missile fired: secondary weapon for heavy
+            shooter_id = event["shooter"]
+            shooter_team = self._team_from_id(shooter_id)
+            shooter_stats = ep.blue if shooter_team == "blue" else ep.red
+            shooter_stats["secondary_uses"] += 1
+
+        elif etype == "smoke_launch":
+            # Smoke grenade: special slot utility
+            shooter_id = event["shooter"]
+            shooter_team = self._team_from_id(shooter_id)
+            shooter_stats = ep.blue if shooter_team == "blue" else ep.red
+            shooter_stats["smokes"] += 1
+
+        elif etype == "paint":
+            # Paint target: scout primary, light tertiary
+            shooter_id = event["shooter"]
+            shooter_team = self._team_from_id(shooter_id)
+            shooter_stats = ep.blue if shooter_team == "blue" else ep.red
+            shooter_stats["paints"] += 1
+
+        elif etype == "kinetic_fire":
+            # Kinetic weapon: gauss (heavy) or autocannon (medium) - tertiary slot
+            shooter_id = event["shooter"]
+            shooter_team = self._team_from_id(shooter_id)
+            shooter_stats = ep.blue if shooter_team == "blue" else ep.red
+            shooter_stats["tertiary_uses"] += 1
 
         elif etype == "order_issued":
             team = event.get("team", "blue")

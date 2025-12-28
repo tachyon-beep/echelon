@@ -300,9 +300,9 @@ class EchelonEnv:
         self._last_reset_seed: int | None = None
         self._spawn_clear: int | None = None
 
-        # Mutable formation mode override (for curriculum cycling)
+        # Per-team formation modes (for curriculum/randomization)
         # None = use config.formation_mode, otherwise overrides it
-        self._formation_mode_override: FormationMode | None = None
+        self._team_formations: dict[str, FormationMode | None] = {"blue": None, "red": None}
 
         self.blue_ids, self.red_ids = _team_ids(self.num_packs)
         self.possible_agents = [*self.blue_ids, *self.red_ids]
@@ -386,20 +386,47 @@ class EchelonEnv:
             comm_dim=self.comm_dim,
         )
 
-    @property
-    def formation_mode(self) -> FormationMode:
-        """Current formation mode (override or config default)."""
-        if self._formation_mode_override is not None:
-            return self._formation_mode_override
+    def get_team_formation(self, team: str) -> FormationMode:
+        """Get formation mode for a team.
+
+        Args:
+            team: "blue" or "red"
+
+        Returns:
+            Team's formation mode (override or config default)
+        """
+        override = self._team_formations.get(team)
+        if override is not None:
+            return override
         return self.config.formation_mode
 
-    def set_formation_mode(self, mode: FormationMode) -> None:
+    def get_agent_formation(self, agent_id: str) -> FormationMode:
+        """Get formation mode for an agent based on their team."""
+        team = "blue" if agent_id.startswith("blue") else "red"
+        return self.get_team_formation(team)
+
+    @property
+    def formation_mode(self) -> FormationMode:
+        """Blue team's formation mode (for backwards compatibility)."""
+        return self.get_team_formation("blue")
+
+    def set_formation_mode(self, mode: FormationMode, team: str | None = None) -> None:
         """Set formation mode override for curriculum training.
 
         Args:
-            mode: Formation mode to use (overrides config.formation_mode)
+            mode: Formation mode to use
+            team: "blue", "red", or None for both teams
         """
-        self._formation_mode_override = mode
+        if team is None:
+            self._team_formations["blue"] = mode
+            self._team_formations["red"] = mode
+        else:
+            self._team_formations[team] = mode
+
+    def randomize_formations(self) -> None:
+        """Randomize formation modes for both teams independently."""
+        self._team_formations["blue"] = FormationMode(int(self.rng.integers(0, 3)))
+        self._team_formations["red"] = FormationMode(int(self.rng.integers(0, 3)))
 
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         if seed is not None:
@@ -413,6 +440,10 @@ class EchelonEnv:
         self.last_outcome = None
         self.team_zone_score = {"blue": 0.0, "red": 0.0}
         self.zone_score_to_win = float(self.config.max_episode_seconds * 0.5)
+
+        # Randomize formations if enabled (per-team independent random)
+        if self.config.random_formations:
+            self.randomize_formations()
         self._max_team_hp = {"blue": 0.0, "red": 0.0}
         self._episode_stats = {
             "kills_blue": 0.0,
@@ -1365,8 +1396,11 @@ class EchelonEnv:
             # in addition to the base assist reward (3.0).
             step_paint_assists=step_assists,
             first_zone_entry_this_step=first_zone_entry_this_step,
-            # Formation mode for reward scaling (uses override if set)
-            formation_mode=self.formation_mode,
+            # Per-team formation modes for reward scaling
+            team_formations={
+                "blue": self.get_team_formation("blue"),
+                "red": self.get_team_formation("red"),
+            },
         )
 
         rewards, reward_components = self._reward_computer.compute(reward_ctx)

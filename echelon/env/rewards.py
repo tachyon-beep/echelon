@@ -141,8 +141,9 @@ class StepContext:
     # Used for arrival_bonus reward (one-time bonus for reaching objective)
     first_zone_entry_this_step: dict[str, bool] | None = None
 
-    # Formation mode for reward scaling (CLOSE/STANDARD/LOOSE)
-    formation_mode: FormationMode = FormationMode.STANDARD
+    # Per-team formation modes for reward scaling (CLOSE/STANDARD/LOOSE)
+    # Each team can have independent formation for varied training
+    team_formations: dict[str, FormationMode] | None = None
 
 
 @dataclass
@@ -251,8 +252,11 @@ class RewardComputer:
         w = self.weights
         comp = RewardComponents()
 
-        # Get formation multipliers for reward scaling
-        fm = FORMATION_MULTIPLIERS[ctx.formation_mode]
+        # Get formation multipliers for reward scaling (per-team)
+        agent_formation = FormationMode.STANDARD  # Default fallback
+        if ctx.team_formations is not None:
+            agent_formation = ctx.team_formations.get(team, FormationMode.STANDARD)
+        fm = FORMATION_MULTIPLIERS[agent_formation]
 
         # (1) Approach shaping: PBRS-compliant distance-based reward
         # r = gamma * phi(s') - phi(s) where phi(s) = -distance / max_xy
