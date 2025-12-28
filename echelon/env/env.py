@@ -32,6 +32,7 @@ from ..actions import (
 )
 from ..config import (
     EnvConfig,
+    FormationMode,
     MechClassConfig,
 )
 from ..constants import PACK_SIZE
@@ -299,6 +300,10 @@ class EchelonEnv:
         self._last_reset_seed: int | None = None
         self._spawn_clear: int | None = None
 
+        # Mutable formation mode override (for curriculum cycling)
+        # None = use config.formation_mode, otherwise overrides it
+        self._formation_mode_override: FormationMode | None = None
+
         self.blue_ids, self.red_ids = _team_ids(self.num_packs)
         self.possible_agents = [*self.blue_ids, *self.red_ids]
         self.agents = list(self.possible_agents)
@@ -380,6 +385,21 @@ class EchelonEnv:
             local_map_r=self.LOCAL_MAP_R,
             comm_dim=self.comm_dim,
         )
+
+    @property
+    def formation_mode(self) -> FormationMode:
+        """Current formation mode (override or config default)."""
+        if self._formation_mode_override is not None:
+            return self._formation_mode_override
+        return self.config.formation_mode
+
+    def set_formation_mode(self, mode: FormationMode) -> None:
+        """Set formation mode override for curriculum training.
+
+        Args:
+            mode: Formation mode to use (overrides config.formation_mode)
+        """
+        self._formation_mode_override = mode
 
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         if seed is not None:
@@ -1345,8 +1365,8 @@ class EchelonEnv:
             # in addition to the base assist reward (3.0).
             step_paint_assists=step_assists,
             first_zone_entry_this_step=first_zone_entry_this_step,
-            # Formation mode for reward scaling
-            formation_mode=self.config.formation_mode,
+            # Formation mode for reward scaling (uses override if set)
+            formation_mode=self.formation_mode,
         )
 
         rewards, reward_components = self._reward_computer.compute(reward_ctx)

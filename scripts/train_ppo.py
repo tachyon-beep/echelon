@@ -1025,6 +1025,12 @@ def main() -> None:
         else:
             current_weapon_prob = args.opfor_weapon_end if args.train_mode == "heuristic" else 1.0
 
+        # Cycle formation mode every 3 updates (CLOSE -> STANDARD -> LOOSE -> repeat)
+        # This trains policies to respond to all three postures
+        FORMATION_CYCLE_UPDATES = 3
+        formation_idx = ((update - 1) // FORMATION_CYCLE_UPDATES) % 3
+        venv.set_formation_mode(formation_idx)
+
         # Create rollout buffer
         buffer = RolloutBuffer.create(
             num_steps=args.rollout_steps,
@@ -1756,6 +1762,8 @@ def main() -> None:
             # Add opponent curriculum metrics
             if args.train_mode == "heuristic":
                 wandb_metrics["curriculum/opfor_weapon_prob"] = current_weapon_prob
+            # Add formation mode (0=CLOSE, 1=STANDARD, 2=LOOSE)
+            wandb_metrics["curriculum/formation_mode"] = formation_idx
             # Add combat statistics
             wandb_metrics.update({f"combat/{k}": v for k, v in combat_stats.items()})
             # Add zone control metrics

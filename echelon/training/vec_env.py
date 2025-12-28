@@ -35,6 +35,7 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig, initial_weapon_p
         ("set_heuristic_weapon_prob", float) -> None (updates weapon fire probability)
         ("set_curriculum", dict) -> None (updates curriculum params)
         ("get_curriculum", None) -> dict (returns current curriculum)
+        ("set_formation_mode", int) -> None (sets formation mode for reward modulation)
         ("close", None) -> exits
 
     Args:
@@ -102,6 +103,11 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig, initial_weapon_p
                 remote.send(None)
             elif cmd == "get_curriculum":
                 remote.send(dict(curriculum))
+            elif cmd == "set_formation_mode":
+                from echelon.config import FormationMode
+
+                env.set_formation_mode(FormationMode(data))
+                remote.send(None)
             elif cmd == "close":
                 remote.close()
                 break
@@ -268,6 +274,20 @@ class VectorEnv:
         self.remotes[0].send(("get_curriculum", None))
         result: dict = self.remotes[0].recv()
         return result
+
+    def set_formation_mode(self, mode: int) -> None:
+        """Set formation mode for all environments.
+
+        Used during training to cycle through formation modes
+        so policy learns to respond to all three postures.
+
+        Args:
+            mode: FormationMode value (0=CLOSE, 1=STANDARD, 2=LOOSE)
+        """
+        for remote in self.remotes:
+            remote.send(("set_formation_mode", mode))
+        for remote in self.remotes:
+            remote.recv()  # Wait for acknowledgment
 
     def close(self) -> None:
         """Close all environments and terminate worker processes.

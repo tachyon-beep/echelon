@@ -354,6 +354,9 @@ class ObservationContext:
     # Paint usage feedback (for credit assignment)
     paint_used_this_step: dict[str, int]
 
+    # Formation mode (may override config for curriculum)
+    formation_mode: FormationMode
+
     @classmethod
     def from_env(cls, env: EchelonEnv) -> ObservationContext:
         """Create ObservationContext from environment state.
@@ -385,6 +388,7 @@ class ObservationContext:
             zone_score_to_win=env.zone_score_to_win,
             episode_stats=env._episode_stats,
             paint_used_this_step=env._paint_used_this_step,
+            formation_mode=env.formation_mode,
         )
 
 
@@ -823,9 +827,10 @@ class ObservationBuilder:
                         1.0 if hostile_only else 0.0,
                         1.0 if my_paint_used else 0.0,  # Paint feedback for credit assignment
                         # Formation mode one-hot (for commander responsiveness training)
-                        1.0 if ctx.config.formation_mode == FormationMode.CLOSE else 0.0,
-                        1.0 if ctx.config.formation_mode == FormationMode.STANDARD else 0.0,
-                        1.0 if ctx.config.formation_mode == FormationMode.LOOSE else 0.0,
+                        # Uses ctx.formation_mode (may override config for curriculum)
+                        1.0 if ctx.formation_mode == FormationMode.CLOSE else 0.0,
+                        1.0 if ctx.formation_mode == FormationMode.STANDARD else 0.0,
+                        1.0 if ctx.formation_mode == FormationMode.LOOSE else 0.0,
                     ],
                     dtype=np.float32,
                 )
