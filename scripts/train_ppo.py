@@ -52,6 +52,27 @@ from echelon.training.spatial import SpatialAccumulator
 from echelon.training.stats_collector import MatchStatsCollector
 
 
+def compute_linear_decay(
+    initial: float,
+    decay_factor: float,
+    progress: float,
+    floor: float,
+) -> float:
+    """Compute linearly decayed value with floor.
+
+    Args:
+        initial: Starting value
+        decay_factor: Fraction to decay by end (0.9 = decay to 10% of initial)
+        progress: Training progress in [0, 1]
+        floor: Minimum value (never decay below this)
+
+    Returns:
+        Decayed value: max(floor, initial * (1 - decay_factor * progress))
+    """
+    decayed = initial * (1.0 - decay_factor * progress)
+    return max(floor, decayed)
+
+
 def _role_for_agent(agent_id: str) -> str:
     """Get role name for an agent ID based on pack composition.
 
@@ -558,6 +579,11 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Updates to ramp from start to end (0 = instant full lethality)",
     )
+    parser.add_argument(
+        "--random-formations",
+        action="store_true",
+        help="Each team gets independent random formation (CLOSE/STANDARD/LOOSE) on reset",
+    )
 
     # Weights & Biases
     parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
@@ -626,6 +652,7 @@ def build_env_config(args: argparse.Namespace, resume_ckpt: dict | None) -> EnvC
         enable_ewar=not args.disable_ewar,
         enable_obs_control=not args.disable_obs_control,
         enable_comm=not args.disable_comm,
+        random_formations=args.random_formations,
     )
 
     return env_cfg
