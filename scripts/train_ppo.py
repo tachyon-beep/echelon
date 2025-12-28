@@ -1501,6 +1501,17 @@ def main() -> None:
             for pg in trainer.optimizer.param_groups:
                 pg["lr"] = new_lr
 
+        # Apply entropy coefficient decay schedule
+        if args.ent_decay > 0:
+            progress = (update - start_update) / max(1, end_update - start_update)
+            new_ent = compute_linear_decay(
+                initial=args.ent_coef,
+                decay_factor=args.ent_decay,
+                progress=progress,
+                floor=args.ent_min,
+            )
+            trainer.config.ent_coef = new_ent
+
         # Extract metrics
         pg_loss = metrics["pg_loss"]
         v_loss = metrics["vf_loss"]
