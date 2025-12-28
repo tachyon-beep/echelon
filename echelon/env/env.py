@@ -1345,6 +1345,8 @@ class EchelonEnv:
             # in addition to the base assist reward (3.0).
             step_paint_assists=step_assists,
             first_zone_entry_this_step=first_zone_entry_this_step,
+            # Formation mode for reward scaling
+            formation_mode=self.config.formation_mode,
         )
 
         rewards, reward_components = self._reward_computer.compute(reward_ctx)

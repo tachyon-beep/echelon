@@ -11,6 +11,9 @@ class FormationMode(IntEnum):
     - CLOSE: Tight zone control, penalize straying
     - STANDARD: Balanced posture (default)
     - LOOSE: Maneuver freedom, reduced zone pressure
+
+    NOTE: Defined in config.py (not rewards.py) to avoid circular import.
+    EnvConfig needs FormationMode, and rewards.py imports from config.
     """
 
     CLOSE = 0

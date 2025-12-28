@@ -676,3 +676,113 @@ class TestFormationModeMultipliers:
 
         cfg = EnvConfig(world=WorldConfig(size_x=30, size_y=30, size_z=10))
         assert cfg.formation_mode == FormationMode.STANDARD
+
+    def test_close_formation_amplifies_zone_reward(self):
+        """CLOSE formation gives higher zone rewards."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+        from echelon.gen.objective import capture_zone_params
+
+        # Standard formation
+        cfg_std = EnvConfig(
+            world=WorldConfig(size_x=40, size_y=40, size_z=15, obstacle_fill=0.0),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.STANDARD,
+        )
+        env_std = EchelonEnv(cfg_std)
+        env_std.reset(seed=0)
+
+        # Close formation
+        cfg_close = EnvConfig(
+            world=WorldConfig(size_x=40, size_y=40, size_z=15, obstacle_fill=0.0),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.CLOSE,
+        )
+        env_close = EchelonEnv(cfg_close)
+        env_close.reset(seed=0)
+
+        # Position blue_0 in zone for both
+        zone_cx, zone_cy, _ = capture_zone_params(
+            env_std.world.meta, size_x=env_std.world.size_x, size_y=env_std.world.size_y
+        )
+
+        for env in [env_std, env_close]:
+            for aid in env.agents:
+                m = env.sim.mechs[aid]
+                if aid == "blue_0":
+                    m.pos[0], m.pos[1] = zone_cx, zone_cy
+                else:
+                    m.pos[0], m.pos[1] = 5.0, 5.0
+                m.vel[:] = 0.0
+
+        actions_std = {aid: np.zeros(env_std.ACTION_DIM, dtype=np.float32) for aid in env_std.agents}
+        actions_close = {aid: np.zeros(env_close.ACTION_DIM, dtype=np.float32) for aid in env_close.agents}
+
+        _, _, _, _, infos_std = env_std.step(actions_std)
+        _, _, _, _, infos_close = env_close.step(actions_close)
+
+        # Check zone component directly (arrival bonus is constant, distorts ratio)
+        zone_std = infos_std["blue_0"]["reward_components"]["zone"]
+        zone_close = infos_close["blue_0"]["reward_components"]["zone"]
+
+        # CLOSE should give 2x zone reward (multiplier = 2.0)
+        assert (
+            zone_close > zone_std * 1.5
+        ), f"CLOSE should amplify zone reward: close={zone_close}, std={zone_std}"
+
+    def test_loose_formation_reduces_zone_reward(self):
+        """LOOSE formation gives lower zone rewards."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+        from echelon.gen.objective import capture_zone_params
+
+        # Standard formation
+        cfg_std = EnvConfig(
+            world=WorldConfig(size_x=40, size_y=40, size_z=15, obstacle_fill=0.0),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.STANDARD,
+        )
+        env_std = EchelonEnv(cfg_std)
+        env_std.reset(seed=0)
+
+        # Loose formation
+        cfg_loose = EnvConfig(
+            world=WorldConfig(size_x=40, size_y=40, size_z=15, obstacle_fill=0.0),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.LOOSE,
+        )
+        env_loose = EchelonEnv(cfg_loose)
+        env_loose.reset(seed=0)
+
+        # Position blue_0 in zone for both
+        zone_cx, zone_cy, _ = capture_zone_params(
+            env_std.world.meta, size_x=env_std.world.size_x, size_y=env_std.world.size_y
+        )
+
+        for env in [env_std, env_loose]:
+            for aid in env.agents:
+                m = env.sim.mechs[aid]
+                if aid == "blue_0":
+                    m.pos[0], m.pos[1] = zone_cx, zone_cy
+                else:
+                    m.pos[0], m.pos[1] = 5.0, 5.0
+                m.vel[:] = 0.0
+
+        actions_std = {aid: np.zeros(env_std.ACTION_DIM, dtype=np.float32) for aid in env_std.agents}
+        actions_loose = {aid: np.zeros(env_loose.ACTION_DIM, dtype=np.float32) for aid in env_loose.agents}
+
+        _, _, _, _, infos_std = env_std.step(actions_std)
+        _, _, _, _, infos_loose = env_loose.step(actions_loose)
+
+        # Check zone component directly (arrival bonus is constant, distorts ratio)
+        zone_std = infos_std["blue_0"]["reward_components"]["zone"]
+        zone_loose = infos_loose["blue_0"]["reward_components"]["zone"]
+
+        # LOOSE should give 0.3x zone reward (multiplier = 0.3)
+        assert (
+            zone_loose < zone_std * 0.5
+        ), f"LOOSE should reduce zone reward: loose={zone_loose}, std={zone_std}"

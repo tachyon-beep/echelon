@@ -141,6 +141,9 @@ class StepContext:
     # Used for arrival_bonus reward (one-time bonus for reaching objective)
     first_zone_entry_this_step: dict[str, bool] | None = None
 
+    # Formation mode for reward scaling (CLOSE/STANDARD/LOOSE)
+    formation_mode: FormationMode = FormationMode.STANDARD
+
 
 @dataclass
 class RewardComponents:
@@ -248,17 +251,21 @@ class RewardComputer:
         w = self.weights
         comp = RewardComponents()
 
+        # Get formation multipliers for reward scaling
+        fm = FORMATION_MULTIPLIERS[ctx.formation_mode]
+
         # (1) Approach shaping: PBRS-compliant distance-based reward
         # r = gamma * phi(s') - phi(s) where phi(s) = -distance / max_xy
         # ALWAYS applies - creates gravity well effect:
         # - Moving toward zone = positive reward
         # - Leaving zone = negative reward (penalty for backing out)
+        # Formation mode scales the approach incentive
         d0 = ctx.dist_to_zone_before.get(aid)
         d1 = ctx.dist_to_zone_after.get(aid)
         if d0 is not None and d1 is not None and ctx.max_xy > 0.0:
             phi0 = -d0 / ctx.max_xy
             phi1 = -d1 / ctx.max_xy
-            comp.approach = w.approach * (w.shaping_gamma * phi1 - phi0)
+            comp.approach = w.approach * fm["approach"] * (w.shaping_gamma * phi1 - phi0)
 
         # (1.5) Arrival bonus: one-time reward for first zone entry this episode
         # This breaks the "approach forever" trap by giving a discrete signal for
@@ -270,15 +277,17 @@ class RewardComputer:
         # sqrt(n) flattens the distribution - first agent doesn't get massive jackpot
         # With n=1: full reward, n=4: 50% each, n=9: 33% each
         # This reduces "race to zone" incentive while still rewarding presence
+        # Formation mode scales zone importance (CLOSE amplifies, LOOSE reduces)
         team_tick = ctx.blue_tick if team == "blue" else ctx.red_tick
         if ctx.in_zone_by_agent.get(aid, False):
             n_in_zone = max(1, teammates_in_zone.get(team, 1))
             # sqrt(n) instead of n for fairer distribution
-            comp.zone = w.zone_tick * team_tick / math.sqrt(n_in_zone)
+            comp.zone = w.zone_tick * fm["zone"] * team_tick / math.sqrt(n_in_zone)
 
         # (3) Combat rewards: ZONE-CENTRIC
         # In zone: higher damage rewards, lower death penalty
         # Out of zone: base damage rewards, higher death penalty
+        # Formation mode scales out-of-zone death penalty (CLOSE amplifies, LOOSE reduces)
         agent_in_zone = ctx.in_zone_by_agent.get(aid, False)
 
         if agent_in_zone:
@@ -287,8 +296,9 @@ class RewardComputer:
             death_mult = w.in_zone_death_mult  # 0.5x
         else:
             # Don't die pointlessly outside the zone
+            # Formation mode scales this: CLOSE makes straying more costly
             damage_mult = 1.0  # base damage reward
-            death_mult = w.out_zone_death_mult  # 2x
+            death_mult = w.out_zone_death_mult * fm["out_death"]  # 2x * formation mult
 
         comp.damage = w.damage * damage_mult * ctx.step_damage_dealt.get(aid, 0.0)
         comp.kill = w.kill * damage_mult * ctx.step_kills.get(aid, 0)
