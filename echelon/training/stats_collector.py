@@ -68,12 +68,12 @@ class MatchStatsCollector:
 
         Args:
             env_idx: Index of the environment.
-            info: Info dict from env.step(), expected to contain 'events' list.
+            info: Info dict containing 'events' list.
         """
         ep = self.episodes[env_idx]
         ep.step_count += 1
 
-        events = info.get("events", [])
+        events = info["events"]
         for event in events:
             self._process_event(ep, event)
 
@@ -93,7 +93,9 @@ class MatchStatsCollector:
         - paint: target painted (primary for scout, tertiary for light)
         - kinetic_fire: gauss/autocannon fired (tertiary for heavy/medium)
         """
-        etype = event.get("type")
+        # NOTE: Use direct access (not .get()) to fail loudly on schema mismatch.
+        # If an event is missing expected fields, we want to know immediately.
+        etype = event["type"]
 
         if etype == "kill":
             # Kill event: shooter killed target
@@ -111,7 +113,7 @@ class MatchStatsCollector:
             # Laser damage: counts as primary weapon use + damage
             shooter_id = event["shooter"]
             target_id = event["target"]
-            damage = event.get("damage", 0.0)
+            damage = event["damage"]
 
             shooter_team = self._team_from_id(shooter_id)
             target_team = self._team_from_id(target_id)
@@ -127,7 +129,7 @@ class MatchStatsCollector:
             # Projectile damage: missile or kinetic hit
             shooter_id = event["shooter"]
             target_id = event["target"]
-            damage = event.get("damage", 0.0)
+            damage = event["damage"]
 
             shooter_team = self._team_from_id(shooter_id)
             target_team = self._team_from_id(target_id)
@@ -168,14 +170,15 @@ class MatchStatsCollector:
             shooter_stats["tertiary_uses"] += 1
 
         elif etype == "order_issued":
-            team = event.get("team", "blue")
-            order_type = event.get("order_type", "unknown")
+            team = event["team"]
+            order_type = event["order_type"]
             stats = ep.blue if team == "blue" else ep.red
+            # NOTE: .get() is legitimate here - accumulating into a dict that may not have the key
             stats["orders_issued"][order_type] = stats["orders_issued"].get(order_type, 0) + 1
 
         elif etype == "order_response":
-            team = event.get("team", "blue")
-            acknowledged = event.get("acknowledged", False)
+            team = event["team"]
+            acknowledged = event["acknowledged"]
             stats = ep.blue if team == "blue" else ep.red
             if acknowledged:
                 stats["orders_acknowledged"] += 1
@@ -202,6 +205,7 @@ class MatchStatsCollector:
         duration_steps: int,
         blue_entry_id: str,
         red_entry_id: str,
+        zone_ticks: dict[str, int] | None = None,
     ) -> MatchRecord:
         """Finalize episode stats and return MatchRecord.
 
@@ -212,11 +216,18 @@ class MatchStatsCollector:
             duration_steps: Number of steps in the episode.
             blue_entry_id: League entry ID for blue team.
             red_entry_id: League entry ID for red team.
+            zone_ticks: Optional dict with 'blue' and 'red' zone tick counts.
+                If provided, overrides any accumulated zone_ticks from events.
 
         Returns:
             MatchRecord containing the episode's statistics.
         """
         ep = self.episodes[env_idx]
+
+        # Apply zone_ticks from environment if provided
+        if zone_ticks is not None:
+            ep.blue["zone_ticks"] = zone_ticks["blue"]
+            ep.red["zone_ticks"] = zone_ticks["red"]
 
         # Build TeamStats from accumulated dicts
         # Copy orders_issued to avoid mutation issues

@@ -405,6 +405,17 @@ class EchelonEnv:
         team = "blue" if agent_id.startswith("blue") else "red"
         return self.get_team_formation(team)
 
+    def get_zone_ticks(self) -> dict[str, int]:
+        """Get zone control ticks for each team.
+
+        Returns:
+            Dict with 'blue' and 'red' keys containing zone tick counts.
+        """
+        return {
+            "blue": int(self._episode_stats.get("zone_ticks_blue", 0)),
+            "red": int(self._episode_stats.get("zone_ticks_red", 0)),
+        }
+
     @property
     def formation_mode(self) -> FormationMode:
         """Blue team's formation mode (for backwards compatibility)."""

@@ -158,3 +158,49 @@ def test_collector_handles_multiple_envs():
     assert stats1["blue"]["kills"] == 0
     assert stats2["blue"]["kills"] == 0
     assert stats2["red"]["kills"] == 0
+
+
+def test_collector_zone_ticks_from_env():
+    """Collector populates zone_ticks from environment stats at episode end."""
+    collector = MatchStatsCollector(num_envs=1)
+
+    # Simulate some steps (zone ticks come from env, not events)
+    collector.on_step(0, {"events": []})
+    collector.on_step(0, {"events": []})
+
+    # End episode with zone ticks from environment
+    zone_ticks = {"blue": 45, "red": 23}
+    record = collector.on_episode_end(
+        env_idx=0,
+        winner="blue",
+        termination="zone",
+        duration_steps=100,
+        blue_entry_id="contender",
+        red_entry_id="heuristic",
+        zone_ticks=zone_ticks,
+    )
+
+    # Zone ticks should be populated in the match record
+    assert record.blue_stats.zone_ticks == 45
+    assert record.red_stats.zone_ticks == 23
+
+
+def test_collector_zone_ticks_defaults_to_zero():
+    """Without zone_ticks parameter, zone_ticks defaults to 0."""
+    collector = MatchStatsCollector(num_envs=1)
+
+    collector.on_step(0, {"events": []})
+
+    # End episode without zone_ticks parameter
+    record = collector.on_episode_end(
+        env_idx=0,
+        winner="draw",
+        termination="timeout",
+        duration_steps=50,
+        blue_entry_id="a",
+        red_entry_id="b",
+    )
+
+    # Zone ticks should be 0 (default)
+    assert record.blue_stats.zone_ticks == 0
+    assert record.red_stats.zone_ticks == 0

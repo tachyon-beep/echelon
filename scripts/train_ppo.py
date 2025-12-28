@@ -1288,6 +1288,12 @@ def main() -> None:
                         opponent_id = arena_opponent_id
                     else:
                         opponent_id = "heuristic"
+                    # Extract zone ticks from outcome stats for match record
+                    outcome_stats = outcome.get("stats", {})
+                    zone_ticks = {
+                        "blue": int(outcome_stats.get("zone_ticks_blue", 0)),
+                        "red": int(outcome_stats.get("zone_ticks_red", 0)),
+                    }
                     record = stats_collector.on_episode_end(
                         env_idx=env_idx,
                         winner=winner,
@@ -1295,6 +1301,7 @@ def main() -> None:
                         duration_steps=ep_len,
                         blue_entry_id="contender",
                         red_entry_id=opponent_id,
+                        zone_ticks=zone_ticks,
                     )
                     match_history.save(record)
 
