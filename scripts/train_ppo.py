@@ -593,6 +593,12 @@ def parse_args() -> argparse.Namespace:
         help="Games to ramp from start to end (overrides --opfor-ramp-updates if set)",
     )
     parser.add_argument(
+        "--opfor-ramp-warmup-games",
+        type=int,
+        default=0,
+        help="Games to stay at start difficulty before ramping begins",
+    )
+    parser.add_argument(
         "--random-formations",
         action="store_true",
         help="Each team gets independent random formation (CLOSE/STANDARD/LOOSE) on reset",
@@ -819,9 +825,12 @@ def main() -> None:
             ramp_desc = f"{args.opfor_ramp_games:,} games"
         else:
             ramp_desc = f"{args.opfor_ramp_updates:,} updates"
+        warmup_desc = (
+            f" (after {args.opfor_ramp_warmup_games:,} warmup)" if args.opfor_ramp_warmup_games > 0 else ""
+        )
         print(
             f"Opponent curriculum: weapon prob {args.opfor_weapon_start:.0%} → "
-            f"{args.opfor_weapon_end:.0%} over {ramp_desc}"
+            f"{args.opfor_weapon_end:.0%} over {ramp_desc}{warmup_desc}"
         )
     venv = VectorEnv(num_envs, env_cfg, initial_weapon_prob=initial_weapon_prob)
 
@@ -1091,7 +1100,9 @@ def main() -> None:
         if args.train_mode == "heuristic":
             if args.opfor_ramp_games > 0:
                 # Game-based ramp (preferred - robust to batch size changes)
-                progress = min(1.0, episodes / args.opfor_ramp_games)
+                # Subtract warmup games before calculating progress
+                effective_episodes = max(0, episodes - args.opfor_ramp_warmup_games)
+                progress = min(1.0, effective_episodes / args.opfor_ramp_games)
                 current_weapon_prob = args.opfor_weapon_start + progress * (
                     args.opfor_weapon_end - args.opfor_weapon_start
                 )
