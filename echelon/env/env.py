@@ -19,22 +19,20 @@ except ImportError:
         _HAS_GYMNASIUM = False
 
 from ..actions import ACTION_DIM as ACTION_DIM_CONST
-from ..actions import ActionIndex
+from ..actions import (
+    ORDER_PARAM_DIM,
+    ORDER_RECIPIENT_DIM,
+    ORDER_TYPE_DIM,
+    STATUS_ACKNOWLEDGE_DIM,
+    STATUS_FLAGS_DIM,
+    STATUS_OVERRIDE_DIM,
+    STATUS_PROGRESS_DIM,
+    ActionIndex,
+    OrderType,
+)
 from ..config import (
-    AMS_COOLDOWN_S,
-    ECCM_RADIUS_VOX,
-    ECCM_WEIGHT,
-    ECM_RADIUS_VOX,
-    ECM_WEIGHT,
-    GAUSS,
-    LASER,
-    MISSILE,
-    PAINT_LOCK_MIN_QUALITY,
-    PAINTER,
-    SENSOR_QUALITY_MAX,
-    SENSOR_QUALITY_MIN,
-    SUPPRESS_DURATION_S,
     EnvConfig,
+    FormationMode,
     MechClassConfig,
 )
 from ..constants import PACK_SIZE
@@ -51,9 +49,12 @@ from ..gen.transforms import (
 from ..gen.validator import ConnectivityValidator
 from ..nav.graph import NavGraph, NodeID
 from ..nav.planner import Planner
-from ..sim.mech import MechState
+from ..rl.suite import CombatSuiteSpec, get_suite_for_role
+from ..sim.mech import MechState, ReceivedOrder
 from ..sim.sim import Sim
 from ..sim.world import VoxelWorld
+from .observations import ObservationBuilder, ObservationContext
+from .rewards import RewardComputer, RewardWeights, StepContext, compute_zone_ticks
 
 
 def _wrap_pi(angle: float) -> float:
@@ -114,23 +115,85 @@ def default_mech_classes() -> dict[str, MechClassConfig]:
 
 
 def _team_ids(num_packs: int) -> tuple[list[str], list[str]]:
-    total = num_packs * PACK_SIZE
+    """Generate mech IDs for each team.
+
+    With 2+ packs, adds a squad leader at the end (index = num_packs * PACK_SIZE).
+    """
+    pack_total = num_packs * PACK_SIZE
+    # Add squad leader when we have a full squad (2+ packs)
+    total = pack_total + 1 if num_packs >= 2 else pack_total
     blue = [f"blue_{i}" for i in range(total)]
     red = [f"red_{i}" for i in range(total)]
     return blue, red
 
 
-def _roster_for_index(i: int) -> str:
-    # Pack structure (5 mechs): 1 Heavy, 2 Medium, 1 Light, 1 Scout
+def _roster_for_index(i: int, num_packs: int) -> str:
+    """Assign mech class based on position in pack/squad.
+
+    Pack structure (6 mechs):
+      - idx 0: Scout (recon, painting)
+      - idx 1: Light (flanker)
+      - idx 2, 3: Medium (line infantry)
+      - idx 4: Heavy (fire support)
+      - idx 5: Pack Leader (light chassis, command suite)
+
+    Squad structure (13 mechs):
+      - Pack 0: indices 0-5
+      - Pack 1: indices 6-11
+      - Squad Leader: index 12 (medium chassis, squad command suite)
+    """
+    from ..constants import (
+        PACK_HEAVY_IDX,
+        PACK_LEADER_IDX,
+        PACK_LIGHT_IDX,
+        PACK_MEDIUM_A_IDX,
+        PACK_MEDIUM_B_IDX,
+        PACK_SCOUT_IDX,
+    )
+
+    total_in_packs = num_packs * PACK_SIZE
+
+    # Squad leader is the last mech when we have 2+ packs
+    if num_packs >= 2 and i == total_in_packs:
+        return "medium"  # Squad leader chassis
+
     idx_in_pack = i % PACK_SIZE
-    if idx_in_pack == 0:
-        return "heavy"
-    elif idx_in_pack <= 2:  # 1, 2
-        return "medium"
-    elif idx_in_pack == 3:
-        return "light"
-    else:
+
+    if idx_in_pack == PACK_SCOUT_IDX:
         return "scout"
+    elif idx_in_pack == PACK_LIGHT_IDX:
+        return "light"
+    elif idx_in_pack in (PACK_MEDIUM_A_IDX, PACK_MEDIUM_B_IDX):
+        return "medium"
+    elif idx_in_pack == PACK_HEAVY_IDX:
+        return "heavy"
+    elif idx_in_pack == PACK_LEADER_IDX:
+        return "light"  # Pack leader chassis
+    else:
+        return "medium"  # Fallback
+
+
+def _command_role_for_index(i: int, num_packs: int) -> str | None:
+    """Return command role if this index is a command mech, else None.
+
+    Returns:
+        "pack_leader" - Can issue orders to pack members, sees pack sensors
+        "squad_leader" - Can issue orders to anyone, sees full squad telemetry
+        None - Regular line mech
+    """
+    from ..constants import PACK_LEADER_IDX
+
+    total_in_packs = num_packs * PACK_SIZE
+
+    # Squad leader (when we have 2+ packs)
+    if num_packs >= 2 and i == total_in_packs:
+        return "squad_leader"
+
+    # Pack leader (last position in each pack)
+    if i % PACK_SIZE == PACK_LEADER_IDX:
+        return "pack_leader"
+
+    return None
 
 
 class EchelonEnv:
@@ -157,18 +220,31 @@ class EchelonEnv:
     - filter (1 float): >0 selects hostile-only contacts
     """
 
-    CONTACT_SLOTS = 5
+    # Maximum contact slots (global cap for array allocation).
+    # Each suite fills a subset based on visual_contact_slots.
+    # Scout=20, Light=10, Medium=8, Heavy=5.
+    MAX_CONTACT_SLOTS = 20
+    CONTACT_SLOTS = MAX_CONTACT_SLOTS  # Alias for backwards compatibility
+
     # rel(3) + rel_vel(3) + yaw(2) + hp/heat(2) + stab/fallen/legged(3)
     # + relation_onehot(3) + class_onehot(4) + painted(1) + visible(1) + lead_pitch(1)
     # + closing_rate(1) + crossing_angle(1) = 25
     CONTACT_DIM = 25
 
+    # Received order observation dimensions
+    # order_type(6) + time(1) + target_pos(3) + progress(1) + override(6) + flags(3) = 20
+    ORDER_OBS_DIM = 20
+
+    # Panel stats dimensions (compensates for mean pooling losing count information)
+    # contact_count + intel + order + squad + threat + friendly + alert + detail = 8
+    PANEL_STATS_DIM = 8
+
     BASE_ACTION_DIM = ACTION_DIM_CONST
     OBS_SORT_DIM = 3
     OBS_CTRL_DIM = OBS_SORT_DIM + 1  # + hostile-only filter
 
-    # Target selection preferences (argmax selects one of the CONTACT_SLOTS from the last obs).
-    TARGET_DIM = CONTACT_SLOTS
+    # Target selection preferences (argmax selects one of the MAX_CONTACT_SLOTS from the last obs).
+    TARGET_DIM = MAX_CONTACT_SLOTS
     TARGET_START = BASE_ACTION_DIM
 
     # Observation selection controls (applies to the next returned obs).
@@ -177,6 +253,21 @@ class EchelonEnv:
     # Optional pack comm message tail.
     COMM_START = OBS_CTRL_START + OBS_CTRL_DIM
 
+    # Command actions (for pack/squad leaders to issue orders).
+    # Layout: [order_type(6), recipient(6), param(5)] = 17 dims
+    # Non-command mechs ignore these dimensions.
+    CMD_ORDER_TYPE_START = -1  # Set in __init__ based on comm_dim
+    CMD_RECIPIENT_START = -1
+    CMD_PARAM_START = -1
+
+    # Status report actions (for subordinates reporting to command).
+    # Layout: [acknowledge(1), override(6), progress(1), flags(3)] = 11 dims
+    # Command mechs ignore these dimensions.
+    STATUS_ACK_START = -1  # Set in __init__
+    STATUS_OVERRIDE_START = -1
+    STATUS_PROGRESS_START = -1
+    STATUS_FLAGS_START = -1
+
     # Ego-centric local occupancy map (bool footprint) around the mech.
     LOCAL_MAP_R = 5
     LOCAL_MAP_SIZE = 2 * LOCAL_MAP_R + 1
@@ -184,8 +275,22 @@ class EchelonEnv:
 
     def __init__(self, config: EnvConfig):
         self.config = config
+        self.num_packs = config.num_packs
         self.comm_dim = int(max(0, config.comm_dim))
-        self.ACTION_DIM = int(self.COMM_START + self.comm_dim)
+
+        # Command action layout comes after comm
+        self.CMD_ORDER_TYPE_START = self.COMM_START + self.comm_dim
+        self.CMD_RECIPIENT_START = self.CMD_ORDER_TYPE_START + ORDER_TYPE_DIM
+        self.CMD_PARAM_START = self.CMD_RECIPIENT_START + ORDER_RECIPIENT_DIM
+
+        # Status report action layout comes after command actions
+        self.STATUS_ACK_START = self.CMD_PARAM_START + ORDER_PARAM_DIM
+        self.STATUS_OVERRIDE_START = self.STATUS_ACK_START + STATUS_ACKNOWLEDGE_DIM
+        self.STATUS_PROGRESS_START = self.STATUS_OVERRIDE_START + STATUS_OVERRIDE_DIM
+        self.STATUS_FLAGS_START = self.STATUS_PROGRESS_START + STATUS_PROGRESS_DIM
+
+        # Total action dimension includes command + status report actions
+        self.ACTION_DIM = int(self.STATUS_FLAGS_START + STATUS_FLAGS_DIM)
         self.mech_classes = default_mech_classes()
 
         self.rng = np.random.default_rng(config.seed)
@@ -195,7 +300,11 @@ class EchelonEnv:
         self._last_reset_seed: int | None = None
         self._spawn_clear: int | None = None
 
-        self.blue_ids, self.red_ids = _team_ids(config.num_packs)
+        # Per-team formation modes (for curriculum/randomization)
+        # None = use config.formation_mode, otherwise overrides it
+        self._team_formations: dict[str, FormationMode | None] = {"blue": None, "red": None}
+
+        self.blue_ids, self.red_ids = _team_ids(self.num_packs)
         self.possible_agents = [*self.blue_ids, *self.red_ids]
         self.agents = list(self.possible_agents)
 
@@ -230,11 +339,19 @@ class EchelonEnv:
         self._prev_fallen: dict[str, bool] = {}
         self._prev_legged: dict[str, bool] = {}
         self._prev_shutdown: dict[str, bool] = {}
+        self._ever_in_zone: dict[str, bool] = {}  # Per-agent tracking for arrival bonus
 
         # Navigation Graph (Built once per reset)
         self.nav_graph: NavGraph | None = None
         self._cached_paths: dict[str, list[NodeID]] = {}
         self._path_update_tick: dict[str, int] = {}
+
+        # Combat Suite assignments (determines observation richness per mech)
+        self._mech_suites: dict[str, CombatSuiteSpec] = {}
+
+        # Command hierarchy: maps command mech ID -> list of subordinate IDs
+        # Populated during reset() when suites are assigned
+        self._subordinates: dict[str, list[str]] = {}
 
         # Performance caches (MED-11, MED-12): Static terrain data computed once at reset
         self._cached_telemetry: np.ndarray | None = None
@@ -253,6 +370,75 @@ class EchelonEnv:
             self.observation_space = None
             self.action_space = None
 
+        # Reward computation (extracted for curriculum integration)
+        self._reward_weights = RewardWeights(
+            shaping_gamma=config.shaping_gamma,
+            team_reward_alpha=config.team_reward_alpha,
+        )
+        self._reward_computer = RewardComputer(self._reward_weights)
+
+        # Observation building (extracted for testability and curriculum integration)
+        self._obs_builder = ObservationBuilder(
+            config=self.config,
+            max_contact_slots=self.MAX_CONTACT_SLOTS,
+            contact_dim=self.CONTACT_DIM,
+            local_map_r=self.LOCAL_MAP_R,
+            comm_dim=self.comm_dim,
+        )
+
+    def get_team_formation(self, team: str) -> FormationMode:
+        """Get formation mode for a team.
+
+        Args:
+            team: "blue" or "red"
+
+        Returns:
+            Team's formation mode (override or config default)
+        """
+        override = self._team_formations.get(team)
+        if override is not None:
+            return override
+        return self.config.formation_mode
+
+    def get_agent_formation(self, agent_id: str) -> FormationMode:
+        """Get formation mode for an agent based on their team."""
+        team = "blue" if agent_id.startswith("blue") else "red"
+        return self.get_team_formation(team)
+
+    def get_zone_ticks(self) -> dict[str, int]:
+        """Get zone control ticks for each team.
+
+        Returns:
+            Dict with 'blue' and 'red' keys containing zone tick counts.
+        """
+        return {
+            "blue": int(self._episode_stats.get("zone_ticks_blue", 0)),
+            "red": int(self._episode_stats.get("zone_ticks_red", 0)),
+        }
+
+    @property
+    def formation_mode(self) -> FormationMode:
+        """Blue team's formation mode (for backwards compatibility)."""
+        return self.get_team_formation("blue")
+
+    def set_formation_mode(self, mode: FormationMode, team: str | None = None) -> None:
+        """Set formation mode override for curriculum training.
+
+        Args:
+            mode: Formation mode to use
+            team: "blue", "red", or None for both teams
+        """
+        if team is None:
+            self._team_formations["blue"] = mode
+            self._team_formations["red"] = mode
+        else:
+            self._team_formations[team] = mode
+
+    def randomize_formations(self) -> None:
+        """Randomize formation modes for both teams independently."""
+        self._team_formations["blue"] = FormationMode(int(self.rng.integers(0, 3)))
+        self._team_formations["red"] = FormationMode(int(self.rng.integers(0, 3)))
+
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, dict]]:
         if seed is not None:
             self.rng = np.random.default_rng(seed)
@@ -265,6 +451,10 @@ class EchelonEnv:
         self.last_outcome = None
         self.team_zone_score = {"blue": 0.0, "red": 0.0}
         self.zone_score_to_win = float(self.config.max_episode_seconds * 0.5)
+
+        # Randomize formations if enabled (per-team independent random)
+        if self.config.random_formations:
+            self.randomize_formations()
         self._max_team_hp = {"blue": 0.0, "red": 0.0}
         self._episode_stats = {
             "kills_blue": 0.0,
@@ -277,6 +467,8 @@ class EchelonEnv:
             "laser_hits_red": 0.0,
             "missile_launches_blue": 0.0,
             "missile_launches_red": 0.0,
+            "paint_lock_uses_blue": 0.0,  # Missiles fired using teammate paint locks
+            "paint_lock_uses_red": 0.0,
             "kinetic_fires_blue": 0.0,
             "kinetic_fires_red": 0.0,
             "ams_intercepts_blue": 0.0,
@@ -293,10 +485,39 @@ class EchelonEnv:
             "bad_actions_red": 0.0,
             "bad_obs_blue": 0.0,
             "bad_obs_red": 0.0,
+            # Zone control metrics
+            "zone_ticks_blue": 0.0,
+            "zone_ticks_red": 0.0,
+            "contested_ticks": 0.0,
+            "first_zone_entry_step": -1.0,  # -1 means never entered
+            # Coordination metrics
+            "pack_dispersion_sum": 0.0,
+            "pack_dispersion_count": 0.0,
+            "centroid_zone_dist_sum": 0.0,
+            "centroid_zone_dist_count": 0.0,
+            "focus_fire_concentration": 0.0,
+            # Perception metrics
+            "visible_contacts_sum": 0.0,
+            "visible_contacts_count": 0.0,
+            "hostile_filter_on_count": 0.0,
+            # EWAR usage metrics (lights have ECM/ECCM since 2025-12-27)
+            "ecm_on_ticks": 0.0,
+            "eccm_on_ticks": 0.0,
+            "light_ticks": 0.0,  # ECM/ECCM is on Light now, not Scout
+            # Paint effectiveness metrics (2025-12-28)
+            # painted_target_attacks: when team attacks a painted target
+            # paint_enabled_damage: damage dealt to painted targets
+            "painted_target_attacks_blue": 0.0,
+            "painted_target_attacks_red": 0.0,
+            "paint_enabled_damage_blue": 0.0,
+            "paint_enabled_damage_red": 0.0,
         }
+        self._damage_by_target: dict[str, float] = {}  # target_id -> damage received
+        self._paint_used_this_step: dict[str, int] = {}  # For observation feedback
         self._prev_fallen = {}
         self._prev_legged = {}
         self._prev_shutdown = {}
+        self._ever_in_zone = {}  # Reset per-agent zone entry tracking
 
         self._cached_paths = {}
         self._path_update_tick = {}
@@ -418,10 +639,14 @@ class EchelonEnv:
 
         zone_cx, zone_cy, _ = capture_zone_params(world.meta, size_x=world.size_x, size_y=world.size_y)
         mechs: dict[str, MechState] = {}
+        self._mech_suites = {}  # Reset suite assignments
         for team, ids in (("blue", self.blue_ids), ("red", self.red_ids)):
             for i, mech_id in enumerate(ids):
-                cls_name = _roster_for_index(i)
+                cls_name = _roster_for_index(i, self.num_packs)
+                command_role = _command_role_for_index(i, self.num_packs)
                 spec = self.mech_classes[cls_name]
+                # Assign combat suite based on class and command role
+                self._mech_suites[mech_id] = get_suite_for_role(cls_name, command_role)
                 hs = np.asarray(spec.size_voxels, dtype=np.float32) * 0.5
 
                 corner = spawn_corners[team]
@@ -463,6 +688,25 @@ class EchelonEnv:
                 )
                 mechs[mech_id] = mech
                 self._max_team_hp[team] += float(spec.hp)
+
+        # Build command hierarchy: map command mechs to their subordinates
+        self._subordinates = {}
+        for _team, ids in (("blue", self.blue_ids), ("red", self.red_ids)):
+            for i, mech_id in enumerate(ids):
+                suite = self._mech_suites[mech_id]
+                if suite.issues_orders:
+                    if suite.order_scope == "pack":
+                        # Pack leader: subordinates are pack members (excluding self)
+                        pack_idx = i // PACK_SIZE
+                        pack_start = pack_idx * PACK_SIZE
+                        pack_end = min(pack_start + PACK_SIZE, len(ids))
+                        self._subordinates[mech_id] = [
+                            aid for aid in ids[pack_start:pack_end] if aid != mech_id
+                        ]
+                    elif suite.order_scope == "squad":
+                        # Squad leader: subordinates are all pack leaders in the squad
+                        pack_leaders = [aid for aid in ids if self._mech_suites[aid].order_scope == "pack"]
+                        self._subordinates[mech_id] = pack_leaders
 
         sim = Sim(world=world, dt_sim=self.config.dt_sim, rng=rng_sim)
         sim.reset(mechs)
@@ -543,581 +787,151 @@ class EchelonEnv:
             hp[m.team] += max(0.0, float(m.hp)) if m.alive else 0.0
         return hp
 
-    def _contact_features(
-        self,
-        viewer: MechState,
-        other: MechState,
-        *,
-        relation: str,
-        painted_by_pack: bool,
-    ) -> np.ndarray:
-        world = self.world
-        assert world is not None
-
-        feat = np.zeros(self.CONTACT_DIM, dtype=np.float32)
-
-        rel = (other.pos - viewer.pos).astype(np.float32, copy=False)
-        max_dim = float(max(world.size_x, world.size_y, world.size_z))
-        rel /= max(1e-6, max_dim)
-        rel_vel = (other.vel - viewer.vel).astype(np.float32, copy=False) / 10.0
-
-        yaw_sin = float(math.sin(other.yaw))
-        yaw_cos = float(math.cos(other.yaw))
-        hp_norm = float(np.clip(other.hp / max(1.0, other.spec.hp), 0.0, 1.0))
-        heat_norm = float(np.clip(other.heat / max(1.0, other.spec.heat_cap), 0.0, 2.0))
-        stab_norm = float(np.clip(other.stability / max(1.0, other.max_stability), 0.0, 1.0))
-        fallen = 1.0 if other.fallen_time > 0.0 else 0.0
-        is_legged = 1.0 if other.is_legged else 0.0
-
-        rel_onehot = np.zeros(3, dtype=np.float32)
-        if relation == "friendly":
-            rel_onehot[0] = 1.0
-        elif relation == "hostile":
-            rel_onehot[1] = 1.0
-        elif relation == "neutral":
-            rel_onehot[2] = 1.0
-        else:
-            raise ValueError(f"Unknown relation: {relation!r}")
-
-        cls = other.spec.name
-        class_onehot = np.zeros(4, dtype=np.float32)
-        if cls == "scout":
-            class_onehot[0] = 1.0
-        elif cls == "light":
-            class_onehot[1] = 1.0
-        elif cls == "medium":
-            class_onehot[2] = 1.0
-        elif cls == "heavy":
-            class_onehot[3] = 1.0
-
-        feat[0:3] = rel
-        feat[3:6] = rel_vel
-        feat[6:8] = np.asarray([yaw_sin, yaw_cos], dtype=np.float32)
-        feat[8:10] = np.asarray([hp_norm, heat_norm], dtype=np.float32)
-        feat[10:13] = np.asarray([stab_norm, fallen, is_legged], dtype=np.float32)
-        feat[13:16] = rel_onehot
-        feat[16:20] = class_onehot
-        feat[20] = 1.0 if painted_by_pack else 0.0
-        feat[21] = 1.0  # visible
-
-        # lead_pitch: Suggested pitch for a ballistic hit (Gauss speed 40vox/s)
-        # pitch = atan2(dz + drop, dist_xy)
-        # Normalized to roughly [-1, 1] range.
-        GAUSS_SPEED = 40.0
-        dist_xy = float(math.hypot(rel[0], rel[1])) * max_dim
-        if dist_xy > 0.1:
-            dz = rel[2] * max_dim
-            flight_time = dist_xy / GAUSS_SPEED
-            g = 9.81 / world.voxel_size_m
-            drop = 0.5 * g * (flight_time**2)
-            pitch = math.atan2(dz + drop, dist_xy)
-            feat[22] = float(np.clip(pitch / (math.pi / 4), -1.0, 1.0))
-        else:
-            feat[22] = 0.0
-
-        # Closing rate: positive = approaching, negative = separating
-        # Helps agents predict interception timing
-        rel_vec_raw = other.pos - viewer.pos
-        rel_vel_raw = other.vel - viewer.vel
-        dist = float(np.linalg.norm(rel_vec_raw))
-        if dist > 0.1:
-            # Rate of change of distance (negative dot product = closing)
-            closing = float(-np.dot(rel_vel_raw, rel_vec_raw) / dist)
-            feat[23] = float(np.clip(closing / 10.0, -1.0, 1.0))
-        else:
-            feat[23] = 0.0
-
-        # Crossing angle: 0 = moving parallel to LOS, 1 = moving perpendicular
-        # Perpendicular targets are harder to hit with projectiles
-        other_speed = float(np.linalg.norm(other.vel))
-        if dist > 0.1 and other_speed > 0.5:
-            los_dir = rel_vec_raw / dist
-            vel_dir = other.vel / other_speed
-            cos_angle = float(np.dot(los_dir, vel_dir))
-            feat[24] = 1.0 - abs(cos_angle)  # 0 = parallel, 1 = perpendicular
-        else:
-            feat[24] = 0.0
-
-        return feat
-
-    def _ewar_levels(self, viewer: MechState) -> tuple[float, float, float]:
-        """
-        Returns (sensor_quality, jam_level, eccm_level).
-
-        - jam_level/eccm_level are in [0, 1] based on strongest nearby sources.
-        - sensor_quality is clipped to [SENSOR_QUALITY_MIN, SENSOR_QUALITY_MAX].
-        """
+    def _compute_pack_dispersion(self, team: str) -> float:
+        """Compute mean pairwise distance between pack members."""
         sim = self.sim
-        assert sim is not None
+        if sim is None:
+            return 0.0
 
-        if not viewer.alive or viewer.shutdown:
-            return float(SENSOR_QUALITY_MIN), 0.0, 0.0
+        ids = self.blue_ids if team == "blue" else self.red_ids
+        positions: list[np.ndarray] = []
+        for mid in ids:
+            m = sim.mechs.get(mid)
+            if m is not None and m.alive:
+                positions.append(m.pos[:2])  # XY only
 
-        jam = 0.0
-        eccm = 0.0
-        for other in sim.mechs.values():
-            if not other.alive or other.mech_id == viewer.mech_id:
-                continue
-            if other.shutdown:
-                continue
+        if len(positions) < 2:
+            return 0.0
 
-            d = other.pos - viewer.pos
-            dist = float(np.linalg.norm(d))
-            if other.team != viewer.team and other.ecm_on and dist <= ECM_RADIUS_VOX:
-                jam = max(jam, max(0.0, 1.0 - dist / max(1e-6, float(ECM_RADIUS_VOX))))
-            if other.team == viewer.team and other.eccm_on and dist <= ECCM_RADIUS_VOX:
-                eccm = max(eccm, max(0.0, 1.0 - dist / max(1e-6, float(ECCM_RADIUS_VOX))))
+        # Mean pairwise distance
+        total_dist = 0.0
+        count = 0
+        for i, p1 in enumerate(positions):
+            for p2 in positions[i + 1 :]:
+                total_dist += float(np.linalg.norm(p1 - p2))
+                count += 1
 
-        sensor_quality = 1.0 - float(ECM_WEIGHT) * jam + float(ECCM_WEIGHT) * eccm
-        sensor_quality = float(np.clip(sensor_quality, float(SENSOR_QUALITY_MIN), float(SENSOR_QUALITY_MAX)))
-        return sensor_quality, float(jam), float(eccm)
-
-    def _local_map(self, viewer: MechState) -> np.ndarray:
-        world = self.world
-        assert world is not None
-
-        r = int(self.LOCAL_MAP_R)
-        size = 2 * r + 1
-
-        # MED-12: Use cached occupancy_2d (computed once at reset)
-        occupancy_2d = self._cached_occupancy_2d
-        assert occupancy_2d is not None
-
-        yaw = float(viewer.yaw)
-        c, s = math.cos(yaw), math.sin(yaw)
-
-        # Create grid of (fwd, right) relative offsets
-        fwd_grid, right_grid = np.meshgrid(np.arange(-r, r + 1), np.arange(-r, r + 1), indexing="ij")
-
-        # Rotate grid to world XY
-        dx = c * fwd_grid - s * right_grid
-        dy = s * fwd_grid + c * right_grid
-
-        # World coordinates
-        wx = (viewer.pos[0] + dx).astype(np.int32)
-        wy = (viewer.pos[1] + dy).astype(np.int32)
-
-        # Mask for in-bounds
-        mask = (wx >= 0) & (wx < world.size_x) & (wy >= 0) & (wy < world.size_y)
-
-        out = np.ones((size, size), dtype=np.float32)
-        # Only sample if in bounds, otherwise leave as 1.0 (solid)
-        out[mask] = occupancy_2d[wy[mask], wx[mask]].astype(np.float32)
-
-        return out.reshape(-1)
+        return total_dist / max(count, 1)
 
     def _obs(self) -> dict[str, np.ndarray]:
-        sim = self.sim
-        world = self.world
-        assert sim is not None and world is not None
-
-        base_radar_range = 14.0
-        zone_cx, zone_cy, zone_r = capture_zone_params(world.meta, size_x=world.size_x, size_y=world.size_y)
-        max_xy = float(max(world.size_x, world.size_y))
-        zone_r_norm = float(np.clip(zone_r / max(1.0, max_xy), 0.0, 1.0))
-
-        in_zone_tonnage: dict[str, float] = {"blue": 0.0, "red": 0.0}
-        for m in sim.mechs.values():
-            if not m.alive:
-                continue
-            dist = float(math.hypot(float(m.pos[0] - zone_cx), float(m.pos[1] - zone_cy)))
-            if dist < zone_r:
-                in_zone_tonnage[m.team] += float(m.spec.tonnage)
-
-        total_tonnage = in_zone_tonnage["blue"] + in_zone_tonnage["red"]
-        if total_tonnage > 0:
-            zone_control = (in_zone_tonnage["blue"] - in_zone_tonnage["red"]) / total_tonnage
-        else:
-            zone_control = 0.0
-
-        time_frac = float(
-            np.clip(float(sim.time_s) / max(1e-6, float(self.config.max_episode_seconds)), 0.0, 1.0)
-        )
-        los_cache: dict[tuple[str, str], bool] = {}
-        smoke_cache: dict[tuple[str, str], bool] = {}
-
-        def _cached_los(a: str, b: str, a_pos: np.ndarray, b_pos: np.ndarray) -> bool:
-            key = (a, b) if a < b else (b, a)
-            if key in los_cache:
-                return los_cache[key]
-            ok = bool(sim.has_los(a_pos, b_pos))
-            los_cache[key] = ok
-            return ok
-
-        def _cached_smoke_los(a: str, b: str, a_pos: np.ndarray, b_pos: np.ndarray) -> bool:
-            key = (a, b) if a < b else (b, a)
-            if key in smoke_cache:
-                return smoke_cache[key]
-            ok = bool(sim.has_smoke_los(a_pos, b_pos))
-            smoke_cache[key] = ok
-            return ok
-
-        # MED-11: Use cached telemetry (computed once at reset)
-        telemetry_flat = self._cached_telemetry
-        assert telemetry_flat is not None
-
-        reserved = {"friendly": 3, "hostile": 1, "neutral": 1}
-        repurpose_priority = ["hostile", "friendly", "neutral"]
-
-        obs: dict[str, np.ndarray] = {}
-        for aid in self.agents:
-            viewer = sim.mechs[aid]
-            if not viewer.alive:
-                obs[aid] = np.zeros(self._obs_dim(), dtype=np.float32)
-                self._last_contact_slots[aid] = [None] * self.CONTACT_SLOTS
-                continue
-
-            pack_ids = self._packmates.get(aid, [])
-            sort_mode = int(self._contact_sort_mode.get(aid, 0))
-            hostile_only = bool(self._contact_filter_hostile.get(aid, False))
-
-            sensor_quality, jam_level, _eccm_level = self._ewar_levels(viewer)
-            radar_range = float(base_radar_range) * float(sensor_quality)
-
-            # Acoustic Sensing: Total intensity from 4 relative quadrants
-            # Optimization: could be vectorized across all 'other' mechs.
-            acoustic_intensities = np.zeros(4, dtype=np.float32)
-
-            # Pre-calculate positions and noise for all alive mechs once per _obs call if needed,
-            # but for now let's just make the inner loop tighter.
-            for other_id in self.possible_agents:
-                if other_id == aid:
-                    continue
-                other = sim.mechs[other_id]
-                if not other.alive or other.noise_level <= 0:
-                    continue
-
-                delta = other.pos - viewer.pos
-                dist_sq = float(np.dot(delta, delta))
-
-                # Inverse square law (clamped)
-                intensity = other.noise_level / (1.0 + dist_sq)
-
-                # Attenuation by terrain
-                if not _cached_los(aid, other_id, viewer.pos, other.pos):
-                    intensity *= 0.20  # 80% loss through walls
-
-                # Determine relative quadrant
-                # Use atan2 and wrap_pi
-                angle = _wrap_pi(math.atan2(float(delta[1]), float(delta[0])) - float(viewer.yaw))
-                if angle >= 0:  # Left side
-                    q = 0 if angle < 1.570796 else 2  # Front-Left vs Rear-Left
-                else:  # Right side
-                    q = 1 if angle > -1.570796 else 3  # Front-Right vs Rear-Right
-                acoustic_intensities[q] += float(intensity)
-
-            # Normalize acoustic intensities (Log scaling to keep in [0, 1] range roughly)
-            acoustic_intensities = (np.log1p(acoustic_intensities) / 5.0).astype(
-                np.float32
-            )  # 5.0 is approx ln(150)
-
-            # Top-K contact table (fixed size).
-            # Structure: (sort_key, dist, other_id, painted_by_pack)
-            # sort_key can be tuple[float] | tuple[int, float] | tuple[float, float]
-            contacts: dict[str, list[tuple[tuple[float, ...] | tuple[int, float], float, str, bool]]] = {
-                "friendly": [],
-                "hostile": [],
-                "neutral": [],
-            }
-            for other_id in self.possible_agents:
-                if other_id == aid:
-                    continue
-                other = sim.mechs[other_id]
-                if not other.alive:
-                    continue
-
-                delta = other.pos - viewer.pos
-                dist = float(np.linalg.norm(delta))
-
-                painted_by_pack = bool(
-                    other.painted_remaining > 0.0
-                    and other.last_painter_id is not None
-                    and other.last_painter_id in pack_ids
-                )
-
-                if self.config.observation_mode == "full":
-                    visible = True
-                else:
-                    smoke_ok = _cached_smoke_los(aid, other_id, viewer.pos, other.pos)
-                    painted_visible = painted_by_pack and (sensor_quality >= float(PAINT_LOCK_MIN_QUALITY))
-
-                    # Thermal Bloom: High-heat mechs leaked through terrain, but BLOCKED by smoke
-                    heat_bloom = ((other.heat / max(1.0, other.spec.heat_cap)) > 0.80) and smoke_ok
-
-                    # EWAR Emitters: visible through terrain, but BLOCKED by smoke
-                    ewar_bloom = (other.ecm_on or other.eccm_on) and smoke_ok
-
-                    if (
-                        painted_visible
-                        or dist <= radar_range
-                        or (heat_bloom and other.team != viewer.team)
-                        or (ewar_bloom and other.team != viewer.team)
-                    ):
-                        visible = True
-                    else:
-                        visible = _cached_los(aid, other_id, viewer.pos, other.pos)
-
-                if not visible:
-                    continue
-
-                relation = "friendly" if other.team == viewer.team else "hostile"
-                if sort_mode == 0:
-                    key: tuple[float, ...] | tuple[int, float] = (dist,)
-                elif sort_mode == 1:
-                    cls_rank = {"scout": 1, "light": 1, "medium": 2, "heavy": 3}.get(other.spec.name, 0)
-                    key = (-cls_rank, dist)
-                elif sort_mode == 2:
-                    hp_norm = float(np.clip(other.hp / max(1.0, other.spec.hp), 0.0, 1.0))
-                    key = (hp_norm, dist)
-                else:
-                    key = (dist,)
-                contacts[relation].append((key, dist, other_id, painted_by_pack))
-
-            for rel in contacts:
-                contacts[rel].sort(key=lambda t: t[0])
-
-            selected: list[tuple[str, str, bool]] = []
-            used_counts = {"friendly": 0, "hostile": 0, "neutral": 0}
-
-            if hostile_only:
-                reserved_local = {"friendly": 0, "hostile": self.CONTACT_SLOTS, "neutral": 0}
-                repurpose_local = ["hostile"]
-            else:
-                reserved_local = reserved
-                repurpose_local = repurpose_priority
-
-            # Fill reserved slots by category.
-            for rel in ("friendly", "hostile", "neutral"):
-                take = min(int(reserved_local[rel]), len(contacts[rel]))
-                for i in range(take):
-                    _, _, oid, painted = contacts[rel][i]
-                    selected.append((rel, oid, painted))
-                used_counts[rel] += take
-
-            # Repurpose any unused slots based on priority.
-            while len(selected) < self.CONTACT_SLOTS:
-                filled = False
-                for rel in repurpose_local:
-                    i = used_counts[rel]
-                    if i < len(contacts[rel]):
-                        _, _, oid, painted = contacts[rel][i]
-                        selected.append((rel, oid, painted))
-                        used_counts[rel] += 1
-                        filled = True
-                        break
-                if not filled:
-                    break
-
-            contact_feats = np.zeros((self.CONTACT_SLOTS, self.CONTACT_DIM), dtype=np.float32)
-            for i, (rel, oid, painted) in enumerate(selected[: self.CONTACT_SLOTS]):
-                contact_feats[i, :] = self._contact_features(
-                    viewer, sim.mechs[oid], relation=rel, painted_by_pack=painted
-                )
-
-            slot_ids: list[str | None] = [None] * self.CONTACT_SLOTS
-            for i, (_, oid, _) in enumerate(selected[: self.CONTACT_SLOTS]):
-                slot_ids[i] = oid
-            self._last_contact_slots[aid] = slot_ids
-
-            parts: list[np.ndarray] = []
-            parts.append(contact_feats.reshape(-1))
-
-            # Pack-local comms (1-step delayed); flattened [PACK_SIZE * comm_dim].
-            if self.comm_dim > 0:
-                comm = np.zeros((PACK_SIZE, self.comm_dim), dtype=np.float32)
-                for i, pid in enumerate(pack_ids[:PACK_SIZE]):
-                    if not sim.mechs[pid].alive:
-                        continue
-                    msg = self._comm_last.get(pid)
-                    if msg is None:
-                        continue
-                    comm[i, :] = msg
-                parts.append(comm.reshape(-1))
-
-            # Ego-centric local map (footprint occupancy).
-            parts.append(self._local_map(viewer))
-
-            # Global satellite telemetry (downsampled 2D solid map).
-            parts.append(telemetry_flat)
-
-            # Extra per-agent scalars.
-            targeted = 1.0 if self._is_targeted(viewer) else 0.0
-            under_fire = 1.0 if viewer.was_hit else 0.0
-            painted_flag = 1.0 if viewer.painted_remaining > 0.0 else 0.0
-            shutdown = 1.0 if viewer.shutdown else 0.0
-            crit_heat = 1.0 if (viewer.heat / max(1.0, viewer.spec.heat_cap)) > 0.85 else 0.0
-
-            # Continuous self-state for heat/damage management (policy needs these to learn
-            # proper vent timing and risk assessment, not just binary flags).
-            self_hp_norm = float(np.clip(viewer.hp / max(1.0, viewer.spec.hp), 0.0, 1.0))
-            self_heat_norm = float(np.clip(viewer.heat / max(1.0, viewer.spec.heat_cap), 0.0, 2.0))
-            # Heat headroom: how much heat budget remains before capacity (1.0 = cool, 0.0 = at cap)
-            heat_headroom = float(
-                np.clip((viewer.spec.heat_cap - viewer.heat) / max(1.0, viewer.spec.heat_cap), 0.0, 1.0)
-            )
-            # Stability risk: how close to knockdown (0.0 = stable, 1.0 = about to fall)
-            stability_risk = float(
-                np.clip(1.0 - (viewer.stability / max(1.0, viewer.max_stability)), 0.0, 1.0)
-            )
-
-            # Damage direction: where recent damage came from (in local frame)
-            # Enables evasive maneuver learning
-            if viewer.last_damage_dir is not None:
-                # Rotate to local frame (viewer-relative)
-                cos_y, sin_y = math.cos(-viewer.yaw), math.sin(-viewer.yaw)
-                dx = float(viewer.last_damage_dir[0])
-                dy = float(viewer.last_damage_dir[1])
-                damage_dir_local = np.array(
-                    [dx * cos_y - dy * sin_y, dx * sin_y + dy * cos_y, float(viewer.last_damage_dir[2])],
-                    dtype=np.float32,
-                )
-            else:
-                damage_dir_local = np.zeros(3, dtype=np.float32)
-
-            incoming_missile = 0.0
-            for p in sim.projectiles:
-                if not p.alive:
-                    continue
-                if p.weapon != MISSILE.name:
-                    continue
-                if p.guidance != "homing":
-                    continue
-                if p.target_id == viewer.mech_id:
-                    incoming_missile = 1.0
-                    break
-
-            sensor_quality_norm = float(np.clip(sensor_quality / float(SENSOR_QUALITY_MAX), 0.0, 1.0))
-            jam_norm = float(np.clip(jam_level, 0.0, 1.0))
-
-            ecm_on = 1.0 if (viewer.ecm_on and (not viewer.shutdown)) else 0.0
-            eccm_on = 1.0 if (viewer.eccm_on and (not viewer.shutdown)) else 0.0
-            suppressed_norm = float(
-                np.clip(viewer.suppressed_time / max(1e-6, float(SUPPRESS_DURATION_S)), 0.0, 1.0)
-            )
-            ams_cd_norm = float(np.clip(viewer.ams_cooldown / max(1e-6, float(AMS_COOLDOWN_S)), 0.0, 1.0))
-
-            # Self kinematics (needed for jump jets and movement control).
-            if viewer.shutdown:
-                self_vel = np.zeros(3, dtype=np.float32)
-            else:
-                self_vel = (viewer.vel / 10.0).astype(np.float32, copy=False)
-
-            # Ability cooldowns (normalized to each weapon's actual max cooldown).
-            laser_cd = float(np.clip(viewer.laser_cooldown / LASER.cooldown_s, 0.0, 1.0))
-            missile_cd = float(np.clip(viewer.missile_cooldown / MISSILE.cooldown_s, 0.0, 1.0))
-            kinetic_cd = float(np.clip(viewer.kinetic_cooldown / GAUSS.cooldown_s, 0.0, 1.0))
-            painter_cd = float(np.clip(viewer.painter_cooldown / PAINTER.cooldown_s, 0.0, 1.0))
-
-            # Objective features (zone vector is in world frame).
-            in_zone = 0.0
-            dist_to_zone = float(math.hypot(float(viewer.pos[0] - zone_cx), float(viewer.pos[1] - zone_cy)))
-            if dist_to_zone < zone_r:
-                in_zone = 1.0
-            zone_rel = np.array([zone_cx, zone_cy, 0.0], dtype=np.float32) - viewer.pos
-            zone_rel /= max(1.0, max_xy)
-
-            # Team-relative objective score/control (so a policy can play as either team).
-            my_team = viewer.team
-            enemy_team = "red" if my_team == "blue" else "blue"
-            my_control = zone_control if my_team == "blue" else -zone_control
-            my_score = float(self.team_zone_score.get(my_team, 0.0))
-            enemy_score = float(self.team_zone_score.get(enemy_team, 0.0))
-            win_scale = max(1e-6, float(self.zone_score_to_win))
-            my_score_norm = float(np.clip(my_score / win_scale, 0.0, 1.0))
-            enemy_score_norm = float(np.clip(enemy_score / win_scale, 0.0, 1.0))
-
-            # Hull Type One-Hot: [scout, light, medium, heavy]
-            hull_map = {"scout": 0, "light": 1, "medium": 2, "heavy": 3}
-            hull_type = np.zeros(4, dtype=np.float32)
-            hull_idx = hull_map.get(viewer.spec.name)
-            if hull_idx is not None:
-                hull_type[hull_idx] = 1.0
-
-            parts.append(acoustic_intensities)
-            parts.append(hull_type)
-
-            parts.append(
-                np.asarray(
-                    [
-                        targeted,
-                        under_fire,
-                        painted_flag,
-                        shutdown,
-                        crit_heat,
-                        self_hp_norm,
-                        self_heat_norm,
-                        heat_headroom,
-                        stability_risk,
-                        damage_dir_local[0],
-                        damage_dir_local[1],
-                        damage_dir_local[2],
-                        incoming_missile,
-                        sensor_quality_norm,
-                        jam_norm,
-                        ecm_on,
-                        eccm_on,
-                        suppressed_norm,
-                        ams_cd_norm,
-                        self_vel[0],
-                        self_vel[1],
-                        self_vel[2],
-                        laser_cd,
-                        missile_cd,
-                        kinetic_cd,
-                        painter_cd,
-                        in_zone,
-                        zone_rel[0],
-                        zone_rel[1],
-                        zone_rel[2],
-                        zone_r_norm,
-                        my_control,
-                        my_score_norm,
-                        enemy_score_norm,
-                        time_frac,
-                        1.0 if sort_mode == 0 else 0.0,
-                        1.0 if sort_mode == 1 else 0.0,
-                        1.0 if sort_mode == 2 else 0.0,
-                        1.0 if hostile_only else 0.0,
-                    ],
-                    dtype=np.float32,
-                )
-            )
-            vec = np.concatenate(parts).astype(np.float32, copy=False)
-            if not np.all(np.isfinite(vec)):
-                vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
-                self._episode_stats[f"bad_obs_{viewer.team}"] = float(
-                    self._episode_stats.get(f"bad_obs_{viewer.team}", 0.0) + 1.0
-                )
-            obs[aid] = vec
-        return obs
+        """Build observations for all agents using ObservationBuilder."""
+        ctx = ObservationContext.from_env(self)
+        return self._obs_builder.build(ctx)
 
     def _obs_dim(self) -> int:
-        comm_dim = PACK_SIZE * int(max(0, self.config.comm_dim))
-        # self features =
-        #   acoustic_quadrants(4) + hull_type_onehot(4) +
-        #   targeted, under_fire, painted, shutdown, crit_heat, self_hp_norm, self_heat_norm,
-        #   heat_headroom, stability_risk, damage_dir_local(3), incoming_missile, sensor_quality,
-        #   jam_level, ecm_on, eccm_on, suppressed, ams_cd, self_vel(3), cooldowns(4), in_zone,
-        #   vec_to_zone(3), zone_radius, my_control, my_score, enemy_score, time_frac,
-        #   obs_sort_onehot(3), hostile_only = 47
-        self_dim = 47
-        telemetry_dim = 16 * 16
-        return (
-            self.CONTACT_SLOTS * self.CONTACT_DIM
-            + comm_dim
-            + int(self.LOCAL_MAP_DIM)
-            + telemetry_dim
-            + self_dim
-        )
+        """Return observation dimension (delegated to builder)."""
+        return self._obs_builder.obs_dim()
 
-    def _is_targeted(self, mech: MechState) -> bool:
-        sim = self.sim
-        world = self.world
-        assert sim is not None and world is not None
+    def _process_command_actions(self, act: dict[str, np.ndarray], sim: Sim) -> None:
+        """Process command actions from pack/squad leaders and issue orders to subordinates.
 
-        # Simple "someone has LOS to me and is in range".
-        # HIGH-12: Use spatial grid to query only nearby enemies
-        return any(sim.has_los(other.pos, mech.pos) for other in sim.enemies_in_range(mech, 8.0))
+        Command actions are only processed for mechs that have issues_orders=True in their suite.
+        Orders are stored on the receiving mech's current_order field.
+        """
+        current_time = sim.time_s
+
+        for commander_id, subordinates in self._subordinates.items():
+            m = sim.mechs.get(commander_id)
+            if m is None or not m.alive:
+                continue
+
+            a = act.get(commander_id)
+            if a is None:
+                continue
+
+            # Parse command action fields
+            order_type_prefs = a[self.CMD_ORDER_TYPE_START : self.CMD_ORDER_TYPE_START + ORDER_TYPE_DIM]
+            recipient_prefs = a[self.CMD_RECIPIENT_START : self.CMD_RECIPIENT_START + ORDER_RECIPIENT_DIM]
+            order_params = a[self.CMD_PARAM_START : self.CMD_PARAM_START + ORDER_PARAM_DIM]
+
+            # Determine order type (argmax)
+            order_type = int(np.argmax(order_type_prefs))
+
+            # Skip if no order (OrderType.NONE = 0)
+            if order_type == OrderType.NONE:
+                continue
+
+            # Determine recipient (argmax over subordinates, capped to actual subordinate count)
+            recipient_idx = int(np.argmax(recipient_prefs[: len(subordinates)]))
+            if recipient_idx >= len(subordinates):
+                continue
+
+            recipient_id = subordinates[recipient_idx]
+            recipient = sim.mechs.get(recipient_id)
+            if recipient is None or not recipient.alive:
+                continue
+
+            # For FOCUS_FIRE, determine target from order_params (argmax over contact slots)
+            target_id: str | None = None
+            if order_type == OrderType.FOCUS_FIRE:
+                # Use commander's last contact slots to pick target
+                contact_slots = self._last_contact_slots.get(commander_id) or []
+                if order_params.size > 0:
+                    target_idx = int(np.argmax(order_params[: len(contact_slots)]))
+                    if target_idx < len(contact_slots):
+                        target_id = contact_slots[target_idx]
+                        # Validate target is a valid hostile
+                        if target_id is not None:
+                            tgt = sim.mechs.get(target_id)
+                            if tgt is None or not tgt.alive or tgt.team == m.team:
+                                target_id = None
+
+            # Issue the order to the recipient
+            recipient.current_order = ReceivedOrder(
+                order_type=order_type,
+                issuer_id=commander_id,
+                target_id=target_id,
+                issued_at=current_time,
+                acknowledged=False,
+            )
+
+    def _process_status_reports(self, act: dict[str, np.ndarray], sim: Sim) -> None:
+        """Process status report actions from subordinates.
+
+        Subordinates update their current_order state via status report actions.
+        This allows commanders to observe subordinate status.
+
+        Status report action layout (11 dims):
+        - acknowledge (1): > 0.5 means acknowledge order receipt
+        - override_reason (6): one-hot for override reason (argmax)
+        - progress (1): order completion progress [0, 1]
+        - flags (3): is_engaged, is_blocked, needs_support (> 0.5 means set)
+        """
+        for aid in self.agents:
+            m = sim.mechs.get(aid)
+            if m is None or not m.alive:
+                continue
+
+            # Only process status reports for mechs with an active order
+            order = m.current_order
+            if order is None or order.is_expired(sim.time_s):
+                continue
+
+            a = act.get(aid)
+            if a is None:
+                continue
+
+            # Parse status report action fields
+            ack_val = float(a[self.STATUS_ACK_START])
+            override_prefs = a[self.STATUS_OVERRIDE_START : self.STATUS_OVERRIDE_START + STATUS_OVERRIDE_DIM]
+            progress_val = float(a[self.STATUS_PROGRESS_START])
+            flags_vals = a[self.STATUS_FLAGS_START : self.STATUS_FLAGS_START + STATUS_FLAGS_DIM]
+
+            # Update order state
+            if ack_val > 0.5:
+                order.acknowledged = True
+
+            # Override reason (argmax)
+            override_reason = int(np.argmax(override_prefs))
+            order.override_reason = override_reason
+
+            # Progress (clamp to [0, 1])
+            order.progress = float(np.clip(progress_val, 0.0, 1.0))
+
+            # Status flags (threshold at 0.5)
+            order.is_engaged = bool(flags_vals[0] > 0.5) if flags_vals.size > 0 else False
+            order.is_blocked = bool(flags_vals[1] > 0.5) if flags_vals.size > 1 else False
+            order.needs_support = bool(flags_vals[2] > 0.5) if flags_vals.size > 2 else False
 
     def step(
         self, actions: dict[str, np.ndarray]
@@ -1126,7 +940,7 @@ class EchelonEnv:
         dict[str, float],
         dict[str, bool],
         dict[str, bool],
-        dict[str, dict],
+        dict,  # infos: per-agent dicts + global "events" list
     ]:
         sim = self.sim
         assert sim is not None
@@ -1192,10 +1006,11 @@ class EchelonEnv:
                 m.focus_target_id = None
 
             if self.config.enable_ewar:
-                # Scout: SECONDARY slot toggles EWAR.
+                # Light: SPECIAL slot toggles EWAR (ECM broadcasts position - bad for stealth scout)
                 # > 0.5: ECCM, (0.0, 0.5]: ECM, <= 0: Off
-                ewar_val = float(a[ActionIndex.SECONDARY])
-                if m.spec.name == "scout":
+                # Light uses ECM/ECCM for combat disruption, losing smoke in exchange.
+                ewar_val = float(a[ActionIndex.SPECIAL])
+                if m.spec.name == "light":
                     if ewar_val > 0.5:
                         m.eccm_on = True
                         m.ecm_on = False
@@ -1221,6 +1036,12 @@ class EchelonEnv:
                 self._contact_filter_hostile[aid] = bool(
                     float(a[self.OBS_CTRL_START + self.OBS_SORT_DIM]) > 0.0
                 )
+
+        # Process command actions for pack/squad leaders
+        self._process_command_actions(act, sim)
+
+        # Process status reports from subordinates (updates their order state)
+        self._process_status_reports(act, sim)
 
         # Baselines for rewards/shaping.
         dt_act = float(self.config.dt_sim * self.config.decision_repeat)
@@ -1303,6 +1124,11 @@ class EchelonEnv:
         step_deaths: dict[str, bool] = dict.fromkeys(self.agents, False)
         step_shots_fired: dict[str, int] = dict.fromkeys(self.agents, 0)  # Aggression tracking
 
+        # Paint credit assignment tracking (2025-12-28)
+        step_paint_applied: dict[str, int] = dict.fromkeys(self.agents, 0)
+        step_paint_expired_unused: dict[str, int] = dict.fromkeys(self.agents, 0)
+        step_paint_kills: dict[str, int] = dict.fromkeys(self.agents, 0)
+
         # Episode stats (for logging/debugging) and per-agent combat tracking (HIGH-6).
         # NOTE: Event dict access uses [] not .get() to fail loudly on schema mismatch.
         if events:
@@ -1312,6 +1138,7 @@ class EchelonEnv:
                     shooter_id = str(ev["shooter"])
                     target_id = str(ev["target"])
                     shooter = sim.mechs.get(shooter_id)
+                    target = sim.mechs.get(target_id)
                     if shooter is not None:
                         self._episode_stats[f"kills_{shooter.team}"] = float(
                             self._episode_stats.get(f"kills_{shooter.team}", 0.0) + 1.0
@@ -1319,6 +1146,12 @@ class EchelonEnv:
                         step_kills[shooter_id] = step_kills.get(shooter_id, 0) + 1
                     if target_id in step_deaths:
                         step_deaths[target_id] = True
+                    # Paint kill bonus: credit painter if target was painted
+                    if target is not None and target.last_painter_id:
+                        painter_id = target.last_painter_id
+                        # Only credit if painter != shooter (no self-credit)
+                        if painter_id in step_paint_kills and painter_id != shooter_id:
+                            step_paint_kills[painter_id] += 1
                 elif et == "assist":
                     painter_id = str(ev["painter"])
                     painter = sim.mechs.get(painter_id)
@@ -1328,15 +1161,26 @@ class EchelonEnv:
                         )
                         step_assists[painter_id] = step_assists.get(painter_id, 0) + 1
                 elif et == "paint":
-                    shooter = sim.mechs.get(str(ev["shooter"]))
+                    shooter_id = str(ev["shooter"])
+                    shooter = sim.mechs.get(shooter_id)
                     if shooter is not None:
                         self._episode_stats[f"paints_{shooter.team}"] = float(
                             self._episode_stats.get(f"paints_{shooter.team}", 0.0) + 1.0
                         )
+                        # Track for immediate paint reward
+                        if shooter_id in step_paint_applied:
+                            step_paint_applied[shooter_id] += 1
+                elif et == "paint_expired":
+                    painter_id = ev["painter"]
+                    damage_accumulated = float(ev["damage_accumulated"])
+                    # Penalty only if paint wasn't used (no damage enabled)
+                    if painter_id and painter_id in step_paint_expired_unused and damage_accumulated <= 0.0:
+                        step_paint_expired_unused[painter_id] += 1
                 elif et == "laser_hit":
                     shooter_id = str(ev["shooter"])
                     target_id = str(ev["target"])
                     shooter = sim.mechs.get(shooter_id)
+                    target = sim.mechs.get(target_id)
                     if shooter is not None:
                         self._episode_stats[f"laser_hits_{shooter.team}"] = float(
                             self._episode_stats.get(f"laser_hits_{shooter.team}", 0.0) + 1.0
@@ -1349,10 +1193,21 @@ class EchelonEnv:
                         step_shots_fired[shooter_id] = step_shots_fired.get(shooter_id, 0) + 1
                         if target_id in step_damage_received:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
+                        # Track damage by target for focus fire metric
+                        self._damage_by_target[target_id] = self._damage_by_target.get(target_id, 0.0) + dmg
+                        # Track attacks on painted targets (2025-12-28)
+                        if target is not None and target.painted_remaining > 0:
+                            self._episode_stats[f"painted_target_attacks_{shooter.team}"] = float(
+                                self._episode_stats.get(f"painted_target_attacks_{shooter.team}", 0.0) + 1.0
+                            )
+                            self._episode_stats[f"paint_enabled_damage_{shooter.team}"] = float(
+                                self._episode_stats.get(f"paint_enabled_damage_{shooter.team}", 0.0) + dmg
+                            )
                 elif et == "projectile_hit":
                     shooter_id = str(ev["shooter"])
                     target_id = str(ev["target"])
                     shooter = sim.mechs.get(shooter_id)
+                    target = sim.mechs.get(target_id)
                     if shooter is not None:
                         dmg = float(ev["damage"])
                         self._episode_stats[f"damage_{shooter.team}"] = float(
@@ -1361,6 +1216,16 @@ class EchelonEnv:
                         step_damage_dealt[shooter_id] = step_damage_dealt.get(shooter_id, 0.0) + dmg
                         if target_id in step_damage_received:
                             step_damage_received[target_id] = step_damage_received.get(target_id, 0.0) + dmg
+                        # Track damage by target for focus fire metric
+                        self._damage_by_target[target_id] = self._damage_by_target.get(target_id, 0.0) + dmg
+                        # Track attacks on painted targets (2025-12-28)
+                        if target is not None and target.painted_remaining > 0:
+                            self._episode_stats[f"painted_target_attacks_{shooter.team}"] = float(
+                                self._episode_stats.get(f"painted_target_attacks_{shooter.team}", 0.0) + 1.0
+                            )
+                            self._episode_stats[f"paint_enabled_damage_{shooter.team}"] = float(
+                                self._episode_stats.get(f"paint_enabled_damage_{shooter.team}", 0.0) + dmg
+                            )
                 elif et == "missile_launch":
                     shooter_id = str(ev["shooter"])
                     shooter = sim.mechs.get(shooter_id)
@@ -1368,6 +1233,11 @@ class EchelonEnv:
                         self._episode_stats[f"missile_launches_{shooter.team}"] = float(
                             self._episode_stats.get(f"missile_launches_{shooter.team}", 0.0) + 1.0
                         )
+                        # Track paint lock usage separately (missiles using teammate paint locks)
+                        if ev.get("lock") == "paint":
+                            self._episode_stats[f"paint_lock_uses_{shooter.team}"] = float(
+                                self._episode_stats.get(f"paint_lock_uses_{shooter.team}", 0.0) + 1.0
+                            )
                         step_shots_fired[shooter_id] = step_shots_fired.get(shooter_id, 0) + 1
                 elif et == "kinetic_fire":
                     shooter_id = str(ev["shooter"])
@@ -1424,7 +1294,8 @@ class EchelonEnv:
         rewards: dict[str, float] = {}
         terminations: dict[str, bool] = {}
         truncations: dict[str, bool] = {}
-        infos: dict[str, dict] = {}
+        # NOTE: infos has per-agent dicts + global "events" list
+        infos: dict = {}
 
         # Reward encodes desired behaviors:
         # 1) Move toward the objective (dense shaping).
@@ -1452,133 +1323,133 @@ class EchelonEnv:
 
         # Territory scoring: whichever team has more tonnage in the zone gains score.
         # Zone reward with contested trickle + dominance bonus.
-        # - Uncontested: full reward (1.0) for being in zone alone
-        # - Contested: trickle (0.25) just for presence + bonus for winning
-        # This keeps agents IN the zone while still incentivizing combat.
-        CONTESTED_FLOOR = 0.25  # 25% of zone reward just for being present when contested
-        total_tonnage = in_zone_tonnage["blue"] + in_zone_tonnage["red"]
-        if total_tonnage > 0:
-            blue_margin = (in_zone_tonnage["blue"] - in_zone_tonnage["red"]) / total_tonnage
-            if in_zone_tonnage["blue"] > 0 and in_zone_tonnage["red"] > 0:
-                # Contested: floor + bonus for winning
-                blue_tick = CONTESTED_FLOOR + max(0.0, blue_margin) * (1.0 - CONTESTED_FLOOR)
-                red_tick = CONTESTED_FLOOR + max(0.0, -blue_margin) * (1.0 - CONTESTED_FLOOR)
-            else:
-                # Uncontested: winner gets full reward
-                blue_tick = 1.0 if in_zone_tonnage["blue"] > 0 else 0.0
-                red_tick = 1.0 if in_zone_tonnage["red"] > 0 else 0.0
-        else:
-            blue_tick = 0.0
-            red_tick = 0.0
+        blue_tick, red_tick = compute_zone_ticks(
+            in_zone_tonnage,
+            contested_floor=self._reward_weights.contested_floor,
+        )
 
         # Update scores (using ticks as progress towards winning)
         self.team_zone_score["blue"] = float(self.team_zone_score["blue"] + blue_tick * dt_act)
         self.team_zone_score["red"] = float(self.team_zone_score["red"] + red_tick * dt_act)
 
-        # Reward weights (HIGH-6: added combat shaping)
-        # NOTE: Terminal win/loss rewards REMOVED - they dominated the signal (98%) and
-        # didn't tell agents what they did wrong. Mission success is shaped via zone rewards.
-        # NOTE: All rewards scaled 10x (2025-12-25) - signal was too weak for gradient learning.
-        W_ZONE_TICK = 3.0  # Being IN zone and controlling it
-        W_APPROACH = 1.5  # Moving toward zone
-        W_DAMAGE = 0.05  # Per point of damage dealt
-        W_KILL = 10.0  # Per kill
-        W_ASSIST = 5.0  # Per assist
-        W_DEATH = -1.0  # Death penalty
-        # NOTE: W_COHESION removed - cohesion should emerge from survival pressure, not explicit reward.
-        # NOTE: W_AGGRESSION removed - incentivized spam firing (reward hacking).
+        # Track zone presence for metrics
+        blue_in_zone = any(in_zone_by_agent.get(bid, False) for bid in self.blue_ids)
+        red_in_zone = any(in_zone_by_agent.get(rid, False) for rid in self.red_ids)
 
-        # Count teammates in zone for scaled breadcrumb decay (HIGH-7)
-        teammates_in_zone: dict[str, int] = {"blue": 0, "red": 0}
-        for aid2, in_z in in_zone_by_agent.items():
-            if in_z:
-                m2 = sim.mechs.get(aid2)
-                if m2 is not None:
-                    teammates_in_zone[m2.team] += 1
+        if blue_in_zone:
+            self._episode_stats["zone_ticks_blue"] += 1.0
+        if red_in_zone:
+            self._episode_stats["zone_ticks_red"] += 1.0
+        if blue_in_zone and red_in_zone:
+            self._episode_stats["contested_ticks"] += 1.0
+        if blue_in_zone and self._episode_stats["first_zone_entry_step"] < 0:
+            self._episode_stats["first_zone_entry_step"] = float(self.step_count)
 
+        # Coordination metrics (computed every step, accumulated)
+        dispersion = self._compute_pack_dispersion("blue")
+        self._episode_stats["pack_dispersion_sum"] += dispersion
+        self._episode_stats["pack_dispersion_count"] += 1.0
+
+        # Centroid to zone distance
+        blue_positions = [sim.mechs[bid].pos[:2] for bid in self.blue_ids if sim.mechs[bid].alive]
+        if blue_positions:
+            centroid = np.mean(blue_positions, axis=0)
+            centroid_dist = float(np.linalg.norm(centroid - np.array([zone_cx, zone_cy])))
+            self._episode_stats["centroid_zone_dist_sum"] += centroid_dist
+            self._episode_stats["centroid_zone_dist_count"] += 1.0
+
+        # Track EWAR usage (lights have ECM/ECCM since 2025-12-27)
+        for mid in self.blue_ids:
+            m = sim.mechs.get(mid)
+            if m is not None and m.alive and m.spec.name == "light":
+                self._episode_stats["light_ticks"] += 1.0
+                if m.ecm_on:
+                    self._episode_stats["ecm_on_ticks"] += 1.0
+                if m.eccm_on:
+                    self._episode_stats["eccm_on_ticks"] += 1.0
+
+        # Compute first zone entry for arrival bonus
+        # An agent gets arrival bonus if: (1) currently in zone, (2) never been in zone before
+        first_zone_entry_this_step: dict[str, bool] = {}
         for aid in self.agents:
-            m = sim.mechs[aid]
+            in_zone = in_zone_by_agent.get(aid, False)
+            was_ever_in_zone = self._ever_in_zone.get(aid, False)
+            if in_zone and not was_ever_in_zone:
+                first_zone_entry_this_step[aid] = True
+                self._ever_in_zone[aid] = True
+            else:
+                first_zone_entry_this_step[aid] = False
 
-            # Dead agents get 0 after the death step (terminal rewards handled at episode end - MED-3).
-            if not (m.alive or m.died):
-                rewards[aid] = 0.0
-                infos[aid]["reward_components"] = {
-                    "approach": 0.0,
-                    "zone": 0.0,
-                    "damage": 0.0,
-                    "kill": 0.0,
-                    "assist": 0.0,
-                    "death": 0.0,
-                    "terminal": 0.0,
-                }
-                continue
+        # Build reward context and compute rewards via the reward module.
+        # This enables curriculum-based reward schedules without modifying step().
+        reward_ctx = StepContext(
+            agents=self.agents,
+            blue_ids=self.blue_ids,
+            red_ids=self.red_ids,
+            mech_teams={aid: sim.mechs[aid].team for aid in self.agents},
+            mech_alive={aid: sim.mechs[aid].alive for aid in self.agents},
+            mech_died={aid: sim.mechs[aid].died for aid in self.agents},
+            zone_center=(zone_cx, zone_cy),
+            zone_radius=zone_r,
+            max_xy=max_xy,
+            in_zone_by_agent=in_zone_by_agent,
+            in_zone_tonnage=in_zone_tonnage,
+            blue_tick=blue_tick,
+            red_tick=red_tick,
+            dist_to_zone_before=dist_to_zone_before,
+            dist_to_zone_after=dist_to_zone_after,
+            step_damage_dealt=step_damage_dealt,
+            step_kills=step_kills,
+            step_assists=step_assists,
+            step_deaths=step_deaths,
+            # Paint assists: use same data as step_assists since "assist" events track
+            # when a paint-lock-guided kill happens. Painters get paint_assist_bonus (2.0)
+            # in addition to the base assist reward (3.0).
+            step_paint_assists=step_assists,
+            first_zone_entry_this_step=first_zone_entry_this_step,
+            # Per-team formation modes for reward scaling
+            team_formations={
+                "blue": self.get_team_formation("blue"),
+                "red": self.get_team_formation("red"),
+            },
+        )
 
-            # Track individual reward components for debugging/analysis
-            r_approach = 0.0
-            r_zone = 0.0
-            r_damage = 0.0
-            r_kill = 0.0
-            r_assist = 0.0
-            r_death = 0.0
+        rewards, reward_components = self._reward_computer.compute(reward_ctx)
 
-            # (1) Move toward objective: potential-style shaping on distance to zone center.
-            # HIGH-7: Use exponential decay based on teammates in zone instead of binary cutoff.
-            # More teammates in zone = less approach reward (encourages spreading out).
-            n_teammates = teammates_in_zone.get(m.team, 0)
-            approach_scale = 0.5**n_teammates  # 1.0 if none, 0.5 if 1, 0.25 if 2, etc.
-            if not in_zone_by_agent.get(aid, False):  # Only give approach reward if not already in zone
-                d0 = dist_to_zone_before.get(aid)
-                d1 = dist_to_zone_after.get(aid)
-                if d0 is not None and d1 is not None and max_xy > 0.0:
-                    phi0 = -float(d0 / max_xy)
-                    phi1 = -float(d1 / max_xy)
-                    r_approach = W_APPROACH * (phi1 - phi0) * approach_scale
+        # Paint credit assignment rewards (2025-12-28)
+        # Applied outside RewardComputer for simplicity - these are additive bonuses
+        w = self._reward_weights
+        for aid in self.agents:
+            # Immediate paint reward (+0.3 per new paint)
+            paint_count = step_paint_applied.get(aid, 0)
+            if paint_count > 0:
+                paint_reward = w.paint_applied * paint_count
+                rewards[aid] += paint_reward
+                reward_components[aid].paint_assist += paint_reward
 
-            # (2) Zone Control Reward: only agents IN the zone get credit for control.
-            # This is proper credit assignment - if you're not in the zone, you're not
-            # contributing to control. The approach reward (above) provides the gradient
-            # to get there. Previous proximity scaling violated potential-based shaping
-            # and gave distant agents zero gradient signal.
-            team_tick = blue_tick if m.team == "blue" else red_tick
-            if in_zone_by_agent.get(aid, False):
-                r_zone = W_ZONE_TICK * team_tick
+            # Paint expired unused penalty (-0.1 per wasted paint)
+            expired_count = step_paint_expired_unused.get(aid, 0)
+            if expired_count > 0:
+                penalty = w.paint_expired_unused * expired_count
+                rewards[aid] += penalty  # negative value
+                reward_components[aid].paint_assist += penalty
 
-            # (3) Combat shaping rewards with tactical context (HIGH-6)
-            # ALL combat rewards are multiplied when fighting in a contested zone.
-            # This teaches: "fighting FOR the zone is what matters"
-            # - Combat in contested zone: 2x damage, kills, assists
-            # - Death in contested zone: 0.5x penalty (died for the mission)
-            # - Combat outside zone: normal rewards
-            # - Death outside zone: full penalty (wasteful)
-            agent_in_zone = in_zone_by_agent.get(aid, False)
-            zone_is_contested = in_zone_tonnage["blue"] > 0 and in_zone_tonnage["red"] > 0
-            fighting_for_zone = agent_in_zone and zone_is_contested
+            # Paint kill bonus (40% of kill reward when painted target dies)
+            kill_count = step_paint_kills.get(aid, 0)
+            if kill_count > 0:
+                # Use zone multiplier if painter is in zone
+                in_zone = in_zone_by_agent.get(aid, False)
+                damage_mult = w.in_zone_damage_mult if in_zone else 1.0
+                kill_bonus = w.kill * w.paint_kill_fraction * damage_mult * kill_count
+                rewards[aid] += kill_bonus
+                reward_components[aid].kill += kill_bonus
 
-            # 2x multiplier for ALL offensive actions in contested zone
-            combat_mult = 2.0 if fighting_for_zone else 1.0
-
-            r_damage = W_DAMAGE * combat_mult * step_damage_dealt.get(aid, 0.0)
-            r_kill = W_KILL * combat_mult * step_kills.get(aid, 0)
-            r_assist = W_ASSIST * combat_mult * step_assists.get(aid, 0)
-
-            # Deaths: 0.5x penalty when fighting in contested zone (died smart)
-            if step_deaths.get(aid, False):
-                death_mult = 0.5 if fighting_for_zone else 1.0
-                r_death = W_DEATH * death_mult
-
-            r = r_approach + r_zone + r_damage + r_kill + r_assist + r_death
-            rewards[aid] = float(r)
-
-            # Store component breakdown in infos for training script analysis
-            infos[aid]["reward_components"] = {
-                "approach": float(r_approach),
-                "zone": float(r_zone),
-                "damage": float(r_damage),
-                "kill": float(r_kill),
-                "assist": float(r_assist),
-                "death": float(r_death),
-                "terminal": 0.0,
-            }
+        # Store for observation context - combine all paint-related feedback
+        # This gives scouts complete feedback: paint applied, paint used, paint kills
+        self._paint_used_this_step = {
+            aid: (step_paint_applied.get(aid, 0) + step_assists.get(aid, 0) + step_paint_kills.get(aid, 0))
+            for aid in self.agents
+        }
 
         # Episode end conditions (King of the Hill is the primary win condition).
         hp_after = self.team_hp()
@@ -1591,16 +1462,9 @@ class EchelonEnv:
         winner: str | None = None
         reason: str | None = None
 
-        if (
-            self.team_zone_score["blue"] >= self.zone_score_to_win
-            or self.team_zone_score["red"] >= self.zone_score_to_win
-        ):
-            winner = "blue" if self.team_zone_score["blue"] > self.team_zone_score["red"] else "red"
-            reason = "zone_control"
-            # MED-2: Zone win is a natural termination (objective achieved), not a truncation
-            for aid in terminations:
-                terminations[aid] = True
-        elif (not blue_alive) or (not red_alive):
+        # Zone victory disabled - games run until elimination or time-up
+        # Zone control still gives rewards, just doesn't end the game
+        if (not blue_alive) or (not red_alive):
             if blue_alive and not red_alive:
                 winner = "blue"
             elif red_alive and not blue_alive:
@@ -1614,19 +1478,30 @@ class EchelonEnv:
             for aid in truncations:
                 truncations[aid] = True
             eps = 1e-3
-            if self.team_zone_score["blue"] > self.team_zone_score["red"] + eps:
+            blue_full_control = in_zone_tonnage["blue"] > 0.0 and in_zone_tonnage["red"] <= 0.0
+            red_full_control = in_zone_tonnage["red"] > 0.0 and in_zone_tonnage["blue"] <= 0.0
+
+            # Time-up tiebreakers: uncontested zone control -> fewer losses -> more damage dealt.
+            if blue_full_control and not red_full_control:
                 winner = "blue"
-            elif self.team_zone_score["red"] > self.team_zone_score["blue"] + eps:
+            elif red_full_control and not blue_full_control:
                 winner = "red"
             else:
-                # Fallback tiebreaker: remaining team HP.
-                hp = hp_after
-                if hp["blue"] > hp["red"] + eps:
+                blue_losses = sum(1 for mid in self.blue_ids if not sim.mechs[mid].alive)
+                red_losses = sum(1 for mid in self.red_ids if not sim.mechs[mid].alive)
+                if blue_losses < red_losses:
                     winner = "blue"
-                elif hp["red"] > hp["blue"] + eps:
+                elif red_losses < blue_losses:
                     winner = "red"
                 else:
-                    winner = "draw"
+                    blue_damage = float(self._episode_stats.get("damage_blue", 0.0))
+                    red_damage = float(self._episode_stats.get("damage_red", 0.0))
+                    if blue_damage > red_damage + eps:
+                        winner = "blue"
+                    elif red_damage > blue_damage + eps:
+                        winner = "red"
+                    else:
+                        winner = "draw"
             reason = "time_up"
 
         # Attach score/state to infos.
@@ -1636,6 +1511,19 @@ class EchelonEnv:
             infos[aid]["in_zone"] = bool(in_zone_by_agent.get(aid, False))
 
         if reason is not None:
+            # Focus fire concentration: damage on top target / total damage
+            if self._damage_by_target:
+                total_dmg = sum(self._damage_by_target.values())
+                max_target_dmg = max(self._damage_by_target.values())
+                self._episode_stats["focus_fire_concentration"] = max_target_dmg / max(total_dmg, 1.0)
+            else:
+                self._episode_stats["focus_fire_concentration"] = 0.0
+
+            # NOTE: No terminal win/loss rewards. Dense per-step rewards (zone_tick,
+            # combat) directly encode desired behavior. Terminal rewards are sparse,
+            # cause credit assignment problems, and can encourage degenerate strategies
+            # that "win somehow" rather than "play correctly".
+
             self.last_outcome = {
                 "reason": reason,
                 "winner": winner or "draw",
@@ -1645,10 +1533,9 @@ class EchelonEnv:
                 "stats": dict(self._episode_stats),
             }
 
-            # NOTE: Terminal win/loss rewards removed. They dominated the learning signal
-            # (98%) and didn't provide gradient information. Mission success is now shaped
-            # entirely through zone approach/control rewards. Dead agents learn from death
-            # penalty (W_DEATH) and the shaping rewards they received while alive.
+        # Store component breakdown in infos for training script analysis
+        for aid in self.agents:
+            infos[aid]["reward_components"] = reward_components[aid].to_dict()
 
         # Attach aggregated events to all infos (for now).
         if events:
@@ -1657,6 +1544,9 @@ class EchelonEnv:
         if self.last_outcome is not None:
             for aid in infos:
                 infos[aid]["outcome"] = self.last_outcome
+
+        # Global events key for dashboard/logging (lightweight - just reference, no copy)
+        infos["events"] = events if events else []
 
         if self._replay is not None:
             self._replay.append(self._replay_frame(events))

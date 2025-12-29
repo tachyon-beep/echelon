@@ -577,6 +577,8 @@ class Sim:
             shooter = self.mechs.get(shooter_id)
             if painter is not None and shooter is not None and _same_pack(painter, shooter):
                 bonus = raw_damage * 0.10  # 10% bonus
+                # Track damage for paint credit assignment
+                target.paint_damage_accumulated += raw_damage + bonus
                 if target.last_painter_id != shooter_id:
                     events.append(
                         {
@@ -857,7 +859,10 @@ class Sim:
         if len(action) < ACTION_DIM:
             return []
 
-        # SPECIAL slot: Smoke (Universal)
+        # SPECIAL slot: Smoke (Medium/Heavy/Scout only).
+        if shooter.spec.name not in ("medium", "heavy", "scout"):
+            return []
+
         fire = float(action[ActionIndex.SPECIAL]) > 0.0
         if not fire or shooter.shutdown or not shooter.alive:
             return []
@@ -967,6 +972,7 @@ class Sim:
         shooter.heat = float(shooter.heat + PAINTER.heat)
         target.painted_remaining = 5.0  # 5 seconds of paint
         target.last_painter_id = shooter.mech_id
+        target.paint_damage_accumulated = 0.0  # Reset for new painter (credit assignment)
 
         return [
             {
@@ -1390,7 +1396,22 @@ class Sim:
                 mech.missile_cooldown = max(0.0, float(mech.missile_cooldown - self.dt))
                 mech.kinetic_cooldown = max(0.0, float(mech.kinetic_cooldown - self.dt))
                 mech.painter_cooldown = max(0.0, float(mech.painter_cooldown - self.dt))
-                mech.painted_remaining = max(0.0, float(mech.painted_remaining - self.dt))
+                # Paint decay with expiry event for credit assignment
+                if mech.painted_remaining > 0.0:
+                    mech.painted_remaining = max(0.0, float(mech.painted_remaining - self.dt))
+                    if mech.painted_remaining <= 0.0 and mech.last_painter_id is not None:
+                        # Paint just expired - emit event for reward processing
+                        events.append(
+                            {
+                                "type": "paint_expired",
+                                "target": mech.mech_id,
+                                "painter": mech.last_painter_id,
+                                "damage_accumulated": mech.paint_damage_accumulated,
+                            }
+                        )
+                        # Reset tracking state
+                        mech.last_painter_id = None
+                        mech.paint_damage_accumulated = 0.0
                 mech.suppressed_time = max(0.0, float(mech.suppressed_time - self.dt))
                 mech.ams_cooldown = max(0.0, float(mech.ams_cooldown - self.dt))
                 if not mech.shutdown:

@@ -7,6 +7,13 @@ Usage:
     uv run python scripts/train_ppo.py --size 100 --updates 200
     uv run python scripts/train_ppo.py --wandb --wandb-run-name "experiment-01"
     uv run python scripts/train_ppo.py --resume latest --total-steps 500000
+
+    # With curriculum schedules (recommended for long runs):
+    uv run python scripts/train_ppo.py --lr 3e-4 --lr-decay 0.9 --ent-coef 0.05 --ent-decay 0.9
+
+    # Game-based curriculum (recommended for long training runs):
+    #   --opfor-weapon-start 0.15 --opfor-ramp-games 500000 --games 2000000
+    #   (Ramps over 25% of training, invariant to batch size)
 """
 
 from __future__ import annotations
@@ -33,24 +40,237 @@ if str(ROOT) not in sys.path:
 
 from echelon import EchelonEnv, EnvConfig, WorldConfig
 from echelon.arena.glicko2 import GameResult
+from echelon.arena.history import MatchHistory
 from echelon.arena.league import League, LeagueEntry
 from echelon.arena.match import play_match
-from echelon.constants import PACK_SIZE
-from echelon.rl.model import ActorCriticLSTM, LSTMState
+from echelon.constants import (
+    PACK_HEAVY_IDX,
+    PACK_LEADER_IDX,
+    PACK_LIGHT_IDX,
+    PACK_MEDIUM_A_IDX,
+    PACK_MEDIUM_B_IDX,
+    PACK_SCOUT_IDX,
+    PACK_SIZE,
+)
+from echelon.rl.lstm_state import LSTMState
+from echelon.rl.model import ActorCriticLSTM
 from echelon.training import PPOConfig, PPOTrainer, RolloutBuffer, VectorEnv, evaluate_vs_heuristic
+from echelon.training.spatial import SpatialAccumulator
+from echelon.training.stats_collector import MatchStatsCollector
+
+
+def compute_linear_decay(
+    initial: float,
+    decay_factor: float,
+    progress: float,
+    floor: float,
+) -> float:
+    """Compute linearly decayed value with floor.
+
+    Args:
+        initial: Starting value
+        decay_factor: Fraction to decay by end (0.9 = decay to 10% of initial)
+        progress: Training progress in [0, 1]
+        floor: Minimum value (never decay below this)
+
+    Returns:
+        Decayed value: max(floor, initial * (1 - decay_factor * progress))
+    """
+    decayed = initial * (1.0 - decay_factor * progress)
+    return max(floor, decayed)
 
 
 def _role_for_agent(agent_id: str) -> str:
-    """Get role name for an agent ID (e.g., 'blue_0' -> 'heavy')."""
+    """Get role name for an agent ID based on pack composition.
+
+    Pack structure (PACK_SIZE=6):
+      0: Scout, 1: Light, 2-3: Medium, 4: Heavy, 5: Pack Leader (light chassis)
+    """
     idx = int(agent_id.split("_")[1]) % PACK_SIZE
-    if idx == 0:
-        return "heavy"
-    elif idx <= 2:
-        return "medium"
-    elif idx == 3:
-        return "light"
-    else:
+    if idx == PACK_SCOUT_IDX:
         return "scout"
+    elif idx == PACK_LIGHT_IDX:
+        return "light"
+    elif idx in (PACK_MEDIUM_A_IDX, PACK_MEDIUM_B_IDX):
+        return "medium"
+    elif idx == PACK_HEAVY_IDX:
+        return "heavy"
+    elif idx == PACK_LEADER_IDX:
+        return "leader"
+    else:
+        return "unknown"
+
+
+# ====================================================================
+# Metric Computation Helpers
+# ====================================================================
+
+
+def compute_return_stats(recent_returns: list[float]) -> dict[str, float]:
+    """Compute return distribution statistics.
+
+    Args:
+        recent_returns: List of recent episode returns.
+
+    Returns:
+        Dictionary with keys: mean, median, p10, p90, std.
+    """
+    if len(recent_returns) < 5:
+        return {"mean": 0.0, "median": 0.0, "p10": 0.0, "p90": 0.0, "std": 0.0}
+
+    arr = np.array(recent_returns)
+    return {
+        "mean": float(np.mean(arr)),
+        "median": float(np.median(arr)),
+        "p10": float(np.percentile(arr, 10)),
+        "p90": float(np.percentile(arr, 90)),
+        "std": float(np.std(arr)),
+    }
+
+
+def compute_combat_stats(recent_combat: list[dict[str, float]], num_agents: int) -> dict[str, float]:
+    """Compute combat statistics from recent episodes.
+
+    Args:
+        recent_combat: List of per-episode combat stat dicts with keys:
+            damage_blue, damage_red, kills_blue, kills_red, assists_blue, paints_blue, deaths_blue.
+        num_agents: Number of agents on the learning team (for survival rate calc).
+
+    Returns:
+        Dictionary with keys: damage_dealt, damage_ratio, kill_participation, paint_rate, survival_rate.
+    """
+    if not recent_combat:
+        return {
+            "damage_dealt": 0.0,
+            "damage_ratio": 1.0,
+            "kill_participation": 0.0,
+            "paint_rate": 0.0,
+            "survival_rate": 1.0,
+        }
+
+    avg_damage_blue = float(np.mean([s["damage_blue"] for s in recent_combat]))
+    avg_damage_red = float(np.mean([s["damage_red"] for s in recent_combat]))
+    damage_ratio = avg_damage_blue / max(avg_damage_red, 1.0)
+
+    avg_kills = float(np.mean([s["kills_blue"] for s in recent_combat]))
+    avg_deaths = float(np.mean([s["deaths_blue"] for s in recent_combat]))
+    avg_assists = float(np.mean([s["assists_blue"] for s in recent_combat]))
+    avg_paints = float(np.mean([s.get("paints_blue", 0.0) for s in recent_combat]))
+
+    # Kill participation = (kills + assists) / blue_team_kills
+    # Measures team coordination: 1.0 = solo kills, 2.0 = every kill has 1 assist
+    kill_participation = (avg_kills + avg_assists) / max(avg_kills, 1.0)
+
+    # Paint rate = paint locks per episode (measures scout/support role effectiveness)
+    paint_rate = avg_paints
+
+    # Survival rate = agents alive at end / total agents
+    survival_rate = 1.0 - (avg_deaths / max(num_agents, 1))
+
+    return {
+        "damage_dealt": avg_damage_blue,
+        "damage_ratio": damage_ratio,
+        "kill_participation": kill_participation,
+        "paint_rate": paint_rate,
+        "survival_rate": survival_rate,
+    }
+
+
+def compute_zone_stats(recent_zone: list[dict[str, float]]) -> dict[str, float]:
+    """Compute zone control metrics from recent episodes.
+
+    Args:
+        recent_zone: List of per-episode zone stat dicts with keys:
+            zone_ticks_blue, zone_ticks_red, contested_ticks, first_zone_entry, episode_length.
+
+    Returns:
+        Dictionary with keys: control_margin, contested_ratio, time_to_entry.
+    """
+    if not recent_zone:
+        return {"control_margin": 0.0, "contested_ratio": 0.0, "time_to_entry": 1.0}
+
+    # Zone control margin (blue - red normalized by episode length)
+    margins = [
+        (z["zone_ticks_blue"] - z["zone_ticks_red"]) / max(z["episode_length"], 1) for z in recent_zone
+    ]
+    zone_margin = float(np.mean(margins))
+
+    # Contested ratio
+    contested_ratios = [z["contested_ticks"] / max(z["episode_length"], 1) for z in recent_zone]
+    contested_ratio = float(np.mean(contested_ratios))
+
+    # Time to first zone entry (normalized)
+    entries = [
+        z["first_zone_entry"] / max(z["episode_length"], 1) for z in recent_zone if z["first_zone_entry"] >= 0
+    ]
+    time_to_zone = float(np.mean(entries)) if entries else 1.0
+
+    return {
+        "control_margin": zone_margin,
+        "contested_ratio": contested_ratio,
+        "time_to_entry": time_to_zone,
+    }
+
+
+def compute_coordination_stats(recent_coord: list[dict[str, float]]) -> dict[str, float]:
+    """Compute coordination metrics from recent episodes.
+
+    Args:
+        recent_coord: List of per-episode coordination stat dicts with keys:
+            pack_dispersion_sum, pack_dispersion_count, centroid_zone_dist_sum,
+            centroid_zone_dist_count, focus_fire_concentration.
+
+    Returns:
+        Dictionary with keys: pack_dispersion, centroid_zone_dist, focus_fire.
+    """
+    if not recent_coord:
+        return {"pack_dispersion": 0.0, "centroid_zone_dist": 0.0, "focus_fire": 0.0}
+
+    avg_dispersion = float(
+        np.mean([s["pack_dispersion_sum"] / max(s["pack_dispersion_count"], 1) for s in recent_coord])
+    )
+    avg_centroid_dist = float(
+        np.mean([s["centroid_zone_dist_sum"] / max(s["centroid_zone_dist_count"], 1) for s in recent_coord])
+    )
+    focus_fire = float(np.mean([s.get("focus_fire_concentration", 0.0) for s in recent_coord]))
+
+    return {
+        "pack_dispersion": avg_dispersion,
+        "centroid_zone_dist": avg_centroid_dist,
+        "focus_fire": focus_fire,
+    }
+
+
+def compute_perception_stats(recent_coord: list[dict[str, float]]) -> dict[str, float]:
+    """Compute perception metrics from recent episodes.
+
+    Args:
+        recent_coord: List of per-episode coordination stat dicts with keys:
+            visible_contacts_sum, visible_contacts_count, hostile_filter_on_count,
+            ecm_on_ticks, eccm_on_ticks, light_ticks.
+
+    Returns:
+        Dictionary with keys: visible_contacts, hostile_filter_usage, ecm_usage, eccm_usage.
+    """
+    if not recent_coord:
+        return {"visible_contacts": 0.0, "hostile_filter_usage": 0.0, "ecm_usage": 0.0, "eccm_usage": 0.0}
+
+    visible_contacts = float(
+        np.mean([s["visible_contacts_sum"] / max(s["visible_contacts_count"], 1) for s in recent_coord])
+    )
+    hostile_filter_usage = float(
+        np.mean([s["hostile_filter_on_count"] / max(s["visible_contacts_count"], 1) for s in recent_coord])
+    )
+    # ECM/ECCM moved from Scout to Light (2025-12-27)
+    ecm_usage = float(np.mean([s["ecm_on_ticks"] / max(s["light_ticks"], 1) for s in recent_coord]))
+    eccm_usage = float(np.mean([s["eccm_on_ticks"] / max(s["light_ticks"], 1) for s in recent_coord]))
+
+    return {
+        "visible_contacts": visible_contacts,
+        "hostile_filter_usage": hostile_filter_usage,
+        "ecm_usage": ecm_usage,
+        "eccm_usage": eccm_usage,
+    }
 
 
 # ====================================================================
@@ -338,7 +558,25 @@ def parse_args() -> argparse.Namespace:
 
     # Training mode
     parser.add_argument("--push-url", type=str, default="http://127.0.0.1:8090/push")
-    parser.add_argument("--train-mode", type=str, default="heuristic", choices=["heuristic", "arena"])
+    parser.add_argument(
+        "--train-mode",
+        type=str,
+        default="heuristic",
+        choices=["heuristic", "arena", "selfplay", "dual"],
+        help="heuristic=vs AI, arena=vs league, selfplay=vs self, dual=two policies",
+    )
+    parser.add_argument(
+        "--selfplay-after-games",
+        type=int,
+        default=0,
+        help="Switch from heuristic to selfplay after N games (0 = no switch)",
+    )
+    parser.add_argument(
+        "--model-b",
+        type=str,
+        default=None,
+        help="Second model checkpoint for dual mode (if not provided, initializes fresh)",
+    )
     parser.add_argument("--arena-league", type=str, default="runs/arena/league.json")
     parser.add_argument("--arena-top-k", type=int, default=20)
     parser.add_argument("--arena-candidate-k", type=int, default=5)
@@ -366,6 +604,51 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Updates to ramp from start to end (0 = instant full lethality)",
     )
+    parser.add_argument(
+        "--opfor-ramp-games",
+        type=int,
+        default=0,
+        help="Games to ramp from start to end (overrides --opfor-ramp-updates if set)",
+    )
+    parser.add_argument(
+        "--opfor-ramp-warmup-games",
+        type=int,
+        default=0,
+        help="Games to stay at start difficulty before ramping begins",
+    )
+    parser.add_argument(
+        "--random-formations",
+        action="store_true",
+        help="Each team gets independent random formation (CLOSE/STANDARD/LOOSE) on reset",
+    )
+
+    # Learning rate schedule
+    parser.add_argument(
+        "--lr-decay",
+        type=float,
+        default=0.0,
+        help="LR decay factor (0.9 = decay to 10%% of initial by end). 0 disables.",
+    )
+    parser.add_argument(
+        "--lr-min",
+        type=float,
+        default=1e-5,
+        help="Minimum learning rate floor (default: 1e-5)",
+    )
+
+    # Entropy coefficient schedule
+    parser.add_argument(
+        "--ent-decay",
+        type=float,
+        default=0.0,
+        help="Entropy decay factor (0.9 = decay to 10%% of initial by end). 0 disables.",
+    )
+    parser.add_argument(
+        "--ent-min",
+        type=float,
+        default=0.005,
+        help="Minimum entropy coefficient floor (default: 0.005)",
+    )
 
     # Weights & Biases
     parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
@@ -390,6 +673,12 @@ def parse_args() -> argparse.Namespace:
         args.wandb_mode = "online"
     if args.wandb_project and args.wandb_mode == "disabled":
         args.wandb_mode = "online"
+
+    # Validate flag combinations
+    if args.selfplay_after_games > 0 and args.train_mode != "heuristic":
+        raise ValueError("--selfplay-after-games only works with --train-mode heuristic")
+    if args.model_b is not None and args.train_mode != "dual":
+        raise ValueError("--model-b only works with --train-mode dual")
 
     return args
 
@@ -434,6 +723,7 @@ def build_env_config(args: argparse.Namespace, resume_ckpt: dict | None) -> EnvC
         enable_ewar=not args.disable_ewar,
         enable_obs_control=not args.disable_obs_control,
         enable_comm=not args.disable_comm,
+        random_formations=args.random_formations,
     )
 
     return env_cfg
@@ -554,10 +844,17 @@ def main() -> None:
     initial_weapon_prob = args.opfor_weapon_start if args.train_mode == "heuristic" else 0.5
 
     print(f"Initializing {num_envs} environments (mode={args.mode}, size={args.size})...")
-    if args.train_mode == "heuristic" and args.opfor_ramp_updates > 0:
+    if args.train_mode == "heuristic" and (args.opfor_ramp_updates > 0 or args.opfor_ramp_games > 0):
+        if args.opfor_ramp_games > 0:
+            ramp_desc = f"{args.opfor_ramp_games:,} games"
+        else:
+            ramp_desc = f"{args.opfor_ramp_updates:,} updates"
+        warmup_desc = (
+            f" (after {args.opfor_ramp_warmup_games:,} warmup)" if args.opfor_ramp_warmup_games > 0 else ""
+        )
         print(
             f"Opponent curriculum: weapon prob {args.opfor_weapon_start:.0%} → "
-            f"{args.opfor_weapon_end:.0%} over {args.opfor_ramp_updates} updates"
+            f"{args.opfor_weapon_end:.0%} over {ramp_desc}{warmup_desc}"
         )
     venv = VectorEnv(num_envs, env_cfg, initial_weapon_prob=initial_weapon_prob)
 
@@ -574,6 +871,14 @@ def main() -> None:
     print("Environments ready.")
 
     obs_dim = int(next(iter(next_obs_dicts[0].values())).shape[0])
+
+    # Initialize spatial tracking for heatmaps
+    spatial_acc = SpatialAccumulator(grid_size=32)
+    world_size = (float(env_cfg.world.size_x), float(env_cfg.world.size_y))
+
+    # Initialize match stats collection for dashboard
+    stats_collector = MatchStatsCollector(num_envs=num_envs)
+    match_history = MatchHistory(Path(run_dir) / "matches")
 
     # Initialize model and trainer
     model = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
@@ -599,6 +904,40 @@ def main() -> None:
     lstm_state = model.initial_state(batch_size=batch_size, device=device)
     next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
     next_done = torch.zeros(batch_size, device=device)
+
+    # Initialize model_b for dual mode (two separate policies)
+    # Note: Currently only model (blue) learns; model_b is a static opponent.
+    # To train both concurrently would require separate rollout collection for red team.
+    model_b: ActorCriticLSTM | None = None
+    if args.train_mode == "dual":
+        model_b = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
+        if args.model_b is not None:
+            # Load from provided checkpoint (explicit --model-b flag)
+            ckpt_b = torch.load(args.model_b, map_location=device, weights_only=True)
+            model_b.load_state_dict(ckpt_b["model_state"])
+            print(f"Loaded model_b from {args.model_b}")
+        elif resume_ckpt is not None and "model_b_state" in resume_ckpt:
+            # Load from resume checkpoint (saved from previous dual mode run)
+            model_b.load_state_dict(resume_ckpt["model_b_state"])
+            print("Loaded model_b from resume checkpoint")
+        else:
+            print("Dual mode: model_b initialized fresh (no checkpoint provided)")
+        model_b.eval()  # Set to eval mode (no dropout/batchnorm training)
+
+    # Red team LSTM state for selfplay/dual modes (same size as arena opponent state)
+    # Note: red team done tracking uses arena_done_np which exists for all modes
+    red_lstm_state: LSTMState | None = None
+    if args.train_mode in ("selfplay", "dual"):
+        # Initialize LSTM state for red team policy inference
+        red_batch_size = len(red_ids) * num_envs
+        if args.train_mode == "dual":
+            assert model_b is not None  # Guaranteed by dual mode initialization above
+            red_lstm_state = model_b.initial_state(batch_size=red_batch_size, device=device)
+        else:
+            red_lstm_state = model.initial_state(batch_size=red_batch_size, device=device)
+
+    # Track effective train mode (can change with --selfplay-after-games)
+    effective_train_mode = args.train_mode
 
     # Compute training duration from --games, --total-steps, or --updates (in priority order)
     steps_per_update = ppo_cfg.rollout_steps * num_envs * batch_size_per_env
@@ -639,12 +978,32 @@ def main() -> None:
     current_ep_lens = [0] * num_envs
 
     # Per-role reward tracking (for blue team only - the learning policy)
-    ROLES = ["heavy", "medium", "light", "scout"]
+    ROLES = ["heavy", "medium", "light", "scout", "leader"]
+    ROLE_ABBREV = {"heavy": "Hv", "medium": "Md", "light": "Lt", "scout": "Sc", "leader": "PL"}
     current_ep_returns_by_role: list[dict[str, float]] = [dict.fromkeys(ROLES, 0.0) for _ in range(num_envs)]
     episodic_returns_by_role: list[dict[str, float]] = []  # list of per-episode {role: total}
 
+    # Combat statistics tracking
+    episodic_combat_stats: list[dict[str, float]] = []
+
+    # Zone control metrics tracking
+    episodic_zone_stats: list[dict[str, float]] = []
+
+    # Coordination metrics tracking
+    episodic_coord_stats: list[dict[str, float]] = []
+
     # Per-component reward tracking (aggregate across all blue agents)
-    COMPONENTS = ["approach", "zone", "damage", "kill", "assist", "death", "terminal"]
+    COMPONENTS = [
+        "approach",
+        "zone",
+        "arrival",
+        "damage",
+        "kill",
+        "assist",
+        "death",
+        "paint_assist",
+        "terminal",
+    ]
     current_ep_components: list[dict[str, float]] = [dict.fromkeys(COMPONENTS, 0.0) for _ in range(num_envs)]
     episodic_components: list[dict[str, float]] = []  # list of per-episode {component: total}
 
@@ -708,8 +1067,11 @@ def main() -> None:
     arena_cache = LRUModelCache(max_size=20)
     arena_opponent_id: str | None = None
     arena_opponent: ActorCriticLSTM | None = None
+    arena_opponent_is_heuristic: bool = False
     arena_lstm_state = None
-    arena_done = torch.zeros(num_envs * len(red_ids), device=opponent_device)
+    # Device for red team done tracking: selfplay/dual use learning device, arena uses opponent_device
+    red_done_device = device if args.train_mode in ("selfplay", "dual") else opponent_device
+    arena_done = torch.zeros(num_envs * len(red_ids), device=red_done_device)
 
     def env_signature(cfg: EnvConfig) -> dict:
         d = asdict(cfg)
@@ -739,15 +1101,28 @@ def main() -> None:
         return opp
 
     def arena_sample_opponent(reset_hidden: bool) -> None:
-        nonlocal arena_opponent_id, arena_opponent, arena_lstm_state, arena_done
+        nonlocal arena_opponent_id, arena_opponent, arena_lstm_state, arena_done, arena_opponent_is_heuristic
         entry = arena_rng.choice(arena_pool)
         arena_opponent_id = entry.entry_id
+
+        # Check if this is the heuristic baseline
+        if entry.kind == "heuristic":
+            arena_opponent_is_heuristic = True
+            arena_opponent = None  # No model to load
+            # Still reset LSTM state tracking for consistency
+            if reset_hidden:
+                arena_lstm_state = None
+                arena_done = torch.ones(num_envs * len(red_ids), device=opponent_device)
+            return
+
+        arena_opponent_is_heuristic = False
         cached = arena_cache.get(arena_opponent_id)
         if cached is None:
             cached = arena_load_model(entry.ckpt_path)
             arena_cache.put(arena_opponent_id, cached)
         arena_opponent = cached
-        if reset_hidden:
+        # Always init LSTM state if None (switching from heuristic) or if reset requested
+        if reset_hidden or arena_lstm_state is None:
             arena_lstm_state = arena_opponent.initial_state(
                 batch_size=num_envs * len(red_ids), device=opponent_device
             )
@@ -782,14 +1157,33 @@ def main() -> None:
         episodes_at_update_start = episodes
 
         # Update opponent curriculum (heuristic mode only)
-        if args.train_mode == "heuristic" and args.opfor_ramp_updates > 0:
-            progress = min(1.0, (update - 1) / args.opfor_ramp_updates)
-            current_weapon_prob = args.opfor_weapon_start + progress * (
-                args.opfor_weapon_end - args.opfor_weapon_start
-            )
-            venv.set_heuristic_weapon_prob(current_weapon_prob)
+        if effective_train_mode == "heuristic":
+            if args.opfor_ramp_games > 0:
+                # Game-based ramp (preferred - robust to batch size changes)
+                # Subtract warmup games before calculating progress
+                effective_episodes = max(0, episodes - args.opfor_ramp_warmup_games)
+                progress = min(1.0, effective_episodes / args.opfor_ramp_games)
+                current_weapon_prob = args.opfor_weapon_start + progress * (
+                    args.opfor_weapon_end - args.opfor_weapon_start
+                )
+                venv.set_heuristic_weapon_prob(current_weapon_prob)
+            elif args.opfor_ramp_updates > 0:
+                # Update-based ramp (legacy)
+                progress = min(1.0, (update - 1) / args.opfor_ramp_updates)
+                current_weapon_prob = args.opfor_weapon_start + progress * (
+                    args.opfor_weapon_end - args.opfor_weapon_start
+                )
+                venv.set_heuristic_weapon_prob(current_weapon_prob)
+            else:
+                current_weapon_prob = args.opfor_weapon_end
         else:
-            current_weapon_prob = args.opfor_weapon_end if args.train_mode == "heuristic" else 1.0
+            current_weapon_prob = 1.0
+
+        # Cycle formation mode every 3 updates (CLOSE -> STANDARD -> LOOSE -> repeat)
+        # This trains policies to respond to all three postures
+        FORMATION_CYCLE_UPDATES = 3
+        formation_idx = ((update - 1) // FORMATION_CYCLE_UPDATES) % 3
+        venv.set_formation_mode(formation_idx)
 
         # Create rollout buffer
         buffer = RolloutBuffer.create(
@@ -801,6 +1195,15 @@ def main() -> None:
         )
 
         init_state = lstm_state
+
+        # Action samples for histograms
+        update_action_samples: list[np.ndarray] = []
+
+        # Action statistics accumulators
+        update_action_sum = np.zeros(action_dim, dtype=np.float64)
+        update_action_sq_sum = np.zeros(action_dim, dtype=np.float64)
+        update_action_count = 0
+        update_saturation_count = 0
 
         # Collect rollout
         for step in range(args.rollout_steps):
@@ -819,6 +1222,17 @@ def main() -> None:
 
             action_np = action.detach().cpu().numpy()
 
+            # Sample actions for histogram (every 10th step to limit memory)
+            if step % 10 == 0:
+                update_action_samples.append(action_np.copy())
+
+            # Accumulate action statistics for this update
+            actions_flat_np = action_np  # Already flat from model output
+            update_action_sum += actions_flat_np.sum(axis=0)
+            update_action_sq_sum += (actions_flat_np**2).sum(axis=0)
+            update_action_count += actions_flat_np.shape[0]
+            update_saturation_count += int((np.abs(actions_flat_np) > 0.95).sum())
+
             # Prepare action dictionaries
             all_actions_dicts: list[dict[str, np.ndarray]] = [{} for _ in range(num_envs)]
 
@@ -836,24 +1250,60 @@ def main() -> None:
                             current_ep_actions[env_idx][role][slot_name] += 1
                     current_ep_action_steps[env_idx][role] += 1
 
-            # Red team (opponent)
-            if args.train_mode == "arena":
-                obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
-                obs_r_torch = torch.from_numpy(obs_r_many).to(opponent_device)
-                with torch.no_grad():
-                    assert arena_opponent is not None  # Initialized in arena mode
-                    assert arena_lstm_state is not None
-                    act_r, _, _, _, arena_lstm_state = arena_opponent.get_action_and_value(
-                        obs_r_torch, arena_lstm_state, arena_done
-                    )
-                act_r_np = act_r.detach().cpu().numpy()
-                for env_idx in range(num_envs):
-                    for i, rid in enumerate(red_ids):
-                        all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
-            elif args.train_mode == "heuristic":
+            # Red team (opponent) - mode can be static or dynamic (selfplay-after-games)
+            if effective_train_mode == "arena":
+                if arena_opponent_is_heuristic:
+                    # Lieutenant Heuristic - use heuristic actions
+                    heuristic_acts_list = venv.get_heuristic_actions(red_ids)
+                    for env_idx in range(num_envs):
+                        all_actions_dicts[env_idx].update(heuristic_acts_list[env_idx])
+                else:
+                    # Neural network opponent - use model inference
+                    obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
+                    obs_r_torch = torch.from_numpy(obs_r_many).to(opponent_device)
+                    with torch.no_grad():
+                        assert arena_opponent is not None
+                        assert arena_lstm_state is not None
+                        act_r, _, _, _, arena_lstm_state = arena_opponent.get_action_and_value(
+                            obs_r_torch, arena_lstm_state, arena_done
+                        )
+                    act_r_np = act_r.detach().cpu().numpy()
+                    for env_idx in range(num_envs):
+                        for i, rid in enumerate(red_ids):
+                            all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
+            elif effective_train_mode == "heuristic":
                 heuristic_acts_list = venv.get_heuristic_actions(red_ids)
                 for env_idx in range(num_envs):
                     all_actions_dicts[env_idx].update(heuristic_acts_list[env_idx])
+            elif effective_train_mode == "selfplay":
+                # Selfplay: same policy plays both teams (red uses blue's model)
+                obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
+                obs_r_torch = torch.from_numpy(obs_r_many).to(device)
+                # arena_done is on red_done_device (learning device for selfplay)
+                with torch.no_grad():
+                    assert red_lstm_state is not None
+                    act_r, _, _, _, red_lstm_state = model.get_action_and_value(
+                        obs_r_torch, red_lstm_state, arena_done
+                    )
+                act_r_np = act_r.cpu().numpy()
+                for env_idx in range(num_envs):
+                    for i, rid in enumerate(red_ids):
+                        all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
+            elif effective_train_mode == "dual":
+                # Dual: two separate policies (red uses model_b on learning device)
+                obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
+                obs_r_torch = torch.from_numpy(obs_r_many).to(device)
+                # arena_done is on red_done_device (learning device for dual)
+                with torch.no_grad():
+                    assert model_b is not None
+                    assert red_lstm_state is not None
+                    act_r, _, _, _, red_lstm_state = model_b.get_action_and_value(
+                        obs_r_torch, red_lstm_state, arena_done
+                    )
+                act_r_np = act_r.cpu().numpy()
+                for env_idx in range(num_envs):
+                    for i, rid in enumerate(red_ids):
+                        all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
 
             # Step environments
             next_obs_dicts, rewards_list, terminations_list, truncations_list, infos_list = venv.step(
@@ -864,7 +1314,6 @@ def main() -> None:
             done_flat = np.zeros(batch_size, dtype=np.float32)
             arena_done_np = np.zeros(num_envs * len(red_ids), dtype=np.float32)
 
-            team_alive_list = venv.get_team_alive()
             last_outcomes = venv.get_last_outcomes()
 
             for env_idx in range(num_envs):
@@ -901,15 +1350,42 @@ def main() -> None:
                 )
                 arena_done_np[env_idx * len(red_ids) : (env_idx + 1) * len(red_ids)] = arena_d_i
 
+                # Record spatial data from events for heatmaps
+                # Events are attached to agent infos; pick any agent to get them
+                first_info = env_infos.get(blue_ids[0], {})
+                events = first_info.get("events", [])
+
+                # Collect stats from events for dashboard
+                stats_collector.on_step(env_idx, {"events": events})
+                # Track last damage position per target for kill events (kills don't include pos)
+                last_damage_pos: dict[str, tuple[float, float]] = {}
+                for event in events:
+                    event_type = event.get("type")
+                    pos = event.get("pos")
+                    if pos is not None and len(pos) >= 2:
+                        x, y = float(pos[0]), float(pos[1])
+                        # Record damage events
+                        if event_type in ("laser_hit", "projectile_hit"):
+                            damage = float(event.get("damage", 0.0))
+                            if damage > 0:
+                                spatial_acc.record_damage(x, y, damage, world_size)
+                            # Track position for potential kill attribution
+                            target_id = event.get("target")
+                            if target_id:
+                                last_damage_pos[target_id] = (x, y)
+                        # Record kill events using last known damage position
+                        elif event_type == "kill":
+                            target_id = event.get("target")
+                            if target_id and target_id in last_damage_pos:
+                                dx, dy = last_damage_pos[target_id]
+                                spatial_acc.record_death(dx, dy, world_size)
+
                 # Check episode termination
-                # NOTE: Zone wins set terminations=True (objective achieved).
-                #       Time limits set truncations=True (time ran out).
-                #       Eliminations are detected via team_alive.
-                blue_alive = team_alive_list[env_idx]["blue"]
-                red_alive = team_alive_list[env_idx]["red"]
-                has_termination = any(terminations_list[env_idx].values())
-                has_truncation = any(truncations_list[env_idx].values())
-                ep_over = has_termination or has_truncation or (not blue_alive) or (not red_alive)
+                # NOTE: last_outcome is set ONLY when the game actually ends:
+                #       - Team elimination (all agents on one team dead)
+                #       - Time limit (max_episode_seconds reached)
+                #       Individual agent deaths do NOT end the episode.
+                ep_over = last_outcomes[env_idx] is not None
 
                 if ep_over:
                     ep_ret = float(current_ep_returns[env_idx])
@@ -919,6 +1395,44 @@ def main() -> None:
 
                     outcome = last_outcomes[env_idx] or {"winner": "unknown"}
                     episodic_outcomes.append(outcome.get("winner", "unknown"))
+
+                    # Save match record for dashboard
+                    winner = outcome.get("winner", "draw")
+                    if winner not in ("blue", "red"):
+                        winner = "draw"
+                    # outcome.reason is "elimination" or "time_up" from env.py
+                    reason = outcome.get("reason", "timeout")
+                    if reason == "time_up":
+                        termination_type = "timeout"
+                    elif reason == "elimination":
+                        termination_type = "elimination"
+                    else:
+                        termination_type = reason  # Future-proof for new reasons
+                    opponent_id: str
+                    if effective_train_mode == "arena" and arena_opponent_id is not None:
+                        opponent_id = arena_opponent_id
+                    elif effective_train_mode == "selfplay":
+                        opponent_id = "selfplay"
+                    elif effective_train_mode == "dual":
+                        opponent_id = "model_b"
+                    else:
+                        opponent_id = "heuristic"
+                    # Extract zone ticks from outcome stats for match record
+                    outcome_stats = outcome.get("stats", {})
+                    zone_ticks = {
+                        "blue": int(outcome_stats.get("zone_ticks_blue", 0)),
+                        "red": int(outcome_stats.get("zone_ticks_red", 0)),
+                    }
+                    record = stats_collector.on_episode_end(
+                        env_idx=env_idx,
+                        winner=winner,
+                        termination=termination_type,
+                        duration_steps=ep_len,
+                        blue_entry_id="contender",
+                        red_entry_id=opponent_id,
+                        zone_ticks=zone_ticks,
+                    )
+                    match_history.save(record)
 
                     metrics_f.write(
                         json.dumps(
@@ -948,6 +1462,63 @@ def main() -> None:
                     current_ep_returns_by_role[env_idx] = dict.fromkeys(ROLES, 0.0)
                     current_ep_components[env_idx] = dict.fromkeys(COMPONENTS, 0.0)
 
+                    # Extract combat stats from episode outcome
+                    ep_combat = {
+                        "damage_blue": 0.0,
+                        "damage_red": 0.0,
+                        "kills_blue": 0.0,
+                        "kills_red": 0.0,
+                        "assists_blue": 0.0,
+                        "paints_blue": 0.0,
+                        "missile_launches_blue": 0.0,
+                        "paint_lock_uses_blue": 0.0,
+                        "deaths_blue": 0.0,
+                    }
+                    if outcome is not None:
+                        stats = outcome.get("stats", {})
+                        ep_combat["damage_blue"] = float(stats.get("damage_blue", 0.0))
+                        ep_combat["damage_red"] = float(stats.get("damage_red", 0.0))
+                        ep_combat["kills_blue"] = float(stats.get("kills_blue", 0.0))
+                        ep_combat["kills_red"] = float(stats.get("kills_red", 0.0))
+                        ep_combat["assists_blue"] = float(stats.get("assists_blue", 0.0))
+                        ep_combat["paints_blue"] = float(stats.get("paints_blue", 0.0))
+                        ep_combat["missile_launches_blue"] = float(stats.get("missile_launches_blue", 0.0))
+                        ep_combat["paint_lock_uses_blue"] = float(stats.get("paint_lock_uses_blue", 0.0))
+                        # Count deaths from blue team alive status
+                        deaths = sum(
+                            1 for bid in blue_ids if not infos_list[env_idx].get(bid, {}).get("alive", True)
+                        )
+                        ep_combat["deaths_blue"] = float(deaths)
+                    episodic_combat_stats.append(ep_combat)
+
+                    # Extract zone stats from episode outcome
+                    ep_zone = {
+                        "zone_ticks_blue": float(stats.get("zone_ticks_blue", 0.0)),
+                        "zone_ticks_red": float(stats.get("zone_ticks_red", 0.0)),
+                        "contested_ticks": float(stats.get("contested_ticks", 0.0)),
+                        "first_zone_entry": float(stats.get("first_zone_entry_step", -1.0)),
+                        "episode_length": float(ep_len),
+                    }
+                    episodic_zone_stats.append(ep_zone)
+
+                    # Extract coordination stats from episode outcome
+                    ep_coord = {
+                        "pack_dispersion_sum": float(stats.get("pack_dispersion_sum", 0.0)),
+                        "pack_dispersion_count": float(stats.get("pack_dispersion_count", 1.0)),
+                        "centroid_zone_dist_sum": float(stats.get("centroid_zone_dist_sum", 0.0)),
+                        "centroid_zone_dist_count": float(stats.get("centroid_zone_dist_count", 1.0)),
+                        "focus_fire_concentration": float(stats.get("focus_fire_concentration", 0.0)),
+                        # Perception metrics
+                        "visible_contacts_sum": float(stats.get("visible_contacts_sum", 0.0)),
+                        "visible_contacts_count": float(stats.get("visible_contacts_count", 1.0)),
+                        "hostile_filter_on_count": float(stats.get("hostile_filter_on_count", 0.0)),
+                        # EWAR metrics (ECM/ECCM moved from Scout to Light 2025-12-27)
+                        "ecm_on_ticks": float(stats.get("ecm_on_ticks", 0.0)),
+                        "eccm_on_ticks": float(stats.get("eccm_on_ticks", 0.0)),
+                        "light_ticks": float(stats.get("light_ticks", 1.0)),
+                    }
+                    episodic_coord_stats.append(ep_coord)
+
                     # Store action activation rates per role and reset
                     ep_action_rates: dict[str, dict[str, float]] = {}
                     for role in ROLES:
@@ -962,8 +1533,60 @@ def main() -> None:
                     current_ep_actions[env_idx] = {role: dict.fromkeys(ACTION_SLOTS, 0) for role in ROLES}
                     current_ep_action_steps[env_idx] = dict.fromkeys(ROLES, 0)
 
+                    # Sample 1 episode per 10 for detailed per-agent breakdown table
+                    if len(episodic_returns) % 10 == 0 and wandb_run is not None:
+                        import wandb
+
+                        columns = [
+                            "agent_id",
+                            "role",
+                            "alive",
+                            "damage_dealt",
+                            "damage_taken",
+                            "kills",
+                            "reward_total",
+                        ]
+                        table_data = []
+
+                        for bid in blue_ids:
+                            agent_info = infos_list[env_idx].get(bid, {})
+                            rc = agent_info.get("reward_components", {})
+                            role = _role_for_agent(bid)
+
+                            table_data.append(
+                                [
+                                    bid,
+                                    role,
+                                    agent_info.get("alive", False),
+                                    rc.get("damage", 0.0) * 200,  # Unnormalize
+                                    0.0,  # damage_taken - would need tracking
+                                    0.0,  # kills - would need per-agent tracking
+                                    sum(rc.values()),
+                                ]
+                            )
+
+                        episode_table = wandb.Table(columns=columns, data=table_data)
+                        wandb_run.log({"episodes/agent_breakdown": episode_table}, step=global_step)
+
                     episodes += 1
                     env_episode_counts[env_idx] += 1
+
+                    # Check for heuristic -> selfplay transition
+                    if (
+                        effective_train_mode == "heuristic"
+                        and args.selfplay_after_games > 0
+                        and episodes >= args.selfplay_after_games
+                    ):
+                        effective_train_mode = "selfplay"
+                        # Initialize LSTM state for red team now that we're switching to selfplay
+                        red_batch_size = len(red_ids) * num_envs
+                        red_lstm_state = model.initial_state(batch_size=red_batch_size, device=device)
+                        # Force LSTM reset on all envs by marking all red agents as done
+                        # This ensures clean state transition even for mid-episode envs
+                        # Use learning device since selfplay uses the main model
+                        red_done_device = device
+                        arena_done = torch.ones(num_envs * len(red_ids), device=device)
+                        print(f"\n🎯 Transitioned to SELFPLAY mode after {episodes} games\n")
 
                     # Reset environment
                     reset_obs, _ = venv.reset(
@@ -984,8 +1607,14 @@ def main() -> None:
 
             buffer.rewards[step] = torch.from_numpy(rewards_flat).to(device)
             next_done = torch.from_numpy(done_flat).to(device)
-            arena_done = torch.from_numpy(arena_done_np).to(opponent_device)
+            arena_done = torch.from_numpy(arena_done_np).to(red_done_device)
             next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
+
+        # Action statistics for this update
+        action_mean = update_action_sum / max(update_action_count, 1)
+        action_var = (update_action_sq_sum / max(update_action_count, 1)) - (action_mean**2)
+        action_std = np.sqrt(np.maximum(action_var, 0))
+        saturation_rate = update_saturation_count / max(update_action_count * action_dim, 1)
 
         # Compute GAE
         with torch.no_grad():
@@ -996,14 +1625,56 @@ def main() -> None:
             next_value=next_value, next_done=next_done, gamma=args.gamma, gae_lambda=args.gae_lambda
         )
 
+        # Compute advantage and value statistics for logging
+        # (advantages and returns are guaranteed non-None after compute_gae)
+        assert buffer.advantages is not None
+        assert buffer.returns is not None
+        adv_mean = float(buffer.advantages.mean().item())
+        adv_std = float(buffer.advantages.std().item())
+        val_mean = float(buffer.values.mean().item())
+        val_std = float(buffer.values.std().item())
+
+        # Explained variance: how well values predict returns
+        # ev = 1 - Var(returns - values) / Var(returns)
+        with torch.no_grad():
+            returns_var = buffer.returns.var()
+            residual_var = (buffer.returns - buffer.values).var()
+            explained_var_t = 1.0 - (residual_var / (returns_var + 1e-8))
+            explained_var = float(explained_var_t.item())
+
         # PPO update
         metrics = trainer.update(buffer, init_state)
+
+        # Apply learning rate decay schedule
+        if args.lr_decay > 0:
+            progress = (update - start_update) / max(1, end_update - start_update)
+            new_lr = compute_linear_decay(
+                initial=args.lr,
+                decay_factor=args.lr_decay,
+                progress=progress,
+                floor=args.lr_min,
+            )
+            for pg in trainer.optimizer.param_groups:
+                pg["lr"] = new_lr
+
+        # Apply entropy coefficient decay schedule
+        if args.ent_decay > 0:
+            progress = (update - start_update) / max(1, end_update - start_update)
+            new_ent = compute_linear_decay(
+                initial=args.ent_coef,
+                decay_factor=args.ent_decay,
+                progress=progress,
+                floor=args.ent_min,
+            )
+            trainer.config.ent_coef = new_ent
 
         # Extract metrics
         pg_loss = metrics["pg_loss"]
         v_loss = metrics["vf_loss"]
         entropy_loss = metrics["entropy"]
         grad_norm = metrics["grad_norm"]
+        approx_kl = metrics["approx_kl"]
+        clipfrac = metrics["clipfrac"]
         loss = metrics["loss"]
 
         sps = int((global_step - start_global_step) / max(1e-6, (time.time() - start_time)))
@@ -1012,6 +1683,9 @@ def main() -> None:
         window = 20
         avg_return = float(np.mean(episodic_returns[-window:])) if episodic_returns else 0.0
         avg_len = float(np.mean(episodic_lengths[-window:])) if episodic_lengths else 0.0
+
+        # Return distribution statistics
+        return_stats = compute_return_stats(episodic_returns[-window:])
 
         recent_outcomes = episodic_outcomes[-window:]
         n_out = len(recent_outcomes)
@@ -1052,8 +1726,27 @@ def main() -> None:
                     vals = [ep.get(role, {}).get(slot, 0.0) for ep in recent_actions]
                     avg_actions_by_role[role][slot] = float(np.mean(vals)) if vals else 0.0
 
+        # Combat statistics
+        recent_combat = episodic_combat_stats[-window:]
+        combat_stats = compute_combat_stats(recent_combat, len(blue_ids))
+
+        # Zone control metrics
+        recent_zone = episodic_zone_stats[-window:]
+        zone_stats = compute_zone_stats(recent_zone)
+
         # Print primary line
-        opfor_str = f" | opfor {current_weapon_prob:.0%}" if args.train_mode == "heuristic" else ""
+        if effective_train_mode == "heuristic":
+            opfor_str = f" | opfor {current_weapon_prob:.0%}"
+        elif effective_train_mode == "arena" and arena_opponent_id:
+            # Show current arena opponent
+            opp_name = "Lt. Heuristic" if arena_opponent_is_heuristic else arena_opponent_id[:12]
+            opfor_str = f" | vs {opp_name}"
+        elif effective_train_mode == "selfplay":
+            opfor_str = " | selfplay"
+        elif effective_train_mode == "dual":
+            opfor_str = " | dual (vs model_b)"
+        else:
+            opfor_str = ""
         episodes_this_update = episodes - episodes_at_update_start
         episodes_str = f"{episodes} (+{episodes_this_update})" if episodes_this_update > 0 else str(episodes)
         print(
@@ -1064,7 +1757,7 @@ def main() -> None:
         )
 
         # Print per-role rewards (compact)
-        role_str = " | ".join([f"{r[0].upper()}:{avg_by_role[r]:.2f}" for r in ROLES])
+        role_str = " | ".join([f"{ROLE_ABBREV[r]}:{avg_by_role[r]:.2f}" for r in ROLES])
         print(f"         roles: {role_str}")
 
         # Print reward component breakdown with percentages
@@ -1081,12 +1774,12 @@ def main() -> None:
             action_parts = []
             for role in ROLES:
                 rates = avg_actions_by_role[role]
-                role_char = role[0].upper()
+                role_abbr = ROLE_ABBREV[role]
                 # Show prim/sec/tert as percentages (0-100%)
                 prim_pct = rates["primary"] * 100
                 sec_pct = rates["secondary"] * 100
                 tert_pct = rates["tertiary"] * 100
-                action_parts.append(f"{role_char}:p{prim_pct:.0f}/s{sec_pct:.0f}/t{tert_pct:.0f}")
+                action_parts.append(f"{role_abbr}:p{prim_pct:.0f}/s{sec_pct:.0f}/t{tert_pct:.0f}")
             print(f"       actions: {' | '.join(action_parts)}")
 
         # Evaluation
@@ -1100,6 +1793,10 @@ def main() -> None:
                 seed0 = args.seed + 10_000 + update * 13
                 eval_episodes = args.eval_episodes
                 seeds_now = [seed0 + i for i in range(eval_episodes)]
+
+            # Randomize first seed for replay variety when pushing to server
+            if args.push_url:
+                seeds_now[0] = random.randint(0, 2**31 - 1)
 
             print(f"running eval ({eval_episodes} episodes)...", flush=True)
             eval_stats_obj, replay = evaluate_vs_heuristic(
@@ -1168,7 +1865,7 @@ def main() -> None:
                 best_updated = True
                 best_win_rate = win_rate
                 best_mean_hp_margin = mean_hp_margin
-                best_ckpt = {
+                best_ckpt: dict[str, Any] = {
                     "update": update,
                     "global_step": global_step,
                     "episodes": episodes,
@@ -1181,6 +1878,8 @@ def main() -> None:
                     "obs_dim": obs_dim,
                     "action_dim": action_dim,
                 }
+                if model_b is not None:
+                    best_ckpt["model_b_state"] = model_b.state_dict()
                 best_pt = run_dir / "best.pt"
                 torch.save(best_ckpt, best_pt)
                 best_snapshot = str(best_pt)
@@ -1220,7 +1919,7 @@ def main() -> None:
         # Periodic checkpointing
         saved_ckpt: str | None = None
         if args.save_every > 0 and update % args.save_every == 0:
-            ckpt = {
+            ckpt: dict[str, Any] = {
                 "update": update,
                 "global_step": global_step,
                 "episodes": episodes,
@@ -1232,6 +1931,8 @@ def main() -> None:
                 "obs_dim": obs_dim,
                 "action_dim": action_dim,
             }
+            if model_b is not None:
+                ckpt["model_b_state"] = model_b.state_dict()
             p = run_dir / f"ckpt_{update:05d}.pt"
             torch.save(ckpt, p)
             saved_ckpt = str(p)
@@ -1273,6 +1974,10 @@ def main() -> None:
                 "train/v_loss": v_loss,
                 "train/entropy": entropy_loss,
                 "train/grad_norm": grad_norm,
+                "train/approx_kl": approx_kl,
+                "train/clipfrac": clipfrac,
+                "train/learning_rate": trainer.optimizer.param_groups[0]["lr"],
+                "train/entropy_coef": trainer.config.ent_coef,
                 "train/sps": sps,
                 "train/global_step": global_step,
                 "train/episodes": episodes,
@@ -1280,7 +1985,16 @@ def main() -> None:
                 "train/avg_len": avg_len,
                 "train/win_rate_blue": win_rate_blue,
                 "train/win_rate_red": win_rate_red,
+                "policy/advantage_mean": adv_mean,
+                "policy/advantage_std": adv_std,
+                "policy/value_mean": val_mean,
+                "policy/value_std": val_std,
+                "policy/explained_variance": explained_var,
+                "policy/action_mean_norm": float(np.linalg.norm(action_mean)),
+                "policy/action_std_mean": float(action_std.mean()),
+                "policy/saturation_rate": saturation_rate,
             }
+            wandb_metrics.update({f"returns/{k}": v for k, v in return_stats.items()})
             # Add per-role rewards
             for role in ROLES:
                 wandb_metrics[f"train/reward_{role}"] = avg_by_role[role]
@@ -1293,8 +2007,65 @@ def main() -> None:
                 for slot in ACTION_SLOTS:
                     wandb_metrics[f"actions/{role}/{slot}"] = avg_actions_by_role[role][slot]
             # Add opponent curriculum metrics
-            if args.train_mode == "heuristic":
+            if effective_train_mode == "heuristic":
                 wandb_metrics["curriculum/opfor_weapon_prob"] = current_weapon_prob
+            # Add formation mode (0=CLOSE, 1=STANDARD, 2=LOOSE)
+            wandb_metrics["curriculum/formation_mode"] = formation_idx
+            # Track effective training mode (0=heuristic, 1=selfplay, 2=dual, 3=arena)
+            mode_map = {"heuristic": 0, "selfplay": 1, "dual": 2, "arena": 3}
+            wandb_metrics["curriculum/train_mode"] = mode_map.get(effective_train_mode, 0)
+            # Add combat statistics
+            wandb_metrics.update({f"combat/{k}": v for k, v in combat_stats.items()})
+            # Add zone control metrics
+            wandb_metrics.update({f"zone/{k}": v for k, v in zone_stats.items()})
+            # Coordination metrics - only compute every 10 updates
+            if update % 10 == 0:
+                recent_coord = episodic_coord_stats[-window:]
+                coord_stats = compute_coordination_stats(recent_coord)
+                wandb_metrics.update({f"coordination/{k}": v for k, v in coord_stats.items()})
+
+                # Perception metrics (strided with coordination)
+                perception_stats = compute_perception_stats(recent_coord)
+                wandb_metrics.update({f"perception/{k}": v for k, v in perception_stats.items()})
+
+            # Histograms (every update)
+            if len(episodic_returns) >= 10:
+                wandb_metrics["distributions/returns"] = wandb.Histogram(episodic_returns[-window:])
+
+            # Advantage histogram (from buffer, after PPO update)
+            if buffer.advantages is not None:
+                adv_sample = buffer.advantages.cpu().numpy().flatten()
+                if len(adv_sample) > 1000:
+                    # Sample to avoid huge histograms
+                    adv_sample = np.random.choice(adv_sample, 1000, replace=False)
+                wandb_metrics["distributions/advantages"] = wandb.Histogram(adv_sample.tolist())
+
+            # Action histograms (strided - every 5 updates)
+            if update % 5 == 0 and update_action_samples:
+                all_actions = np.vstack(update_action_samples)
+                action_names = [
+                    "forward",
+                    "strafe",
+                    "vertical",
+                    "yaw",
+                    "primary",
+                    "vent",
+                    "secondary",
+                    "tertiary",
+                    "special",
+                ]
+                for i, name in enumerate(action_names[: min(len(action_names), all_actions.shape[1])]):
+                    wandb_metrics[f"distributions/action_{name}"] = wandb.Histogram(
+                        all_actions[:, i].tolist()
+                    )
+
+            # Spatial heatmaps (strided - every 50 updates)
+            if update % 50 == 0:
+                heatmap_images = spatial_acc.to_images()
+                for name, img in heatmap_images.items():
+                    wandb_metrics[f"spatial/{name}"] = img
+                spatial_acc.reset()
+
             if eval_stats:
                 wandb_metrics["eval/win_rate"] = eval_stats["win_rate"]
                 wandb_metrics["eval/mean_hp_margin"] = eval_stats["mean_hp_margin"]
@@ -1408,7 +2179,7 @@ def main() -> None:
                 }
             )
             print(
-                f"arena_submit match {i+1}/{matches}: opp={opp_entry.entry_id} cand_as={cand_team} "
+                f"arena_submit match {i + 1}/{matches}: opp={opp_entry.entry_id} cand_as={cand_team} "
                 f"winner={out.winner} score={cand_score}"
             )
 

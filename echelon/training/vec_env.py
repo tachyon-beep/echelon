@@ -33,6 +33,9 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig, initial_weapon_p
         ("get_last_outcome", None) -> dict | None
         ("get_heuristic_actions", agent_ids) -> {agent_id: action}
         ("set_heuristic_weapon_prob", float) -> None (updates weapon fire probability)
+        ("set_curriculum", dict) -> None (updates curriculum params)
+        ("get_curriculum", None) -> dict (returns current curriculum)
+        ("set_formation_mode", int) -> None (sets formation mode for reward modulation)
         ("close", None) -> exits
 
     Args:
@@ -42,10 +45,28 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig, initial_weapon_p
         initial_weapon_prob: Initial weapon fire probability for heuristic (curriculum)
     """
     try:
+        import random
+        from dataclasses import replace
+
         from echelon.agents.heuristic import HeuristicPolicy
 
         env = env_fn(env_cfg)
-        heuristic = HeuristicPolicy(weapon_fire_prob=initial_weapon_prob)
+        # Heuristic warmup: wait 50 steps before moving (gives policy time to maneuver)
+        # Heuristic NOOP: 10% chance per mech per step (fragments formations)
+        heuristic = HeuristicPolicy(
+            weapon_fire_prob=initial_weapon_prob,
+            warmup_steps=50,
+            noop_prob=0.10,
+        )
+
+        # Store base config for curriculum modifications
+        base_env_cfg = env_cfg
+
+        # Curriculum state
+        curriculum: dict = {
+            "weapon_prob": initial_weapon_prob,
+            "map_size_range": (env_cfg.world.size_x, env_cfg.world.size_x),  # Default: fixed size
+        }
 
         while True:
             cmd, data = remote.recv()
@@ -53,6 +74,22 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig, initial_weapon_p
                 obs, reward, term, trunc, info = env.step(data)
                 remote.send((obs, reward, term, trunc, info))
             elif cmd == "reset":
+                # Apply curriculum: randomize map size within range
+                min_size, max_size = curriculum["map_size_range"]
+                if min_size != max_size:
+                    new_size = random.randint(min_size, max_size)
+                    current_size = env.config.world.size_x
+                    # Only recreate env if size actually changed
+                    if new_size != current_size:
+                        new_world = replace(
+                            base_env_cfg.world,
+                            size_x=new_size,
+                            size_y=new_size,
+                        )
+                        new_cfg = replace(base_env_cfg, world=new_world)
+                        # Close old env to prevent resource leak (P1 fix)
+                        env.close()
+                        env = env_fn(new_cfg)
                 obs, info = env.reset(seed=data)
                 remote.send((obs, info))
             elif cmd == "get_team_alive":
@@ -64,6 +101,18 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig, initial_weapon_p
                 remote.send(res)
             elif cmd == "set_heuristic_weapon_prob":
                 heuristic.weapon_fire_prob = float(data)
+                remote.send(None)
+            elif cmd == "set_curriculum":
+                curriculum.update(data)
+                if "weapon_prob" in data:
+                    heuristic.weapon_fire_prob = data["weapon_prob"]
+                remote.send(None)
+            elif cmd == "get_curriculum":
+                remote.send(dict(curriculum))
+            elif cmd == "set_formation_mode":
+                from echelon.config import FormationMode
+
+                env.set_formation_mode(FormationMode(data))
                 remote.send(None)
             elif cmd == "close":
                 remote.close()
@@ -193,6 +242,56 @@ class VectorEnv:
         """
         for remote in self.remotes:
             remote.send(("set_heuristic_weapon_prob", prob))
+        for remote in self.remotes:
+            remote.recv()  # Wait for acknowledgment
+
+    def set_curriculum(
+        self,
+        weapon_prob: float | None = None,
+        map_size_range: tuple[int, int] | None = None,
+    ) -> None:
+        """Update curriculum parameters across all environments.
+
+        Args:
+            weapon_prob: Heuristic weapon fire probability (0.0 to 1.0)
+            map_size_range: (min_size, max_size) for random map sizes on reset
+        """
+        update: dict = {}
+        if weapon_prob is not None:
+            update["weapon_prob"] = weapon_prob
+        if map_size_range is not None:
+            min_size, max_size = map_size_range
+            if min_size > max_size:
+                raise ValueError(f"map_size_range min ({min_size}) must be <= max ({max_size})")
+            update["map_size_range"] = map_size_range
+
+        if update:
+            for remote in self.remotes:
+                remote.send(("set_curriculum", update))
+            for remote in self.remotes:
+                remote.recv()
+
+    def get_curriculum(self) -> dict:
+        """Get current curriculum parameters from first environment.
+
+        Returns:
+            Dict with weapon_prob, map_size_range
+        """
+        self.remotes[0].send(("get_curriculum", None))
+        result: dict = self.remotes[0].recv()
+        return result
+
+    def set_formation_mode(self, mode: int) -> None:
+        """Set formation mode for all environments.
+
+        Used during training to cycle through formation modes
+        so policy learns to respond to all three postures.
+
+        Args:
+            mode: FormationMode value (0=CLOSE, 1=STANDARD, 2=LOOSE)
+        """
+        for remote in self.remotes:
+            remote.send(("set_formation_mode", mode))
         for remote in self.remotes:
             remote.recv()  # Wait for acknowledgment
 

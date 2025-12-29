@@ -28,9 +28,9 @@ class TestRunningMeanStd:
         # Check mean: (1+2+3+4+5)/5 = 3.0
         assert abs(rms.mean - 3.0) < 1e-6
 
-        # Check variance: PyTorch uses unbiased estimator (N-1)
-        # Unbiased var = ((1-3)^2 + (2-3)^2 + (3-3)^2 + (4-3)^2 + (5-3)^2) / 4 = 2.5
-        expected_var = x.var().item()
+        # Check variance: We use population variance (N divisor) for Welford's algorithm
+        # Pop var = ((1-3)^2 + (2-3)^2 + (3-3)^2 + (4-3)^2 + (5-3)^2) / 5 = 2.0
+        expected_var = x.var(unbiased=False).item()
         assert abs(rms.var - expected_var) < 1e-6
 
         # Check count
@@ -39,9 +39,8 @@ class TestRunningMeanStd:
     def test_multiple_batch_updates(self):
         """Test statistics after multiple batch updates.
 
-        Note: Welford's parallel batch combining algorithm produces slightly
-        different variance than computing from the full combined dataset when
-        using unbiased estimators. This is expected behavior.
+        Welford's parallel batch combining algorithm with population variance
+        should produce exact results matching the full combined dataset.
         """
         rms = RunningMeanStd(epsilon=0.0)
 
@@ -75,9 +74,9 @@ class TestRunningMeanStd:
         # Normalize the same data
         normalized = rms.normalize(x)
 
-        # After normalization, mean should be ~0 and std ~1
+        # After normalization, mean should be ~0 and std ~1 (using population std)
         assert abs(normalized.mean().item()) < 1e-5
-        assert abs(normalized.std().item() - 1.0) < 1e-5
+        assert abs(normalized.std(unbiased=False).item() - 1.0) < 1e-5
 
     def test_normalization_with_epsilon(self):
         """Test normalization doesn't divide by zero with constant input."""
@@ -100,8 +99,8 @@ class TestRunningMeanStd:
         rms.update(x)
 
         expected_mean = 1e6 + 2.0
-        # PyTorch uses unbiased variance
-        expected_var = x.var().item()
+        # We use population variance for Welford's algorithm
+        expected_var = x.var(unbiased=False).item()
 
         assert abs(rms.mean - expected_mean) < 1.0  # Relaxed tolerance for large numbers
         assert abs(rms.var - expected_var) < 1e-3
@@ -109,8 +108,8 @@ class TestRunningMeanStd:
     def test_sequential_vs_batch(self):
         """Test that sequential and batch updates produce consistent means.
 
-        Note: Variance may differ slightly between sequential and batch updates
-        when using unbiased estimators, but both should produce valid normalization.
+        With population variance, sequential and batch updates should produce
+        identical results for both mean and variance.
         """
         rms_batch = RunningMeanStd(epsilon=0.0)
         rms_seq = RunningMeanStd(epsilon=0.0)
@@ -160,7 +159,7 @@ class TestRunningMeanStd:
 
         # Should compute statistics over all elements
         expected_mean = x.mean().item()
-        expected_var = x.var().item()
+        expected_var = x.var(unbiased=False).item()
 
         assert abs(rms.mean - expected_mean) < 1e-5
         assert abs(rms.var - expected_var) < 1e-5
@@ -198,9 +197,9 @@ class TestReturnNormalizer:
         # Normalize should delegate to RMS
         normalized = normalizer.normalize(returns)
 
-        # Should be z-scored
+        # Should be z-scored (using population std since we use population variance)
         assert abs(normalized.mean().item()) < 1e-5
-        assert abs(normalized.std().item() - 1.0) < 1e-5
+        assert abs(normalized.std(unbiased=False).item() - 1.0) < 1e-5
 
     def test_state_dict_save_load(self):
         """Test checkpoint save/load for ReturnNormalizer."""

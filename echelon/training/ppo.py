@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
-from echelon.rl.model import LSTMState
+from echelon.rl.lstm_state import LSTMState
 from echelon.training.normalization import ReturnNormalizer
 
 if TYPE_CHECKING:
@@ -141,6 +141,13 @@ class PPOTrainer:
         """
         if buffer.advantages is None or buffer.returns is None:
             raise ValueError("Buffer must have advantages and returns computed (call compute_gae first)")
+
+        # Guard against pre-allocated but never-computed buffers (P2 fix)
+        # Allow: gae_computed=True (normal path) OR non-zero advantages (manually filled)
+        if not buffer.gae_computed and (buffer.advantages == 0).all():
+            raise ValueError(
+                "Buffer has zeroed advantages - either call compute_gae() or manually populate advantages/returns"
+            )
 
         # Normalize advantages (standard practice for stability)
         advantages = (buffer.advantages - buffer.advantages.mean()) / (buffer.advantages.std() + 1e-8)

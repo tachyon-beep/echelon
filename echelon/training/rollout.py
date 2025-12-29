@@ -11,6 +11,78 @@ from dataclasses import dataclass
 
 import torch
 
+from echelon.constants import (
+    PACK_HEAVY_IDX,
+    PACK_LEADER_IDX,
+    PACK_LIGHT_IDX,
+    PACK_MEDIUM_A_IDX,
+    PACK_MEDIUM_B_IDX,
+    PACK_SCOUT_IDX,
+    PACK_SIZE,
+)
+
+# Role indices for per-role advantage normalization
+ROLE_SCOUT = 0
+ROLE_LIGHT = 1
+ROLE_MEDIUM = 2
+ROLE_HEAVY = 3
+NUM_ROLES = 4
+
+
+def compute_role_indices(num_agents: int, num_envs: int, device: torch.device) -> torch.Tensor:
+    """Compute role indices for per-role advantage normalization.
+
+    Maps agent indices to role categories based on pack structure:
+    - ROLE_SCOUT (0): Scout mechs (recon, painting)
+    - ROLE_LIGHT (1): Light mechs including pack leader
+    - ROLE_MEDIUM (2): Medium mechs (2 per pack + squad leader)
+    - ROLE_HEAVY (3): Heavy mechs
+
+    Pack composition (6 mechs):
+      idx 0: Scout, idx 1: Light, idx 2-3: Medium, idx 4: Heavy, idx 5: Pack Leader (light)
+
+    Args:
+        num_agents: Total number of agents (batch_size = agents_per_env * num_envs)
+        num_envs: Number of parallel environments
+        device: Device to place tensor on
+
+    Returns:
+        role_indices: [num_agents] int64 tensor with role indices
+    """
+    agents_per_env = num_agents // num_envs
+    role_indices = torch.zeros(num_agents, dtype=torch.int64, device=device)
+
+    # Detect squad structure: squad leader exists when num_packs >= 2
+    num_packs = agents_per_env // PACK_SIZE
+    total_in_packs = num_packs * PACK_SIZE
+    has_squad_leader = num_packs >= 2 and agents_per_env > total_in_packs
+
+    for env_idx in range(num_envs):
+        base = env_idx * agents_per_env
+        for i in range(agents_per_env):
+            agent_idx = base + i
+
+            # Squad leader is the last mech after all packs (medium-equivalent chassis)
+            if has_squad_leader and i == total_in_packs:
+                role_indices[agent_idx] = ROLE_MEDIUM
+                continue
+
+            idx_in_pack = i % PACK_SIZE
+
+            if idx_in_pack == PACK_SCOUT_IDX:
+                role_indices[agent_idx] = ROLE_SCOUT
+            elif idx_in_pack in (PACK_LIGHT_IDX, PACK_LEADER_IDX):
+                role_indices[agent_idx] = ROLE_LIGHT
+            elif idx_in_pack in (PACK_MEDIUM_A_IDX, PACK_MEDIUM_B_IDX):
+                role_indices[agent_idx] = ROLE_MEDIUM
+            elif idx_in_pack == PACK_HEAVY_IDX:
+                role_indices[agent_idx] = ROLE_HEAVY
+            else:
+                # Fallback (shouldn't reach here with valid pack structure)
+                role_indices[agent_idx] = ROLE_MEDIUM
+
+    return role_indices
+
 
 @dataclass
 class RolloutBuffer:
@@ -30,6 +102,8 @@ class RolloutBuffer:
         values: Value function estimates [steps, agents]
         advantages: GAE advantages (computed by compute_gae) [steps, agents]
         returns: Discounted returns (computed by compute_gae) [steps, agents]
+        role_indices: Optional role index per agent for per-role normalization [agents]
+                      (0=Scout, 1=Light, 2=Medium, 3=Heavy). Static across timesteps.
     """
 
     obs: torch.Tensor  # [steps, agents, obs_dim]
@@ -40,6 +114,8 @@ class RolloutBuffer:
     values: torch.Tensor  # [steps, agents]
     advantages: torch.Tensor | None = None
     returns: torch.Tensor | None = None
+    role_indices: torch.Tensor | None = None  # [agents] int64, role index per agent
+    gae_computed: bool = False  # Flag to ensure compute_gae was called before update
 
     @classmethod
     def create(
@@ -64,10 +140,11 @@ class RolloutBuffer:
             rewards=torch.zeros(num_steps, num_agents, device=device),
             dones=torch.zeros(num_steps, num_agents, device=device),
             values=torch.zeros(num_steps, num_agents, device=device),
-            advantages=None,
-            returns=None,
+            advantages=torch.zeros(num_steps, num_agents, device=device),
+            returns=torch.zeros(num_steps, num_agents, device=device),
         )
 
+    @torch.no_grad()
     def compute_gae(
         self,
         next_value: torch.Tensor,
@@ -97,8 +174,11 @@ class RolloutBuffer:
         Side effects:
             Sets self.advantages and self.returns to computed tensors [steps, agents]
         """
+        # Use pre-allocated buffers, ensure they exist
+        if self.advantages is None or self.returns is None:
+            raise ValueError("Buffer must be created with create() - advantages/returns not pre-allocated")
+
         num_steps = self.rewards.size(0)
-        advantages = torch.zeros_like(self.rewards)
         lastgaelam = torch.zeros(self.rewards.size(1), device=self.rewards.device)
 
         # Backward recursion through timesteps
@@ -117,10 +197,11 @@ class RolloutBuffer:
 
             # GAE recursion: A_t = delta_t + gamma*lambda * (1 - done_{t+1}) * A_{t+1}
             lastgaelam = delta + gamma * gae_lambda * next_nonterminal * lastgaelam
-            advantages[t] = lastgaelam
+            self.advantages[t] = lastgaelam
 
         # Returns are advantages + values (advantage definition: A = Q - V, Q = R)
-        returns = advantages + self.values
+        # Use in-place copy to avoid allocation
+        self.returns.copy_(self.advantages + self.values)
 
-        self.advantages = advantages
-        self.returns = returns
+        # Mark GAE as computed (P2 fix: ensures PPO doesn't silently use zeroed values)
+        self.gae_computed = True

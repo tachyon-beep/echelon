@@ -41,7 +41,9 @@ class RunningMeanStd:
             x: Batch of values to incorporate into running statistics
         """
         batch_mean = float(x.mean().item())
-        batch_var = float(x.var().item()) if x.numel() > 1 else 0.0
+        # Use population variance (unbiased=False) for Welford's algorithm
+        # Bessel's correction (default) would overestimate variance for small batches
+        batch_var = float(x.var(unbiased=False).item()) if x.numel() > 1 else 0.0
         batch_count = x.numel()
 
         delta = batch_mean - self.mean

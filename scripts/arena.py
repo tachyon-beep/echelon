@@ -97,6 +97,21 @@ def cmd_add(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_bootstrap(args: argparse.Namespace) -> None:
+    """Bootstrap a new league with Lieutenant Heuristic."""
+    league_path = Path(args.league)
+
+    if league_path.exists() and not args.force:
+        raise SystemExit(f"League already exists: {league_path} (use --force to overwrite)")
+
+    league = League()
+    heuristic = league.add_heuristic()
+    league.save(league_path)
+
+    print(f"ok: bootstrapped {league_path}")
+    print(f"  - {heuristic.commander_name} (rating={heuristic.rating.rating:.0f})")
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     league_path = Path(args.league)
     if not league_path.exists():
@@ -146,7 +161,8 @@ def cmd_eval_candidate(args: argparse.Namespace) -> None:
     pool = league.top_commanders(top_k) + league.recent_candidates(
         cand_k, exclude_id=candidate_entry.entry_id
     )
-    pool = [e for e in pool if e.entry_id != candidate_entry.entry_id]
+    # Exclude candidate itself and heuristic (can't load checkpoint for heuristic)
+    pool = [e for e in pool if e.entry_id != candidate_entry.entry_id and e.kind != "heuristic"]
     if not pool:
         raise SystemExit("no opponents available (need commanders/candidates in league)")
 
@@ -169,7 +185,14 @@ def cmd_eval_candidate(args: argparse.Namespace) -> None:
     # Use a deterministic seed stream so reruns are reproducible.
     seed0 = int(args.seed) * 1_000_000 + 12345
     for i in range(matches):
-        opp_entry = rng.choice(pool)
+        # Use PFSP sampling: weight opponents by rating distance for better learning signal
+        # Cold-start warmup restricts pool for new policies (< 20 games)
+        opp_entry = league.sample_pfsp_opponent(
+            pool=pool,
+            candidate_rating=candidate_entry.rating.rating,
+            rng=rng,
+            candidate_games=candidate_entry.games,
+        )
         opp_policy = get_opponent(opp_entry.entry_id)
 
         if env_signature(opp_policy.env_cfg) != sig:
@@ -253,6 +276,10 @@ def main() -> None:
     p_init = sub.add_parser("init")
     p_init.add_argument("--force", action="store_true")
     p_init.set_defaults(func=cmd_init)
+
+    p_boot = sub.add_parser("bootstrap", help="Initialize league with Lieutenant Heuristic")
+    p_boot.add_argument("--force", action="store_true", help="Overwrite existing league")
+    p_boot.set_defaults(func=cmd_bootstrap)
 
     p_add = sub.add_parser("add")
     p_add.add_argument("ckpt", type=str)

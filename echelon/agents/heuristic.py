@@ -6,9 +6,20 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..actions import ActionIndex
+from ..config import FormationMode
 from ..constants import PACK_SIZE
 from ..gen.objective import capture_zone_params
 from ..sim.los import has_los
+
+# Formation-based cohesion multipliers
+# CLOSE: tighter clustering (lower threshold, higher centroid weight)
+# LOOSE: spread out (higher threshold, lower centroid weight)
+FORMATION_COHESION_MULT: dict[FormationMode, tuple[float, float]] = {
+    # (threshold_mult, centroid_weight_mult)
+    FormationMode.CLOSE: (0.7, 1.5),  # Tighter clustering
+    FormationMode.STANDARD: (1.0, 1.0),  # Default
+    FormationMode.LOOSE: (1.5, 0.5),  # Spread out
+}
 
 if TYPE_CHECKING:
     from ..env.env import EchelonEnv
@@ -50,10 +61,14 @@ class HeuristicPolicy:
         desired_range: float = 5.5,
         approach_speed_scale: float = 1.0,
         weapon_fire_prob: float = 0.5,
+        warmup_steps: int = 0,
+        noop_prob: float = 0.0,
     ):
         self.desired_range = float(desired_range)
         self.approach_speed_scale = float(approach_speed_scale)
         self.weapon_fire_prob = float(weapon_fire_prob)
+        self.warmup_steps = int(warmup_steps)
+        self.noop_prob = float(noop_prob)
         # State tracking: {mid: {"last_pos": np.array, "stuck_timer": float, "maneuver": str, "maneuver_timer": float}}
         self.states: dict[str, dict] = {}
 
@@ -67,6 +82,14 @@ class HeuristicPolicy:
 
         mech = sim.mechs[mech_id]
         if not mech.alive:
+            return np.zeros(env.ACTION_DIM, dtype=np.float32)
+
+        # Warmup period: return NOOP for first N steps
+        if self.warmup_steps > 0 and env.step_count < self.warmup_steps:
+            return np.zeros(env.ACTION_DIM, dtype=np.float32)
+
+        # Random NOOP chance: fragments formations by making some mechs pause
+        if self.noop_prob > 0.0 and env.rng.random() < self.noop_prob:
             return np.zeros(env.ACTION_DIM, dtype=np.float32)
 
         zone_center: np.ndarray | None = None
@@ -173,9 +196,36 @@ class HeuristicPolicy:
             dist_to_zone = (
                 float(np.linalg.norm(zone_center[:2] - mech.pos[:2])) if zone_center is not None else 999.0
             )
-            if dist_to_zone < zone_radius * 2 and dist_to_squad > 15.0 and dist > 20.0:
-                # Blend 50% to squad, 50% to objective (less aggressive clustering)
-                move_target = centroid * 0.5 + move_target * 0.5
+
+            # Role-based cohesion: different mechs have different clustering preferences
+            # Heavies want to stay closer to squad (protected asset), scouts/lights spread out
+            # This prevents the "tight ball of death" problem
+            cohesion_threshold: float
+            centroid_weight: float
+            if mech.spec.name == "heavy":
+                # Heavies stay closer - they're the protected fire support
+                cohesion_threshold = 20.0
+                centroid_weight = 0.4
+            elif mech.spec.name in ("scout", "light"):
+                # Scouts and lights spread out - they're flankers/recon
+                cohesion_threshold = 35.0
+                centroid_weight = 0.15
+            else:
+                # Medium/leader - moderate cohesion
+                cohesion_threshold = 28.0
+                centroid_weight = 0.25
+
+            # Apply formation-based scaling
+            # CLOSE formation = tighter clustering, LOOSE = spread out
+            team = "blue" if mech_id.startswith("blue") else "red"
+            formation = env.get_team_formation(team)
+            thresh_mult, weight_mult = FORMATION_COHESION_MULT[formation]
+            cohesion_threshold *= thresh_mult
+            centroid_weight = min(0.8, centroid_weight * weight_mult)  # Cap at 0.8
+
+            if dist_to_zone < zone_radius * 2 and dist_to_squad > cohesion_threshold and dist > 25.0:
+                # Blend to squad with role-appropriate weight
+                move_target = centroid * centroid_weight + move_target * (1.0 - centroid_weight)
 
         # Re-calculate delta based on move_target
         move_delta = move_target - mech.pos

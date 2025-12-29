@@ -155,9 +155,11 @@ The same 4 parameters (risk, loss_appetite, time_pressure, grouping) apply at al
 
 ### 3.2 Reward Components
 
+**Note:** This shows the **target** curriculum `RewardWeights` structure. The existing `echelon/env/rewards.py` module has a zone-control focused `RewardWeights` (zone_tick, approach, damage, kill, etc.). During implementation, extend the existing structure with these mission-focused fields.
+
 ```python
 @dataclass
-class RewardWeights:
+class CurriculumRewardWeights:
     # Dense shaping (fades out)
     survival: float          # Staying alive
     damage_dealt: float      # Combat effectiveness
@@ -956,6 +958,8 @@ def compute_agent_reward(
 
 ### 9.1 Modified Environment
 
+**Note:** The existing `RewardComputer.compute(ctx)` pattern in `echelon/env/rewards.py` should be preserved. Use a `CurriculumRewardComputer` subclass that wraps the curriculum logic.
+
 ```python
 class EchelonEnv:
     def __init__(
@@ -966,6 +970,10 @@ class EchelonEnv:
     ):
         self.curriculum = curriculum or CurriculumManager.default()
         self.scenario_gen = scenario_gen or ScenarioGenerator(self.curriculum)
+        # Use curriculum-aware reward computer (subclass of RewardComputer)
+        self.reward_computer = CurriculumRewardComputer(
+            curriculum=self.curriculum
+        )
 
     def reset(self, seed=None, options=None):
         # Generate scenario
@@ -980,17 +988,22 @@ class EchelonEnv:
         return obs, {}
 
     def step(self, actions):
-        weights = self.curriculum.get_reward_weights()
-        reward = self._compute_reward(weights)
+        # Build step context (existing pattern from rewards.py)
+        ctx = StepContext(...)
+
+        # Compute rewards using curriculum-aware computer
+        rewards, components = self.reward_computer.compute(ctx)
 
         if done:
             mission_outcome = self._get_mission_outcome()
-            success = self.curriculum.compute_terminal_reward(
+            # Terminal reward added by CurriculumRewardComputer
+            terminal = self.reward_computer.compute_terminal(
                 self.current_scenario.mission, mission_outcome
             )
-            reward += weights.mission_success * success
+            for aid in rewards:
+                rewards[aid] += terminal[aid]
 
-        return obs, reward, done, truncated, info
+        return obs, rewards, done, truncated, info
 ```
 
 ### 9.2 Observation Space Additions
@@ -1014,28 +1027,38 @@ class EchelonEnv:
 
 ```
 echelon/
-├── curriculum/
+├── curriculum/                # NEW: Curriculum system
 │   ├── __init__.py
-│   ├── mission.py        # MissionSpec, MissionVerb, embedding
-│   ├── scenario.py       # ScenarioSpec, ScenarioGenerator
-│   ├── phase.py          # PhaseMetrics, PhaseTransition, RewardWeights
-│   ├── evaluator.py      # Per-verb success evaluation
-│   └── manager.py        # CurriculumManager orchestration
+│   ├── mission.py             # MissionSpec, MissionVerb, embedding
+│   ├── scenario.py            # ScenarioSpec, ScenarioGenerator
+│   ├── phase.py               # PhaseMetrics, PhaseTransition logic
+│   ├── evaluator.py           # Per-verb success evaluation
+│   └── manager.py             # CurriculumManager orchestration
 ├── env/
-│   └── env.py            # Modified with curriculum integration
-└── traits/               # Future: personality modifiers
+│   ├── env.py                 # Orchestration (~1450 lines, slim)
+│   ├── rewards.py             # EXISTING: RewardWeights, RewardComputer, StepContext
+│   └── observations.py        # EXISTING: ObservationBuilder, ObservationContext
+└── traits/                    # Future: personality modifiers
     └── __init__.py
 ```
+
+**Note (2025-12-26):** The `env/rewards.py` module already contains:
+- `RewardWeights` dataclass - ready for curriculum-based interpolation
+- `RewardComputer` class - designed to be subclassed for curriculum logic
+- `StepContext` dataclass - bundles all per-step state for reward computation
+
+The curriculum system should extend `RewardComputer` rather than modifying `env.py` directly.
 
 ## 11. Implementation Order
 
 1. **mission.py** - Core data structures and embedding
-2. **phase.py** - Reward weight interpolation
+2. **phase.py** - Phase transition logic (reward weights now in `rewards.py`)
 3. **scenario.py** - Scenario generation with levers
 4. **evaluator.py** - Success criteria per verb
 5. **manager.py** - Orchestration
-6. **env.py integration** - Wire curriculum into environment
-7. **Training script updates** - Checkpoint curriculum state
+6. **rewards.py integration** - Extend `RewardComputer` with curriculum-aware subclass
+7. **env.py integration** - Wire `CurriculumManager` into environment reset/step
+8. **Training script updates** - Checkpoint curriculum state
 
 ## 12. Implementation Directives
 

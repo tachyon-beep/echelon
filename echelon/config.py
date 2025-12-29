@@ -1,6 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntEnum
+
+
+class FormationMode(IntEnum):
+    """Formation posture commanded by squad leader.
+
+    Modulates reward weights to train policies that respond to tactical commands:
+    - CLOSE: Tight zone control, penalize straying
+    - STANDARD: Balanced posture (default)
+    - LOOSE: Maneuver freedom, reduced zone pressure
+
+    NOTE: Defined in config.py (not rewards.py) to avoid circular import.
+    EnvConfig needs FormationMode, and rewards.py imports from config.
+    """
+
+    CLOSE = 0
+    STANDARD = 1
+    LOOSE = 2
 
 
 @dataclass(frozen=True)
@@ -188,3 +206,15 @@ class EnvConfig:
     nav_mode: str = "off"  # "off" | "assist" | "planner"
     record_replay: bool = False
     seed: int | None = None
+    # Team reward mixing: alpha=1.0 is fully individual, alpha=0.0 is fully team-based
+    # Mix helps credit assignment in cooperative multi-agent setting
+    # Reduced from 1.0 to 0.7: 30% team reward improves coordination (2025-12-27 rebalance)
+    team_reward_alpha: float = 0.7
+    # Discount factor for PBRS-compliant approach shaping: r = gamma*phi(s') - phi(s)
+    # Should match training gamma for strict PBRS compliance (Ng et al., 1999)
+    shaping_gamma: float = 0.99
+    # Formation mode: CLOSE/STANDARD/LOOSE for commander responsiveness training
+    formation_mode: FormationMode = FormationMode.STANDARD
+    # Random formations: each team gets independent random formation on reset
+    # Enables training against varied opponent postures
+    random_formations: bool = False

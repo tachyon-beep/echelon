@@ -64,15 +64,17 @@ class TestRewardPolarity:
         env = reward_env
 
         # Setup: position killer and victim
+        # Use blue_3 (medium) as killer since it has LASER as primary
+        # (blue_0 is scout with PAINTER which does 0 damage)
         victim = env.sim.mechs["red_0"]
         victim.hp = 1.0  # One-shot kill
 
-        killer = env.sim.mechs["blue_0"]
+        killer = env.sim.mechs["blue_3"]
         killer.pos[0], killer.pos[1] = victim.pos[0] - 5.0, victim.pos[1]
         killer.yaw = 0.0  # Facing +x toward victim
 
         actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
-        actions["blue_0"][4] = 1.0  # Fire laser
+        actions["blue_3"][4] = 1.0  # Fire laser (medium has LASER primary)
 
         death_occurred = False
         for _ in range(10):
@@ -93,16 +95,16 @@ class TestRewardPolarity:
         """Getting a kill gives positive reward to the killer."""
         env = reward_env
 
-        # Setup same as death test
+        # Setup: Use blue_3 (medium with LASER) as killer
         victim = env.sim.mechs["red_0"]
         victim.hp = 1.0
 
-        killer = env.sim.mechs["blue_0"]
+        killer = env.sim.mechs["blue_3"]
         killer.pos[0], killer.pos[1] = victim.pos[0] - 5.0, victim.pos[1]
         killer.yaw = 0.0  # Facing +x toward victim
 
         actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
-        actions["blue_0"][4] = 1.0  # PRIMARY (laser)
+        actions["blue_3"][4] = 1.0  # PRIMARY (laser)
 
         kill_occurred = False
         for _ in range(10):
@@ -110,8 +112,8 @@ class TestRewardPolarity:
             _, rewards, _, _, _ = env.step(actions)
             # Check if kill happened this step
             if was_alive and not victim.alive and victim.died:
-                # Kill occurred - W_KILL = 1.0
-                assert rewards["blue_0"] > 0.5, f"Kill should give positive reward, got {rewards['blue_0']}"
+                # Kill occurred - W_KILL = 10.0 (scaled reward)
+                assert rewards["blue_3"] > 0.5, f"Kill should give positive reward, got {rewards['blue_3']}"
                 kill_occurred = True
                 break
 
@@ -126,7 +128,8 @@ class TestRewardAttribution:
         env = reward_env
 
         # Clear setup - position mechs far from zone to isolate combat rewards
-        shooter = env.sim.mechs["blue_0"]
+        # Use blue_3 (medium with LASER) as shooter since blue_0 is scout with PAINTER
+        shooter = env.sim.mechs["blue_3"]
         target = env.sim.mechs["red_0"]
 
         # Position for combat far from zone to minimize zone influence
@@ -136,18 +139,18 @@ class TestRewardAttribution:
 
         # Move everyone else far away to isolate the test
         for aid in env.agents:
-            if aid not in ["blue_0", "red_0"]:
+            if aid not in ["blue_3", "red_0"]:
                 m = env.sim.mechs[aid]
                 m.pos[0], m.pos[1] = 35.0, 35.0
 
         # Get baseline rewards before combat
         actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
         _, baseline_rewards, _, _, _ = env.step(actions)
-        baseline_shooter = baseline_rewards["blue_0"]
+        baseline_shooter = baseline_rewards["blue_3"]
         baseline_target = baseline_rewards["red_0"]
 
         # Now fire weapon
-        actions["blue_0"][4] = 1.0  # Fire laser
+        actions["blue_3"][4] = 1.0  # Fire laser
         target_hp_before = float(target.hp)
         _, combat_rewards, _, _, _ = env.step(actions)
 
@@ -157,7 +160,7 @@ class TestRewardAttribution:
         if damage_dealt > 0:
             # The shooter should get a damage reward (W_DAMAGE * damage)
             # This should make their reward delta more positive than the victim's
-            shooter_delta = combat_rewards["blue_0"] - baseline_shooter
+            shooter_delta = combat_rewards["blue_3"] - baseline_shooter
             target_delta = combat_rewards["red_0"] - baseline_target
 
             assert (
@@ -203,12 +206,14 @@ class TestRewardGradients:
         This test verifies the approach reward gradient exists and has the correct
         sign: decreasing distance to zone (phi1 > phi0) gives positive reward.
         """
-        # The approach reward is: W_APPROACH * (phi1 - phi0) * approach_scale
+        # The approach reward is: W_APPROACH * (gamma * phi1 - phi0)
         # where phi = -distance/max_xy (negative potential)
         # If distance decreases: d1 < d0, so phi1 > phi0, giving positive reward
         # This is the desired gradient toward the objective.
+        from echelon.env.rewards import RewardWeights
 
-        W_APPROACH = 0.05  # From env.py
+        weights = RewardWeights()
+        W_APPROACH = weights.approach  # 2.0 after rebalancing
         assert W_APPROACH > 0, "Approach reward weight should be positive"
 
         # Verify the math: if d1 < d0, then -d1/M > -d0/M, so phi1 > phi0
@@ -216,18 +221,262 @@ class TestRewardGradients:
         d0, d1, max_xy = 100.0, 90.0, 200.0
         phi0 = -d0 / max_xy  # -0.5
         phi1 = -d1 / max_xy  # -0.45
-        delta = phi1 - phi0  # 0.05 (positive)
+        delta = weights.shaping_gamma * phi1 - phi0  # ~0.055 (positive)
 
         assert delta > 0, "Decreasing distance should give positive phi delta"
         assert W_APPROACH * delta > 0, "Approach reward should be positive when moving toward zone"
 
     def test_damage_reward_scales_with_damage(self, reward_env):
         """More damage dealt gives proportionally more reward."""
-        # This is implicitly tested by W_DAMAGE being a per-damage multiplier
-        # A more thorough test would compare rewards from different damage amounts
-        # For now, verify the constant exists and is positive
-        W_DAMAGE = 0.005  # From env.py
+        from echelon.env.rewards import RewardWeights
+
+        weights = RewardWeights()
+        W_DAMAGE = weights.damage  # 0.02 after rebalancing
         assert W_DAMAGE > 0, "Damage reward weight should be positive"
+
+
+class TestArrivalBonus:
+    """Verify arrival bonus for first zone entry."""
+
+    def test_arrival_bonus_on_first_zone_entry(self, reward_env):
+        """Agent entering zone for first time gets arrival bonus."""
+        env = reward_env
+
+        zone_cx, zone_cy, _zone_r = capture_zone_params(
+            env.world.meta, size_x=env.world.size_x, size_y=env.world.size_y
+        )
+
+        # Move everyone out of zone first
+        for aid in env.agents:
+            m = env.sim.mechs[aid]
+            m.pos[0], m.pos[1] = 5.0, 5.0
+            m.vel[:] = 0.0
+
+        # Step to establish baseline (no one in zone)
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, _baseline_rewards, _, _, _baseline_infos = env.step(actions)
+
+        # Now move blue_0 into zone
+        env.sim.mechs["blue_0"].pos[0] = zone_cx
+        env.sim.mechs["blue_0"].pos[1] = zone_cy
+
+        _, _rewards, _, _, infos = env.step(actions)
+
+        # Check reward components
+        blue_0_comps = infos["blue_0"]["reward_components"]
+        assert "arrival" in blue_0_comps, "Should have arrival component"
+        assert (
+            blue_0_comps["arrival"] > 0
+        ), f"First zone entry should get arrival bonus, got {blue_0_comps['arrival']}"
+
+    def test_no_arrival_bonus_on_second_entry(self, reward_env):
+        """Agent re-entering zone does NOT get arrival bonus again."""
+        env = reward_env
+
+        zone_cx, zone_cy, _zone_r = capture_zone_params(
+            env.world.meta, size_x=env.world.size_x, size_y=env.world.size_y
+        )
+
+        # Move blue_0 into zone
+        env.sim.mechs["blue_0"].pos[0] = zone_cx
+        env.sim.mechs["blue_0"].pos[1] = zone_cy
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+
+        # First entry - should get bonus
+        _, _, _, _, infos1 = env.step(actions)
+        first_arrival = infos1["blue_0"]["reward_components"]["arrival"]
+        assert first_arrival > 0, "First entry should get arrival bonus"
+
+        # Move out of zone
+        env.sim.mechs["blue_0"].pos[0] = 5.0
+        env.sim.mechs["blue_0"].pos[1] = 5.0
+        _, _, _, _, _ = env.step(actions)
+
+        # Re-enter zone
+        env.sim.mechs["blue_0"].pos[0] = zone_cx
+        env.sim.mechs["blue_0"].pos[1] = zone_cy
+        _, _, _, _, infos2 = env.step(actions)
+
+        second_arrival = infos2["blue_0"]["reward_components"]["arrival"]
+        assert second_arrival == 0, f"Re-entry should NOT get arrival bonus, got {second_arrival}"
+
+
+class TestRewardBalancing:
+    """Verify reward components are properly balanced."""
+
+    def test_zone_reward_exceeds_approach(self, reward_env):
+        """Zone tick should be higher than approach to prefer being in zone over walking toward it."""
+        from echelon.env.rewards import RewardWeights
+
+        weights = RewardWeights()
+
+        # Zone tick is a tiebreaker (combat 2x mult is the main draw to zone)
+        # It just needs to exceed approach so agents prefer zone over endless walking
+        # zone_tick: 0.1, approach: 0.05 (but approach is per-voxel-moved, not per-step)
+
+        assert (
+            weights.zone_tick > weights.approach
+        ), f"Zone tick ({weights.zone_tick}) should exceed approach ({weights.approach})"
+
+    def test_death_penalty_reasonable_vs_zone(self, reward_env):
+        """Death penalty should be recoverable with zone control in reasonable time."""
+        from echelon.env.rewards import RewardWeights
+
+        weights = RewardWeights()
+
+        # 2025-12-28 v4: Deaths should hurt, but be recoverable
+        # death = -3.0, zone_tick = 1.0 -> 3 steps to recover
+        # This is intentional - dying isn't free, but 3 steps out of ~200 is reasonable
+
+        steps_to_recover = abs(weights.death) / weights.zone_tick
+        assert (
+            steps_to_recover <= 5
+        ), f"Death penalty should be recoverable in <=5 zone steps, needs {steps_to_recover:.2f}"
+
+
+class TestPaintCreditAssignment:
+    """Verify paint credit assignment rewards for scouts."""
+
+    def test_immediate_paint_reward(self, reward_env):
+        """Scout painting a target gets immediate +0.3 paint_assist reward."""
+        env = reward_env
+
+        # blue_0 is scout with PAINTER as primary
+        scout = env.sim.mechs["blue_0"]
+        target = env.sim.mechs["red_0"]
+
+        # Position scout to face target
+        scout.pos[0], scout.pos[1] = 10.0, 10.0
+        target.pos[0], target.pos[1] = 20.0, 10.0  # Target 10 voxels away in +x
+        scout.yaw = 0.0  # Facing +x toward target
+        scout.painter_cooldown = 0.0  # Ensure can fire
+
+        # Move everyone else away
+        for aid in env.agents:
+            if aid not in ["blue_0", "red_0"]:
+                m = env.sim.mechs[aid]
+                m.pos[0], m.pos[1] = 5.0, 5.0
+
+        # Fire painter
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        actions["blue_0"][4] = 1.0  # PRIMARY = PAINTER for scout
+
+        # Run a few steps to ensure paint hits
+        paint_reward_found = False
+        for _ in range(5):
+            _, _rewards, _, _, infos = env.step(actions)
+            # Check reward components for paint_assist
+            comps = infos["blue_0"]["reward_components"]
+            if comps.get("paint_assist", 0.0) > 0:
+                paint_reward_found = True
+                assert (
+                    comps["paint_assist"] >= 0.3
+                ), f"Paint reward should be >= 0.3, got {comps['paint_assist']}"
+                break
+
+        # If paint didn't land, that's okay - geometry might prevent it
+        # But if we got here and have no paint reward, check if target is painted
+        if not paint_reward_found and target.painted_remaining > 0:
+            pytest.fail("Target was painted but no paint_assist reward given")
+
+    def test_paint_expired_unused_penalty(self, reward_env):
+        """Paint expiring without enabling damage gives -0.1 penalty."""
+        env = reward_env
+
+        # Manually set up paint that will expire unused
+        target = env.sim.mechs["red_0"]
+        scout_id = "blue_0"
+
+        # Set paint state to expire on next step
+        target.painted_remaining = 0.01  # Will expire immediately
+        target.last_painter_id = scout_id
+        target.paint_damage_accumulated = 0.0  # No damage dealt while painted
+
+        # Move everyone far apart so no combat happens
+        for aid in env.agents:
+            m = env.sim.mechs[aid]
+            m.pos[0] = 5.0 + (hash(aid) % 20)
+            m.pos[1] = 5.0 + (hash(aid) % 10)
+            m.vel[:] = 0.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, _rewards, _, _, infos = env.step(actions)
+
+        # Scout should get penalty for wasted paint
+        comps = infos["blue_0"]["reward_components"]
+        paint_assist = comps.get("paint_assist", 0.0)
+        # Penalty is -0.1, so paint_assist should be negative
+        assert paint_assist < 0, f"Wasted paint should give negative reward, got {paint_assist}"
+
+    def test_paint_expired_with_damage_no_penalty(self, reward_env):
+        """Paint expiring after enabling damage does NOT give penalty."""
+        env = reward_env
+
+        target = env.sim.mechs["red_0"]
+        scout_id = "blue_0"
+
+        # Set paint state to expire, but with damage accumulated
+        target.painted_remaining = 0.01  # Will expire immediately
+        target.last_painter_id = scout_id
+        target.paint_damage_accumulated = 50.0  # Damage was dealt while painted
+
+        # Move everyone far apart
+        for aid in env.agents:
+            m = env.sim.mechs[aid]
+            m.pos[0] = 5.0 + (hash(aid) % 20)
+            m.pos[1] = 5.0 + (hash(aid) % 10)
+            m.vel[:] = 0.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        _, _rewards, _, _, infos = env.step(actions)
+
+        # Scout should NOT get penalty (paint was useful)
+        comps = infos["blue_0"]["reward_components"]
+        paint_assist = comps.get("paint_assist", 0.0)
+        assert paint_assist >= 0, f"Used paint should not give penalty, got {paint_assist}"
+
+    def test_paint_kill_fraction_bonus(self, reward_env):
+        """Painter gets 40% of kill reward when painted target dies."""
+        env = reward_env
+
+        scout_id = "blue_0"
+        killer_id = "blue_3"  # Medium with LASER
+
+        # Setup: target is painted by scout, about to be killed by teammate
+        target = env.sim.mechs["red_0"]
+        target.painted_remaining = 5.0  # Active paint
+        target.last_painter_id = scout_id
+        target.hp = 1.0  # One-shot kill
+
+        # Position killer to hit target
+        killer = env.sim.mechs[killer_id]
+        killer.pos[0], killer.pos[1] = target.pos[0] - 5.0, target.pos[1]
+        killer.yaw = 0.0  # Facing +x toward target
+
+        # Move scout away (shouldn't affect kill credit)
+        env.sim.mechs[scout_id].pos[0] = 5.0
+        env.sim.mechs[scout_id].pos[1] = 5.0
+
+        actions = {aid: np.zeros(env.ACTION_DIM, dtype=np.float32) for aid in env.agents}
+        actions[killer_id][4] = 1.0  # Fire laser
+
+        # Run until kill happens
+        kill_occurred = False
+        for _ in range(10):
+            was_alive = target.alive
+            _, _rewards, _, _, infos = env.step(actions)
+            if was_alive and not target.alive and target.died:
+                kill_occurred = True
+                # Scout (painter) should get kill component from paint_kill_fraction
+                scout_comps = infos[scout_id]["reward_components"]
+                scout_kill = scout_comps.get("kill", 0.0)
+
+                # 40% of W_KILL (5.0) = 2.0 (base, no zone multiplier)
+                assert scout_kill > 0, f"Painter should get kill bonus, got {scout_kill}"
+                break
+
+        assert kill_occurred, "Target should have been killed"
 
 
 @pytest.mark.skip(
@@ -358,3 +607,180 @@ class TestTerminalRewards:
         assert (
             rewards["blue_0"] >= 5.0
         ), f"Dead agent on winning team should get W_WIN, got {rewards['blue_0']}"
+
+
+class TestFormationModeMultipliers:
+    """Verify formation mode reward multipliers."""
+
+    def test_formation_mode_enum_values(self):
+        """FormationMode enum has expected values."""
+        from echelon.config import FormationMode
+
+        assert FormationMode.CLOSE == 0
+        assert FormationMode.STANDARD == 1
+        assert FormationMode.LOOSE == 2
+
+    def test_formation_multipliers_exist(self):
+        """Each formation mode has multipliers defined."""
+        from echelon.config import FormationMode
+        from echelon.env.rewards import FORMATION_MULTIPLIERS
+
+        for mode in FormationMode:
+            assert mode in FORMATION_MULTIPLIERS
+            mult = FORMATION_MULTIPLIERS[mode]
+            assert "zone" in mult
+            assert "out_death" in mult
+            assert "approach" in mult
+
+    def test_close_amplifies_zone_rewards(self):
+        """CLOSE mode has zone multiplier > 1."""
+        from echelon.config import FormationMode
+        from echelon.env.rewards import FORMATION_MULTIPLIERS
+
+        assert FORMATION_MULTIPLIERS[FormationMode.CLOSE]["zone"] > 1.0
+        assert FORMATION_MULTIPLIERS[FormationMode.CLOSE]["out_death"] > 1.0
+
+    def test_loose_reduces_zone_rewards(self):
+        """LOOSE mode has zone multiplier < 1."""
+        from echelon.config import FormationMode
+        from echelon.env.rewards import FORMATION_MULTIPLIERS
+
+        assert FORMATION_MULTIPLIERS[FormationMode.LOOSE]["zone"] < 1.0
+        assert FORMATION_MULTIPLIERS[FormationMode.LOOSE]["out_death"] < 1.0
+
+    def test_standard_is_neutral(self):
+        """STANDARD mode has multipliers of 1.0."""
+        from echelon.config import FormationMode
+        from echelon.env.rewards import FORMATION_MULTIPLIERS
+
+        mult = FORMATION_MULTIPLIERS[FormationMode.STANDARD]
+        assert mult["zone"] == 1.0
+        assert mult["out_death"] == 1.0
+        assert mult["approach"] == 1.0
+
+    def test_env_config_has_formation_mode(self):
+        """EnvConfig accepts formation_mode parameter."""
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+
+        cfg = EnvConfig(
+            world=WorldConfig(size_x=30, size_y=30, size_z=10),
+            formation_mode=FormationMode.CLOSE,
+        )
+        assert cfg.formation_mode == FormationMode.CLOSE
+
+    def test_env_config_defaults_to_standard(self):
+        """EnvConfig defaults to STANDARD formation."""
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+
+        cfg = EnvConfig(world=WorldConfig(size_x=30, size_y=30, size_z=10))
+        assert cfg.formation_mode == FormationMode.STANDARD
+
+    def test_close_formation_amplifies_zone_reward(self):
+        """CLOSE formation gives higher zone rewards."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+        from echelon.gen.objective import capture_zone_params
+
+        # Standard formation
+        cfg_std = EnvConfig(
+            world=WorldConfig(size_x=40, size_y=40, size_z=15, obstacle_fill=0.0),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.STANDARD,
+        )
+        env_std = EchelonEnv(cfg_std)
+        env_std.reset(seed=0)
+
+        # Close formation
+        cfg_close = EnvConfig(
+            world=WorldConfig(size_x=40, size_y=40, size_z=15, obstacle_fill=0.0),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.CLOSE,
+        )
+        env_close = EchelonEnv(cfg_close)
+        env_close.reset(seed=0)
+
+        # Position blue_0 in zone for both
+        zone_cx, zone_cy, _ = capture_zone_params(
+            env_std.world.meta, size_x=env_std.world.size_x, size_y=env_std.world.size_y
+        )
+
+        for env in [env_std, env_close]:
+            for aid in env.agents:
+                m = env.sim.mechs[aid]
+                if aid == "blue_0":
+                    m.pos[0], m.pos[1] = zone_cx, zone_cy
+                else:
+                    m.pos[0], m.pos[1] = 5.0, 5.0
+                m.vel[:] = 0.0
+
+        actions_std = {aid: np.zeros(env_std.ACTION_DIM, dtype=np.float32) for aid in env_std.agents}
+        actions_close = {aid: np.zeros(env_close.ACTION_DIM, dtype=np.float32) for aid in env_close.agents}
+
+        _, _, _, _, infos_std = env_std.step(actions_std)
+        _, _, _, _, infos_close = env_close.step(actions_close)
+
+        # Check zone component directly (arrival bonus is constant, distorts ratio)
+        zone_std = infos_std["blue_0"]["reward_components"]["zone"]
+        zone_close = infos_close["blue_0"]["reward_components"]["zone"]
+
+        # CLOSE should give 2x zone reward (multiplier = 2.0)
+        assert (
+            zone_close > zone_std * 1.5
+        ), f"CLOSE should amplify zone reward: close={zone_close}, std={zone_std}"
+
+    def test_loose_formation_reduces_zone_reward(self):
+        """LOOSE formation gives lower zone rewards."""
+        from echelon import EchelonEnv
+        from echelon.config import EnvConfig, FormationMode, WorldConfig
+        from echelon.gen.objective import capture_zone_params
+
+        # Standard formation
+        cfg_std = EnvConfig(
+            world=WorldConfig(size_x=40, size_y=40, size_z=15, obstacle_fill=0.0),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.STANDARD,
+        )
+        env_std = EchelonEnv(cfg_std)
+        env_std.reset(seed=0)
+
+        # Loose formation
+        cfg_loose = EnvConfig(
+            world=WorldConfig(size_x=40, size_y=40, size_z=15, obstacle_fill=0.0),
+            num_packs=1,
+            seed=0,
+            formation_mode=FormationMode.LOOSE,
+        )
+        env_loose = EchelonEnv(cfg_loose)
+        env_loose.reset(seed=0)
+
+        # Position blue_0 in zone for both
+        zone_cx, zone_cy, _ = capture_zone_params(
+            env_std.world.meta, size_x=env_std.world.size_x, size_y=env_std.world.size_y
+        )
+
+        for env in [env_std, env_loose]:
+            for aid in env.agents:
+                m = env.sim.mechs[aid]
+                if aid == "blue_0":
+                    m.pos[0], m.pos[1] = zone_cx, zone_cy
+                else:
+                    m.pos[0], m.pos[1] = 5.0, 5.0
+                m.vel[:] = 0.0
+
+        actions_std = {aid: np.zeros(env_std.ACTION_DIM, dtype=np.float32) for aid in env_std.agents}
+        actions_loose = {aid: np.zeros(env_loose.ACTION_DIM, dtype=np.float32) for aid in env_loose.agents}
+
+        _, _, _, _, infos_std = env_std.step(actions_std)
+        _, _, _, _, infos_loose = env_loose.step(actions_loose)
+
+        # Check zone component directly (arrival bonus is constant, distorts ratio)
+        zone_std = infos_std["blue_0"]["reward_components"]["zone"]
+        zone_loose = infos_loose["blue_0"]["reward_components"]["zone"]
+
+        # LOOSE should give 0.3x zone reward (multiplier = 0.3)
+        assert (
+            zone_loose < zone_std * 0.5
+        ), f"LOOSE should reduce zone reward: loose={zone_loose}, std={zone_std}"

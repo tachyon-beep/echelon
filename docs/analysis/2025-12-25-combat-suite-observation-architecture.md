@@ -378,14 +378,15 @@ Each mech's observation is composed of multiple **streams**, each processed by a
 |  +- 8 dims -> Linear -> 16 dims                                  |
 |  +- Counts + threat mass (compensates for mean pooling)          |
 +------------------------------------------------------------------+
-|  STREAM G: Mission (fixed)                                       |
-|  +- 15 dims -> Linear -> 16 dims                                 |
-+------------------------------------------------------------------+
-|  STREAM H: Local Map (fixed)                                     |
+|  STREAM G: Local Map (fixed)                                     |
 |  +- 128 dims -> MapEncoder -> 48 dims                            |
 +------------------------------------------------------------------+
+|  STREAM H: Alerts (variable, 0-5 alerts)                         |
+|  +- Awareness broadcasts from scouts/commanders                  |
+|  +- N x 13 dims -> AlertEncoder -> 24 dims                       |
++------------------------------------------------------------------+
 |                                                                   |
-|  TOTAL TO LSTM: 64+64+48+32+32+16+16+48 = 320 dims (constant)    |
+|  TOTAL TO LSTM: 64+64+48+32+32+16+48+24 = 328 dims (constant)    |
 |                                                                   |
 +------------------------------------------------------------------+
 ```
@@ -640,6 +641,86 @@ mission_embedding = [
 #### Stream G: Local Map (Fixed, 128 dims)
 
 Ego-centric occupancy/terrain. Unchanged from current.
+
+#### Stream H: Alerts (Variable, 0-5 alerts x 13 dims)
+
+**Alerts are awareness-raising, not orders.** They let command units highlight important targets/locations without issuing formal orders that require response.
+
+Key differences from orders:
+- **Not actionable** — just situational awareness ("be aware" vs "do this")
+- **Decays naturally** — fades over time, no TTL expiry like orders
+- **Multiple concurrent** — stack up instead of replacing each other
+- **Source attribution** — know who called it out and their authority level
+
+```python
+@dataclass
+class AlertFeatures:
+    """Per-alert feature vector. 13 dims."""
+
+    # Target reference (3)
+    target_rel_pos: np.ndarray     # (3,) relative position to highlighted entity/location
+
+    # Urgency (1)
+    urgency: float                 # 0.2="awareness" → 1.0="CRITICAL"
+                                   # 0.2 = "be aware this exists"
+                                   # 0.5 = "this is important"
+                                   # 0.8 = "prioritize this"
+                                   # 1.0 = "drop everything and look at this"
+
+    # Alert type (4)
+    alert_type: np.ndarray         # (4,) one-hot: contact/threat/objective/hazard
+                                   # contact = "I see something here"
+                                   # threat = "this is dangerous"
+                                   # objective = "mission-relevant"
+                                   # hazard = "environmental danger"
+
+    # Source tag (5)
+    source_tag: np.ndarray         # (5,) one-hot authority level:
+                                   # pack_scout = peer scout reporting
+                                   # pack_leader = your pack commander
+                                   # squad_leader = your squad commander
+                                   # platoon_leader = echelon above squad
+                                   # company_leader = highest authority
+
+    # Note: Higher authority = generally more reliable intel
+    # But pack_scout may have fresher ground truth
+```
+
+**Alert Scope Rules:**
+
+| Source | Can Alert To | Typical Content |
+|--------|--------------|-----------------|
+| Pack Scout | Pack members | Contact reports, hazard warnings |
+| Pack Leader | Pack members | Priority targets, objective updates |
+| Squad Leader | Entire squad | Cross-pack coordination, flanker warnings |
+| Platoon Leader | All squads | Strategic threats, objective changes |
+| Company Leader | All units | Emergency broadcasts only |
+
+**Alert Lifetime:**
+
+```python
+def alert_urgency_decay(initial_urgency: float, time_since: float) -> float:
+    """Alerts naturally fade. Higher urgency decays slower."""
+    half_life = 2.0 + initial_urgency * 3.0  # 2-5 seconds
+    return initial_urgency * (0.5 ** (time_since / half_life))
+```
+
+**Alert vs Order:**
+
+| Aspect | Order | Alert |
+|--------|-------|-------|
+| Response required | Yes (acknowledged) | No |
+| Replaces previous | Yes (per issuer) | No (stacks) |
+| Lifetime | TTL (10s default) | Decay to zero |
+| Scope | Specific recipient | Broadcast to scope |
+| Purpose | Directive | Awareness |
+
+**Why Alerts Matter:**
+
+1. **Coordination without micromanagement** — Squad leader can say "flanker left!" without ordering specific units to respond
+2. **Trust building** — Scouts prove value by providing accurate alerts; units learn whose alerts to weight higher
+3. **Graceful degradation** — Lost comms means fewer alerts, not sudden blindness
+4. **Emergent tactics** — "Check your six" becomes a learnable callout pattern
 
 ---
 
@@ -2430,10 +2511,14 @@ Based on all feedback, the recommended build order:
 11. Comms failure handling
 12. Attention budget model
 
-### Phase 5: Polish
-13. Alert injection
-14. Slot stickiness
-15. Scope panel
+### Phase 5: Awareness Systems
+13. **Alert observation stream** (Stream H)
+    - 5 alert slots × 13 dims per mech
+    - Alert action dimensions for scouts/commanders
+    - Urgency decay system
+    - Source authority weighting
+14. Slot stickiness (track persistence)
+15. Scope panel (peripheral awareness)
 
 ---
 

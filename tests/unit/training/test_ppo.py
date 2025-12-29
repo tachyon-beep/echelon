@@ -244,25 +244,28 @@ def test_update_with_synthetic_buffer():
         assert not torch.isinf(torch.tensor(value))
 
 
-def test_update_requires_gae():
-    """Test that update raises error if GAE not computed."""
+def test_update_requires_gae_for_manual_buffers():
+    """Test that update raises error if advantages/returns are None (manual buffer construction)."""
     device = torch.device("cpu")
     model = ActorCriticLSTM(obs_dim=10, action_dim=5)
     config = PPOConfig()
     trainer = PPOTrainer(model, config, device)
 
-    # Create buffer without computing GAE
-    buffer = RolloutBuffer.create(num_steps=8, num_agents=4, obs_dim=10, action_dim=5, device=device)
-    buffer.obs = torch.randn(8, 4, 10)
-    buffer.actions = torch.randn(8, 4, 5)
-    buffer.logprobs = torch.randn(8, 4)
-    buffer.rewards = torch.randn(8, 4)
-    buffer.dones = torch.zeros(8, 4)
-    buffer.values = torch.randn(8, 4)
+    # Manually construct buffer with None advantages/returns (not using create())
+    buffer = RolloutBuffer(
+        obs=torch.randn(8, 4, 10),
+        actions=torch.randn(8, 4, 5),
+        logprobs=torch.randn(8, 4),
+        rewards=torch.randn(8, 4),
+        dones=torch.zeros(8, 4),
+        values=torch.randn(8, 4),
+        advantages=None,
+        returns=None,
+    )
 
     init_state = model.initial_state(4, device)
 
-    # Should raise ValueError
+    # Should raise ValueError because advantages/returns are None
     try:
         trainer.update(buffer, init_state)
         raise AssertionError("Expected ValueError")
