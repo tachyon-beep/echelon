@@ -810,10 +810,14 @@ def main() -> None:
     initial_weapon_prob = args.opfor_weapon_start if args.train_mode == "heuristic" else 0.5
 
     print(f"Initializing {num_envs} environments (mode={args.mode}, size={args.size})...")
-    if args.train_mode == "heuristic" and args.opfor_ramp_updates > 0:
+    if args.train_mode == "heuristic" and (args.opfor_ramp_updates > 0 or args.opfor_ramp_games > 0):
+        if args.opfor_ramp_games > 0:
+            ramp_desc = f"{args.opfor_ramp_games:,} games"
+        else:
+            ramp_desc = f"{args.opfor_ramp_updates:,} updates"
         print(
             f"Opponent curriculum: weapon prob {args.opfor_weapon_start:.0%} → "
-            f"{args.opfor_weapon_end:.0%} over {args.opfor_ramp_updates} updates"
+            f"{args.opfor_weapon_end:.0%} over {ramp_desc}"
         )
     venv = VectorEnv(num_envs, env_cfg, initial_weapon_prob=initial_weapon_prob)
 
