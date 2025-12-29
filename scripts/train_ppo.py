@@ -1794,6 +1794,10 @@ def main() -> None:
                 eval_episodes = args.eval_episodes
                 seeds_now = [seed0 + i for i in range(eval_episodes)]
 
+            # Randomize first seed for replay variety when pushing to server
+            if args.push_url:
+                seeds_now[0] = random.randint(0, 2**31 - 1)
+
             print(f"running eval ({eval_episodes} episodes)...", flush=True)
             eval_stats_obj, replay = evaluate_vs_heuristic(
                 model=model,
