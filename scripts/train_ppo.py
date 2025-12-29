@@ -583,6 +583,12 @@ def parse_args() -> argparse.Namespace:
         help="Updates to ramp from start to end (0 = instant full lethality)",
     )
     parser.add_argument(
+        "--opfor-ramp-games",
+        type=int,
+        default=0,
+        help="Games to ramp from start to end (overrides --opfor-ramp-updates if set)",
+    )
+    parser.add_argument(
         "--random-formations",
         action="store_true",
         help="Each team gets independent random formation (CLOSE/STANDARD/LOOSE) on reset",
