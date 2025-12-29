@@ -1084,14 +1084,25 @@ def main() -> None:
         episodes_at_update_start = episodes
 
         # Update opponent curriculum (heuristic mode only)
-        if args.train_mode == "heuristic" and args.opfor_ramp_updates > 0:
-            progress = min(1.0, (update - 1) / args.opfor_ramp_updates)
-            current_weapon_prob = args.opfor_weapon_start + progress * (
-                args.opfor_weapon_end - args.opfor_weapon_start
-            )
-            venv.set_heuristic_weapon_prob(current_weapon_prob)
+        if args.train_mode == "heuristic":
+            if args.opfor_ramp_games > 0:
+                # Game-based ramp (preferred - robust to batch size changes)
+                progress = min(1.0, episodes / args.opfor_ramp_games)
+                current_weapon_prob = args.opfor_weapon_start + progress * (
+                    args.opfor_weapon_end - args.opfor_weapon_start
+                )
+                venv.set_heuristic_weapon_prob(current_weapon_prob)
+            elif args.opfor_ramp_updates > 0:
+                # Update-based ramp (legacy)
+                progress = min(1.0, (update - 1) / args.opfor_ramp_updates)
+                current_weapon_prob = args.opfor_weapon_start + progress * (
+                    args.opfor_weapon_end - args.opfor_weapon_start
+                )
+                venv.set_heuristic_weapon_prob(current_weapon_prob)
+            else:
+                current_weapon_prob = args.opfor_weapon_end
         else:
-            current_weapon_prob = args.opfor_weapon_end if args.train_mode == "heuristic" else 1.0
+            current_weapon_prob = 1.0
 
         # Cycle formation mode every 3 updates (CLOSE -> STANDARD -> LOOSE -> repeat)
         # This trains policies to respond to all three postures
