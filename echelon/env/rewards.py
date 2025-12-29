@@ -52,7 +52,8 @@ class RewardWeights:
     - Zone presence: ~200 pts (1.0 per step x 200 steps)
     - Combat in zone: ~20 pts (kills + damage, 2x multiplier)
     - Terminal win: 10-25 pts (now 3-8% of return, was 2%)
-    - Deaths hurt: -1.5 in zone, -6.0 outside
+    - Deaths hurt: -0.5 in zone, -2.0 outside (reduced from -1.5/-6.0 to prevent
+      death penalty from dominating reward signal during early curriculum)
     """
 
     # Zone-based rewards (PRIMARY OBJECTIVE)
@@ -66,7 +67,7 @@ class RewardWeights:
     damage: float = 0.05  # Per point of damage dealt
     kill: float = 5.0  # Per kill (in zone = 10 pts)
     assist: float = 2.0  # Per assist (in zone = 4 pts)
-    death: float = -3.0  # Death penalty (in zone = -1.5, outside = -6.0)
+    death: float = -1.0  # Death penalty (in zone = -0.5, outside = -2.0)
 
     # Zone mechanics
     # Increased from 0.25: contested zone should still give meaningful reward
