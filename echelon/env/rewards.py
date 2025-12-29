@@ -49,15 +49,15 @@ class RewardWeights:
     - out_zone_death_mult: 2x (deaths outside are expensive)
 
     Expected returns over full episode (~200 steps):
-    - Zone presence: ~200 pts (1.0 per step x 200 steps)
-    - Combat in zone: ~20 pts (kills + damage, 2x multiplier)
-    - Terminal win: 10-25 pts (now 3-8% of return, was 2%)
+    - Combat in zone: ~40 pts (kills + damage, 2x multiplier) - PRIMARY
+    - Zone presence: ~20 pts (0.1 per step x 200 steps) - tiebreaker only
+    - Arrival bonus: 2 pts (one-time for reaching zone)
     - Deaths hurt: -0.05 in zone, -0.2 outside (token penalty - lost future
-      zone ticks is the real cost of dying, explicit penalty just adds signal)
+      combat opportunities is the real cost of dying)
     """
 
-    # Zone-based rewards (PRIMARY OBJECTIVE)
-    zone_tick: float = 1.0  # Being IN zone and controlling it
+    # Zone-based rewards (SECONDARY to combat when in zone)
+    zone_tick: float = 0.1  # Small bonus for zone presence (combat 2x mult is main draw)
     arrival_bonus: float = 2.0  # Single "ping" for reaching zone
 
     # Approach shaping (TINY gravity well)

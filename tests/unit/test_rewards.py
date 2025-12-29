@@ -305,21 +305,19 @@ class TestArrivalBonus:
 class TestRewardBalancing:
     """Verify reward components are properly balanced."""
 
-    def test_zone_reward_dominates_approach(self, reward_env):
-        """Zone control should give significantly more reward than approach."""
+    def test_zone_reward_exceeds_approach(self, reward_env):
+        """Zone tick should be higher than approach to prefer being in zone over walking toward it."""
         from echelon.env.rewards import RewardWeights
 
         weights = RewardWeights()
 
-        # Zone: 2.0 per step (uncontested)
-        # Approach: ~0.025 per step (moving 1 voxel toward zone with max_xy=100)
-        # Ratio should be ~200:1 in favor of zone
+        # Zone tick is a tiebreaker (combat 2x mult is the main draw to zone)
+        # It just needs to exceed approach so agents prefer zone over endless walking
+        # zone_tick: 0.1, approach: 0.05 (but approach is per-voxel-moved, not per-step)
 
-        zone_per_step = weights.zone_tick  # 2.0
-        approach_per_step = weights.approach * 0.01  # ~0.02 (typical movement)
-
-        ratio = zone_per_step / max(approach_per_step, 0.001)
-        assert ratio > 100, f"Zone should dominate approach by >100x, actual ratio: {ratio:.1f}"
+        assert (
+            weights.zone_tick > weights.approach
+        ), f"Zone tick ({weights.zone_tick}) should exceed approach ({weights.approach})"
 
     def test_death_penalty_reasonable_vs_zone(self, reward_env):
         """Death penalty should be recoverable with zone control in reasonable time."""
