@@ -558,7 +558,25 @@ def parse_args() -> argparse.Namespace:
 
     # Training mode
     parser.add_argument("--push-url", type=str, default="http://127.0.0.1:8090/push")
-    parser.add_argument("--train-mode", type=str, default="heuristic", choices=["heuristic", "arena"])
+    parser.add_argument(
+        "--train-mode",
+        type=str,
+        default="heuristic",
+        choices=["heuristic", "arena", "selfplay", "dual"],
+        help="heuristic=vs AI, arena=vs league, selfplay=vs self, dual=two policies",
+    )
+    parser.add_argument(
+        "--selfplay-after-games",
+        type=int,
+        default=0,
+        help="Switch from heuristic to selfplay after N games (0 = no switch)",
+    )
+    parser.add_argument(
+        "--model-b",
+        type=str,
+        default=None,
+        help="Second model checkpoint for dual mode (if not provided, initializes fresh)",
+    )
     parser.add_argument("--arena-league", type=str, default="runs/arena/league.json")
     parser.add_argument("--arena-top-k", type=int, default=20)
     parser.add_argument("--arena-candidate-k", type=int, default=5)
@@ -881,6 +899,35 @@ def main() -> None:
     next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
     next_done = torch.zeros(batch_size, device=device)
 
+    # Initialize model_b for dual mode (two separate policies)
+    # Note: Currently only model (blue) learns; model_b is a static opponent.
+    # To train both concurrently would require separate rollout collection for red team.
+    model_b: ActorCriticLSTM | None = None
+    if args.train_mode == "dual":
+        model_b = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
+        if args.model_b is not None:
+            # Load from provided checkpoint
+            ckpt_b = torch.load(args.model_b, map_location=device, weights_only=True)
+            model_b.load_state_dict(ckpt_b["model_state"])
+            print(f"Loaded model_b from {args.model_b}")
+        else:
+            print("Dual mode: model_b initialized fresh (no checkpoint provided)")
+
+    # Red team LSTM state for selfplay/dual modes (same size as arena opponent state)
+    # Note: red team done tracking uses arena_done_np which exists for all modes
+    red_lstm_state: LSTMState | None = None
+    if args.train_mode in ("selfplay", "dual"):
+        # Initialize LSTM state for red team policy inference
+        red_batch_size = len(red_ids) * num_envs
+        if args.train_mode == "dual":
+            assert model_b is not None  # Guaranteed by dual mode initialization above
+            red_lstm_state = model_b.initial_state(batch_size=red_batch_size, device=device)
+        else:
+            red_lstm_state = model.initial_state(batch_size=red_batch_size, device=device)
+
+    # Track effective train mode (can change with --selfplay-after-games)
+    effective_train_mode = args.train_mode
+
     # Compute training duration from --games, --total-steps, or --updates (in priority order)
     steps_per_update = ppo_cfg.rollout_steps * num_envs * batch_size_per_env
     target_games: int | None = None  # If set, stop when this many episodes complete
@@ -1097,7 +1144,7 @@ def main() -> None:
         episodes_at_update_start = episodes
 
         # Update opponent curriculum (heuristic mode only)
-        if args.train_mode == "heuristic":
+        if effective_train_mode == "heuristic":
             if args.opfor_ramp_games > 0:
                 # Game-based ramp (preferred - robust to batch size changes)
                 # Subtract warmup games before calculating progress
@@ -1190,8 +1237,8 @@ def main() -> None:
                             current_ep_actions[env_idx][role][slot_name] += 1
                     current_ep_action_steps[env_idx][role] += 1
 
-            # Red team (opponent)
-            if args.train_mode == "arena":
+            # Red team (opponent) - mode can be static or dynamic (selfplay-after-games)
+            if effective_train_mode == "arena":
                 if arena_opponent_is_heuristic:
                     # Lieutenant Heuristic - use heuristic actions
                     heuristic_acts_list = venv.get_heuristic_actions(red_ids)
@@ -1211,10 +1258,41 @@ def main() -> None:
                     for env_idx in range(num_envs):
                         for i, rid in enumerate(red_ids):
                             all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
-            elif args.train_mode == "heuristic":
+            elif effective_train_mode == "heuristic":
                 heuristic_acts_list = venv.get_heuristic_actions(red_ids)
                 for env_idx in range(num_envs):
                     all_actions_dicts[env_idx].update(heuristic_acts_list[env_idx])
+            elif effective_train_mode == "selfplay":
+                # Selfplay: same policy plays both teams (red uses blue's model)
+                obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
+                obs_r_torch = torch.from_numpy(obs_r_many).to(device)
+                # arena_done may be on opponent_device; convert to device for selfplay
+                red_done_tensor = arena_done.to(device)
+                with torch.no_grad():
+                    assert red_lstm_state is not None
+                    act_r, _, _, _, red_lstm_state = model.get_action_and_value(
+                        obs_r_torch, red_lstm_state, red_done_tensor
+                    )
+                act_r_np = act_r.detach().cpu().numpy()
+                for env_idx in range(num_envs):
+                    for i, rid in enumerate(red_ids):
+                        all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
+            elif effective_train_mode == "dual":
+                # Dual: two separate policies (red uses model_b, which is on device)
+                obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
+                obs_r_torch = torch.from_numpy(obs_r_many).to(device)
+                # arena_done may be on opponent_device; convert to device for dual
+                red_done_tensor = arena_done.to(device)
+                with torch.no_grad():
+                    assert model_b is not None
+                    assert red_lstm_state is not None
+                    act_r, _, _, _, red_lstm_state = model_b.get_action_and_value(
+                        obs_r_torch, red_lstm_state, red_done_tensor
+                    )
+                act_r_np = act_r.detach().cpu().numpy()
+                for env_idx in range(num_envs):
+                    for i, rid in enumerate(red_ids):
+                        all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
 
             # Step environments
             next_obs_dicts, rewards_list, terminations_list, truncations_list, infos_list = venv.step(
@@ -1478,6 +1556,18 @@ def main() -> None:
                     episodes += 1
                     env_episode_counts[env_idx] += 1
 
+                    # Check for heuristic -> selfplay transition
+                    if (
+                        effective_train_mode == "heuristic"
+                        and args.selfplay_after_games > 0
+                        and episodes >= args.selfplay_after_games
+                    ):
+                        effective_train_mode = "selfplay"
+                        # Initialize LSTM state for red team now that we're switching to selfplay
+                        red_batch_size = len(red_ids) * num_envs
+                        red_lstm_state = model.initial_state(batch_size=red_batch_size, device=device)
+                        print(f"\n🎯 Transitioned to SELFPLAY mode after {episodes} games\n")
+
                     # Reset environment
                     reset_obs, _ = venv.reset(
                         [args.seed + env_idx * 1_000_000 + env_episode_counts[env_idx]], indices=[env_idx]
@@ -1625,12 +1715,16 @@ def main() -> None:
         zone_stats = compute_zone_stats(recent_zone)
 
         # Print primary line
-        if args.train_mode == "heuristic":
+        if effective_train_mode == "heuristic":
             opfor_str = f" | opfor {current_weapon_prob:.0%}"
-        elif args.train_mode == "arena" and arena_opponent_id:
+        elif effective_train_mode == "arena" and arena_opponent_id:
             # Show current arena opponent
             opp_name = "Lt. Heuristic" if arena_opponent_is_heuristic else arena_opponent_id[:12]
             opfor_str = f" | vs {opp_name}"
+        elif effective_train_mode == "selfplay":
+            opfor_str = " | selfplay"
+        elif effective_train_mode == "dual":
+            opfor_str = " | dual (vs model_b)"
         else:
             opfor_str = ""
         episodes_this_update = episodes - episodes_at_update_start
@@ -1885,10 +1979,13 @@ def main() -> None:
                 for slot in ACTION_SLOTS:
                     wandb_metrics[f"actions/{role}/{slot}"] = avg_actions_by_role[role][slot]
             # Add opponent curriculum metrics
-            if args.train_mode == "heuristic":
+            if effective_train_mode == "heuristic":
                 wandb_metrics["curriculum/opfor_weapon_prob"] = current_weapon_prob
             # Add formation mode (0=CLOSE, 1=STANDARD, 2=LOOSE)
             wandb_metrics["curriculum/formation_mode"] = formation_idx
+            # Track effective training mode (0=heuristic, 1=selfplay, 2=dual, 3=arena)
+            mode_map = {"heuristic": 0, "selfplay": 1, "dual": 2, "arena": 3}
+            wandb_metrics["curriculum/train_mode"] = mode_map.get(effective_train_mode, 0)
             # Add combat statistics
             wandb_metrics.update({f"combat/{k}": v for k, v in combat_stats.items()})
             # Add zone control metrics
