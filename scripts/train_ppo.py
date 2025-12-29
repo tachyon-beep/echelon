@@ -674,6 +674,12 @@ def parse_args() -> argparse.Namespace:
     if args.wandb_project and args.wandb_mode == "disabled":
         args.wandb_mode = "online"
 
+    # Validate flag combinations
+    if args.selfplay_after_games > 0 and args.train_mode != "heuristic":
+        raise ValueError("--selfplay-after-games only works with --train-mode heuristic")
+    if args.model_b is not None and args.train_mode != "dual":
+        raise ValueError("--model-b only works with --train-mode dual")
+
     return args
 
 
@@ -906,12 +912,17 @@ def main() -> None:
     if args.train_mode == "dual":
         model_b = ActorCriticLSTM(obs_dim=obs_dim, action_dim=action_dim).to(device)
         if args.model_b is not None:
-            # Load from provided checkpoint
+            # Load from provided checkpoint (explicit --model-b flag)
             ckpt_b = torch.load(args.model_b, map_location=device, weights_only=True)
             model_b.load_state_dict(ckpt_b["model_state"])
             print(f"Loaded model_b from {args.model_b}")
+        elif resume_ckpt is not None and "model_b_state" in resume_ckpt:
+            # Load from resume checkpoint (saved from previous dual mode run)
+            model_b.load_state_dict(resume_ckpt["model_b_state"])
+            print("Loaded model_b from resume checkpoint")
         else:
             print("Dual mode: model_b initialized fresh (no checkpoint provided)")
+        model_b.eval()  # Set to eval mode (no dropout/batchnorm training)
 
     # Red team LSTM state for selfplay/dual modes (same size as arena opponent state)
     # Note: red team done tracking uses arena_done_np which exists for all modes
@@ -1058,7 +1069,9 @@ def main() -> None:
     arena_opponent: ActorCriticLSTM | None = None
     arena_opponent_is_heuristic: bool = False
     arena_lstm_state = None
-    arena_done = torch.zeros(num_envs * len(red_ids), device=opponent_device)
+    # Device for red team done tracking: selfplay/dual use learning device, arena uses opponent_device
+    red_done_device = device if args.train_mode in ("selfplay", "dual") else opponent_device
+    arena_done = torch.zeros(num_envs * len(red_ids), device=red_done_device)
 
     def env_signature(cfg: EnvConfig) -> dict:
         d = asdict(cfg)
@@ -1266,30 +1279,28 @@ def main() -> None:
                 # Selfplay: same policy plays both teams (red uses blue's model)
                 obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
                 obs_r_torch = torch.from_numpy(obs_r_many).to(device)
-                # arena_done may be on opponent_device; convert to device for selfplay
-                red_done_tensor = arena_done.to(device)
+                # arena_done is on red_done_device (learning device for selfplay)
                 with torch.no_grad():
                     assert red_lstm_state is not None
                     act_r, _, _, _, red_lstm_state = model.get_action_and_value(
-                        obs_r_torch, red_lstm_state, red_done_tensor
+                        obs_r_torch, red_lstm_state, arena_done
                     )
-                act_r_np = act_r.detach().cpu().numpy()
+                act_r_np = act_r.cpu().numpy()
                 for env_idx in range(num_envs):
                     for i, rid in enumerate(red_ids):
                         all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
             elif effective_train_mode == "dual":
-                # Dual: two separate policies (red uses model_b, which is on device)
+                # Dual: two separate policies (red uses model_b on learning device)
                 obs_r_many = stack_obs_many(next_obs_dicts, red_ids)
                 obs_r_torch = torch.from_numpy(obs_r_many).to(device)
-                # arena_done may be on opponent_device; convert to device for dual
-                red_done_tensor = arena_done.to(device)
+                # arena_done is on red_done_device (learning device for dual)
                 with torch.no_grad():
                     assert model_b is not None
                     assert red_lstm_state is not None
                     act_r, _, _, _, red_lstm_state = model_b.get_action_and_value(
-                        obs_r_torch, red_lstm_state, red_done_tensor
+                        obs_r_torch, red_lstm_state, arena_done
                     )
-                act_r_np = act_r.detach().cpu().numpy()
+                act_r_np = act_r.cpu().numpy()
                 for env_idx in range(num_envs):
                     for i, rid in enumerate(red_ids):
                         all_actions_dicts[env_idx][rid] = act_r_np[env_idx * len(red_ids) + i]
@@ -1398,8 +1409,12 @@ def main() -> None:
                     else:
                         termination_type = reason  # Future-proof for new reasons
                     opponent_id: str
-                    if args.train_mode == "arena" and arena_opponent_id is not None:
+                    if effective_train_mode == "arena" and arena_opponent_id is not None:
                         opponent_id = arena_opponent_id
+                    elif effective_train_mode == "selfplay":
+                        opponent_id = "selfplay"
+                    elif effective_train_mode == "dual":
+                        opponent_id = "model_b"
                     else:
                         opponent_id = "heuristic"
                     # Extract zone ticks from outcome stats for match record
@@ -1566,6 +1581,11 @@ def main() -> None:
                         # Initialize LSTM state for red team now that we're switching to selfplay
                         red_batch_size = len(red_ids) * num_envs
                         red_lstm_state = model.initial_state(batch_size=red_batch_size, device=device)
+                        # Force LSTM reset on all envs by marking all red agents as done
+                        # This ensures clean state transition even for mid-episode envs
+                        # Use learning device since selfplay uses the main model
+                        red_done_device = device
+                        arena_done = torch.ones(num_envs * len(red_ids), device=device)
                         print(f"\n🎯 Transitioned to SELFPLAY mode after {episodes} games\n")
 
                     # Reset environment
@@ -1587,7 +1607,7 @@ def main() -> None:
 
             buffer.rewards[step] = torch.from_numpy(rewards_flat).to(device)
             next_done = torch.from_numpy(done_flat).to(device)
-            arena_done = torch.from_numpy(arena_done_np).to(opponent_device)
+            arena_done = torch.from_numpy(arena_done_np).to(red_done_device)
             next_obs = torch.from_numpy(stack_obs_many(next_obs_dicts, blue_ids)).to(device)
 
         # Action statistics for this update
@@ -1841,7 +1861,7 @@ def main() -> None:
                 best_updated = True
                 best_win_rate = win_rate
                 best_mean_hp_margin = mean_hp_margin
-                best_ckpt = {
+                best_ckpt: dict[str, Any] = {
                     "update": update,
                     "global_step": global_step,
                     "episodes": episodes,
@@ -1854,6 +1874,8 @@ def main() -> None:
                     "obs_dim": obs_dim,
                     "action_dim": action_dim,
                 }
+                if model_b is not None:
+                    best_ckpt["model_b_state"] = model_b.state_dict()
                 best_pt = run_dir / "best.pt"
                 torch.save(best_ckpt, best_pt)
                 best_snapshot = str(best_pt)
@@ -1893,7 +1915,7 @@ def main() -> None:
         # Periodic checkpointing
         saved_ckpt: str | None = None
         if args.save_every > 0 and update % args.save_every == 0:
-            ckpt = {
+            ckpt: dict[str, Any] = {
                 "update": update,
                 "global_step": global_step,
                 "episodes": episodes,
@@ -1905,6 +1927,8 @@ def main() -> None:
                 "obs_dim": obs_dim,
                 "action_dim": action_dim,
             }
+            if model_b is not None:
+                ckpt["model_b_state"] = model_b.state_dict()
             p = run_dir / f"ckpt_{update:05d}.pt"
             torch.save(ckpt, p)
             saved_ckpt = str(p)
