@@ -61,10 +61,14 @@ class HeuristicPolicy:
         desired_range: float = 5.5,
         approach_speed_scale: float = 1.0,
         weapon_fire_prob: float = 0.5,
+        warmup_steps: int = 0,
+        noop_prob: float = 0.0,
     ):
         self.desired_range = float(desired_range)
         self.approach_speed_scale = float(approach_speed_scale)
         self.weapon_fire_prob = float(weapon_fire_prob)
+        self.warmup_steps = int(warmup_steps)
+        self.noop_prob = float(noop_prob)
         # State tracking: {mid: {"last_pos": np.array, "stuck_timer": float, "maneuver": str, "maneuver_timer": float}}
         self.states: dict[str, dict] = {}
 
@@ -78,6 +82,14 @@ class HeuristicPolicy:
 
         mech = sim.mechs[mech_id]
         if not mech.alive:
+            return np.zeros(env.ACTION_DIM, dtype=np.float32)
+
+        # Warmup period: return NOOP for first N steps
+        if self.warmup_steps > 0 and env.step_count < self.warmup_steps:
+            return np.zeros(env.ACTION_DIM, dtype=np.float32)
+
+        # Random NOOP chance: fragments formations by making some mechs pause
+        if self.noop_prob > 0.0 and env.rng.random() < self.noop_prob:
             return np.zeros(env.ACTION_DIM, dtype=np.float32)
 
         zone_center: np.ndarray | None = None

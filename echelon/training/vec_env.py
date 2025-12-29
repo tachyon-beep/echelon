@@ -51,7 +51,13 @@ def _env_worker(remote: Connection, env_fn, env_cfg: EnvConfig, initial_weapon_p
         from echelon.agents.heuristic import HeuristicPolicy
 
         env = env_fn(env_cfg)
-        heuristic = HeuristicPolicy(weapon_fire_prob=initial_weapon_prob)
+        # Heuristic warmup: wait 50 steps before moving (gives policy time to maneuver)
+        # Heuristic NOOP: 10% chance per mech per step (fragments formations)
+        heuristic = HeuristicPolicy(
+            weapon_fire_prob=initial_weapon_prob,
+            warmup_steps=50,
+            noop_prob=0.10,
+        )
 
         # Store base config for curriculum modifications
         base_env_cfg = env_cfg
