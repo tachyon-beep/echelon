@@ -52,8 +52,8 @@ class RewardWeights:
     - Combat in zone: ~40 pts (kills + damage, 2x multiplier) - PRIMARY
     - Zone presence: ~20 pts (0.1 per step x 200 steps) - tiebreaker only
     - Arrival bonus: 2 pts (one-time for reaching zone)
-    - Deaths hurt: -0.05 in zone, -0.2 outside (token penalty - lost future
-      combat opportunities is the real cost of dying)
+    - Deaths hurt: -0.05 in zone (acceptable), -1.0 outside (don't wander off)
+      Lost future combat is the real cost; explicit penalty adds gradient
     """
 
     # Zone-based rewards (SECONDARY to combat when in zone)
@@ -80,11 +80,11 @@ class RewardWeights:
     # Reduced from 1.0: 30% team reward helps credit assignment
     team_reward_alpha: float = 0.7  # 1.0 = individual, 0.0 = team average
 
-    # Zone-centric combat multipliers (2025-12-28 v4)
+    # Zone-centric combat multipliers (2025-12-30 v5)
     # Philosophy: Fight for the zone, don't die outside it
     in_zone_damage_mult: float = 2.0  # 2x damage/kill/assist IN zone
-    in_zone_death_mult: float = 0.5  # 0.5x death penalty IN zone (still hurts)
-    out_zone_death_mult: float = 2.0  # 2x death penalty OUTSIDE zone (expensive)
+    in_zone_death_mult: float = 0.5  # 0.5x death penalty IN zone (acceptable - died fighting)
+    out_zone_death_mult: float = 10.0  # 10x death penalty OUTSIDE zone (don't wander off and die)
 
     # Paint/support bonuses - scouts who paint targets help the team
     paint_assist_bonus: float = 1.0  # Bonus when teammate uses your paint lock
