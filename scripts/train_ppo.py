@@ -10,6 +10,10 @@ Usage:
 
     # With curriculum schedules (recommended for long runs):
     uv run python scripts/train_ppo.py --lr 3e-4 --lr-decay 0.9 --ent-coef 0.05 --ent-decay 0.9
+
+    # Game-based curriculum (recommended for long training runs):
+    #   --opfor-weapon-start 0.15 --opfor-ramp-games 500000 --games 2000000
+    #   (Ramps over 25% of training, invariant to batch size)
 """
 
 from __future__ import annotations
