@@ -6,7 +6,15 @@ with various edge cases and multi-step scenarios.
 
 import torch
 
-from echelon.training.rollout import RolloutBuffer
+from echelon.constants import PACK_SIZE
+from echelon.training.rollout import (
+    ROLE_HEAVY,
+    ROLE_LIGHT,
+    ROLE_MEDIUM,
+    ROLE_SCOUT,
+    RolloutBuffer,
+    compute_role_indices,
+)
 
 
 class TestRolloutBufferCreation:
@@ -492,3 +500,110 @@ class TestRolloutBufferIntegration:
         assert buffer.returns is not None
         assert buffer.advantages.device.type == "cuda"
         assert buffer.returns.device.type == "cuda"
+
+
+class TestComputeRoleIndices:
+    """Test compute_role_indices for per-role advantage normalization."""
+
+    def test_single_pack_role_assignment(self):
+        """Test role assignment for a single pack (6 agents)."""
+        device = torch.device("cpu")
+        # 1 pack = 6 agents per env, 1 env
+        role_indices = compute_role_indices(num_agents=6, num_envs=1, device=device)
+
+        # Pack structure: Scout(0), Light(1), Medium(2,3), Heavy(4), PackLeader(5)
+        assert role_indices[0] == ROLE_SCOUT  # idx 0 = Scout
+        assert role_indices[1] == ROLE_LIGHT  # idx 1 = Light
+        assert role_indices[2] == ROLE_MEDIUM  # idx 2 = Medium A
+        assert role_indices[3] == ROLE_MEDIUM  # idx 3 = Medium B
+        assert role_indices[4] == ROLE_HEAVY  # idx 4 = Heavy
+        assert role_indices[5] == ROLE_LIGHT  # idx 5 = Pack Leader (light-equivalent)
+
+    def test_two_packs_role_assignment(self):
+        """Test role assignment for two packs (12 agents in packs)."""
+        device = torch.device("cpu")
+        # 2 packs = 12 agents in packs, 1 env (no squad leader in this test)
+        role_indices = compute_role_indices(num_agents=12, num_envs=1, device=device)
+
+        # Pack A (indices 0-5)
+        assert role_indices[0] == ROLE_SCOUT
+        assert role_indices[1] == ROLE_LIGHT
+        assert role_indices[2] == ROLE_MEDIUM
+        assert role_indices[3] == ROLE_MEDIUM
+        assert role_indices[4] == ROLE_HEAVY
+        assert role_indices[5] == ROLE_LIGHT  # Pack Leader
+
+        # Pack B (indices 6-11)
+        assert role_indices[6] == ROLE_SCOUT
+        assert role_indices[7] == ROLE_LIGHT
+        assert role_indices[8] == ROLE_MEDIUM
+        assert role_indices[9] == ROLE_MEDIUM
+        assert role_indices[10] == ROLE_HEAVY
+        assert role_indices[11] == ROLE_LIGHT  # Pack Leader
+
+    def test_squad_with_squad_leader(self):
+        """Test role assignment for a full squad (2 packs + squad leader = 13 agents).
+
+        This is the key test for the bug fix: squad leader at index 12 should be
+        classified as ROLE_MEDIUM, not ROLE_SCOUT (which would happen if we just
+        used i % PACK_SIZE = 12 % 6 = 0 = PACK_SCOUT_IDX).
+        """
+        device = torch.device("cpu")
+        # 2 packs + 1 squad leader = 13 agents per env, 1 env
+        role_indices = compute_role_indices(num_agents=13, num_envs=1, device=device)
+
+        # Pack A (indices 0-5)
+        assert role_indices[0] == ROLE_SCOUT
+        assert role_indices[5] == ROLE_LIGHT  # Pack Leader
+
+        # Pack B (indices 6-11)
+        assert role_indices[6] == ROLE_SCOUT
+        assert role_indices[11] == ROLE_LIGHT  # Pack Leader
+
+        # Squad Leader (index 12) - the critical test case
+        # This is a medium-equivalent chassis, NOT a scout
+        assert role_indices[12] == ROLE_MEDIUM, (
+            f"Squad leader at index 12 should be ROLE_MEDIUM ({ROLE_MEDIUM}), "
+            f"got {role_indices[12].item()} (ROLE_SCOUT={ROLE_SCOUT})"
+        )
+
+    def test_multiple_envs_with_squad_leader(self):
+        """Test role assignment is correct across multiple environments."""
+        device = torch.device("cpu")
+        # 2 envs x 13 agents = 26 total agents
+        role_indices = compute_role_indices(num_agents=26, num_envs=2, device=device)
+
+        # Env 0: indices 0-12
+        assert role_indices[0] == ROLE_SCOUT  # Env 0, Pack A, Scout
+        assert role_indices[12] == ROLE_MEDIUM  # Env 0, Squad Leader
+
+        # Env 1: indices 13-25
+        assert role_indices[13] == ROLE_SCOUT  # Env 1, Pack A, Scout
+        assert role_indices[25] == ROLE_MEDIUM  # Env 1, Squad Leader
+
+    def test_role_counts_single_pack(self):
+        """Test correct number of each role in a single pack."""
+        device = torch.device("cpu")
+        role_indices = compute_role_indices(num_agents=6, num_envs=1, device=device)
+
+        # 1 Scout, 2 Light (including pack leader), 2 Medium, 1 Heavy
+        assert (role_indices == ROLE_SCOUT).sum() == 1
+        assert (role_indices == ROLE_LIGHT).sum() == 2
+        assert (role_indices == ROLE_MEDIUM).sum() == 2
+        assert (role_indices == ROLE_HEAVY).sum() == 1
+
+    def test_role_counts_squad_with_leader(self):
+        """Test correct number of each role in a full squad."""
+        device = torch.device("cpu")
+        role_indices = compute_role_indices(num_agents=13, num_envs=1, device=device)
+
+        # 2 packs: 2 Scouts, 4 Light, 4 Medium (in packs), 2 Heavy
+        # + 1 Squad Leader (medium) = 5 Medium total
+        assert (role_indices == ROLE_SCOUT).sum() == 2
+        assert (role_indices == ROLE_LIGHT).sum() == 4
+        assert (role_indices == ROLE_MEDIUM).sum() == 5  # 4 in packs + 1 squad leader
+        assert (role_indices == ROLE_HEAVY).sum() == 2
+
+    def test_pack_size_constant_matches(self):
+        """Verify PACK_SIZE constant is what we expect."""
+        assert PACK_SIZE == 6, "Tests assume PACK_SIZE=6"

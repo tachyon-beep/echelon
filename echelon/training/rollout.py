@@ -52,11 +52,22 @@ def compute_role_indices(num_agents: int, num_envs: int, device: torch.device) -
     agents_per_env = num_agents // num_envs
     role_indices = torch.zeros(num_agents, dtype=torch.int64, device=device)
 
+    # Detect squad structure: squad leader exists when num_packs >= 2
+    num_packs = agents_per_env // PACK_SIZE
+    total_in_packs = num_packs * PACK_SIZE
+    has_squad_leader = num_packs >= 2 and agents_per_env > total_in_packs
+
     for env_idx in range(num_envs):
         base = env_idx * agents_per_env
         for i in range(agents_per_env):
-            idx_in_pack = i % PACK_SIZE
             agent_idx = base + i
+
+            # Squad leader is the last mech after all packs (medium-equivalent chassis)
+            if has_squad_leader and i == total_in_packs:
+                role_indices[agent_idx] = ROLE_MEDIUM
+                continue
+
+            idx_in_pack = i % PACK_SIZE
 
             if idx_in_pack == PACK_SCOUT_IDX:
                 role_indices[agent_idx] = ROLE_SCOUT
@@ -67,7 +78,7 @@ def compute_role_indices(num_agents: int, num_envs: int, device: torch.device) -
             elif idx_in_pack == PACK_HEAVY_IDX:
                 role_indices[agent_idx] = ROLE_HEAVY
             else:
-                # Fallback for squad leader or other indices
+                # Fallback (shouldn't reach here with valid pack structure)
                 role_indices[agent_idx] = ROLE_MEDIUM
 
     return role_indices
